@@ -3,6 +3,8 @@ name = "dc-i86-llm-forecast"
 version = "0.1.0"
 description = "Independent agentic forecasts of DC Initiative 86 (foie gras) and what follows, pooled through a causal map"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = ["numpy>=2.0", "pyyaml>=6.0"]
 
 [project.optional-dependencies]

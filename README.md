@@ -161,3 +161,7 @@ Each run's summary row shows two copying diagnostics: the share of its answers t
 every cell, and identical at 49.5% and 50.5%. Quantity tails beyond the 5th and 95th percentiles extend
 the neighbouring slope, so means of heavy right tails are understated. Count distributions treat their
 top label (`5+`) as 5 in means.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
