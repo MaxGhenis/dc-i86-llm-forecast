@@ -1,0 +1,685 @@
+{
+ "forecaster": {
+  "model": null,
+  "prior_context": null,
+  "notes": null
+ },
+ "research_summary": null,
+ "nodes": {
+  "yes_share": {
+   "forecasts": {
+    "all": {
+     "le_30": null,
+     "le_35": null,
+     "le_40": null,
+     "le_45": null,
+     "le_47": null,
+     "le_48": null,
+     "le_49": null,
+     "le_50": null,
+     "le_51": null,
+     "le_52": null,
+     "le_53": null,
+     "le_55": null,
+     "le_60": null,
+     "le_65": null,
+     "le_70": null,
+     "le_75": null,
+     "le_80": null,
+     "le_85": null,
+     "le_90": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "turnout": {
+   "forecasts": {
+    "all": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "denver_io311_passes": {
+   "forecasts": {
+    "yes_42.0": {
+     "p": null
+    },
+    "yes_49.5": {
+     "p": null
+    },
+    "yes_50.5": {
+     "p": null
+    },
+    "yes_60.0": {
+     "p": null
+    },
+    "yes_72.0": {
+     "p": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "ban_status": {
+   "forecasts": {
+    "yes_50.5": {
+     "repealed": null,
+     "congress": null,
+     "court": null,
+     "unfunded": null,
+     "applies": null
+    },
+    "yes_60.0": {
+     "repealed": null,
+     "congress": null,
+     "court": null,
+     "unfunded": null,
+     "applies": null
+    },
+    "yes_72.0": {
+     "repealed": null,
+     "congress": null,
+     "court": null,
+     "unfunded": null,
+     "applies": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "lawsuit_filed": {
+   "forecasts": {
+    "yes_50.5": {
+     "p": null
+    },
+    "yes_60.0": {
+     "p": null
+    },
+    "yes_72.0": {
+     "p": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "fattened_narrowed": {
+   "forecasts": {
+    "all": {
+     "p": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "pate_treated_banned": {
+   "forecasts": {
+    "narrowed": {
+     "p": null
+    },
+    "not_narrowed": {
+     "p": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "foie_gras_menus": {
+   "baseline": {
+    "value": null,
+    "as_of": null,
+    "source": null
+   },
+   "forecasts": {
+    "failed": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "removed": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "unfunded": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "applies": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "liver_pate_menus": {
+   "baseline": {
+    "value": null,
+    "as_of": null,
+    "source": null
+   },
+   "forecasts": {
+    "failed": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "not_applied": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "applies_pate_allowed": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "applies_pate_banned": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "us_ducks_force_fed_2030": {
+   "baseline": {
+    "value": null,
+    "as_of": null,
+    "source": null
+   },
+   "forecasts": {
+    "failed": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "not_applied": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "applies": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "dc_restaurant_employment_2029": {
+   "baseline": {
+    "value": null,
+    "as_of": null,
+    "source": null
+   },
+   "forecasts": {
+    "failed": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "not_applied": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "applies": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "dc_restaurant_sales_tax_fy2029": {
+   "baseline": {
+    "value": null,
+    "as_of": null,
+    "source": null
+   },
+   "forecasts": {
+    "failed": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "not_applied": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "applies": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "dc_michelin_starred_2029": {
+   "baseline": {
+    "value": null,
+    "as_of": null,
+    "source": null
+   },
+   "forecasts": {
+    "failed": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "not_applied": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "applies": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "dc_animal_initiative_filed": {
+   "forecasts": {
+    "yes_42.0": {
+     "p": null
+    },
+    "yes_49.5": {
+     "p": null
+    },
+    "yes_50.5": {
+     "p": null
+    },
+    "yes_60.0": {
+     "p": null
+    },
+    "yes_72.0": {
+     "p": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "dc_another_animal_law": {
+   "forecasts": {
+    "yes_42.0|filed": {
+     "p": null
+    },
+    "yes_42.0|not_filed": {
+     "p": null
+    },
+    "yes_49.5|filed": {
+     "p": null
+    },
+    "yes_49.5|not_filed": {
+     "p": null
+    },
+    "yes_50.5|filed": {
+     "p": null
+    },
+    "yes_50.5|not_filed": {
+     "p": null
+    },
+    "yes_60.0|filed": {
+     "p": null
+    },
+    "yes_60.0|not_filed": {
+     "p": null
+    },
+    "yes_72.0|filed": {
+     "p": null
+    },
+    "yes_72.0|not_filed": {
+     "p": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "dc_council_farmed_animal_bills": {
+   "forecasts": {
+    "yes_42.0": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "yes_49.5": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "yes_50.5": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "yes_60.0": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "yes_72.0": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "paf_measures_2027_2028": {
+   "forecasts": {
+    "yes_42.0|denver_pass": {
+     "0": null,
+     "1": null,
+     "2": null,
+     "3": null,
+     "4": null,
+     "5+": null
+    },
+    "yes_42.0|denver_fail": {
+     "0": null,
+     "1": null,
+     "2": null,
+     "3": null,
+     "4": null,
+     "5+": null
+    },
+    "yes_49.5|denver_pass": {
+     "0": null,
+     "1": null,
+     "2": null,
+     "3": null,
+     "4": null,
+     "5+": null
+    },
+    "yes_49.5|denver_fail": {
+     "0": null,
+     "1": null,
+     "2": null,
+     "3": null,
+     "4": null,
+     "5+": null
+    },
+    "yes_50.5|denver_pass": {
+     "0": null,
+     "1": null,
+     "2": null,
+     "3": null,
+     "4": null,
+     "5+": null
+    },
+    "yes_50.5|denver_fail": {
+     "0": null,
+     "1": null,
+     "2": null,
+     "3": null,
+     "4": null,
+     "5+": null
+    },
+    "yes_60.0|denver_pass": {
+     "0": null,
+     "1": null,
+     "2": null,
+     "3": null,
+     "4": null,
+     "5+": null
+    },
+    "yes_60.0|denver_fail": {
+     "0": null,
+     "1": null,
+     "2": null,
+     "3": null,
+     "4": null,
+     "5+": null
+    },
+    "yes_72.0|denver_pass": {
+     "0": null,
+     "1": null,
+     "2": null,
+     "3": null,
+     "4": null,
+     "5+": null
+    },
+    "yes_72.0|denver_fail": {
+     "0": null,
+     "1": null,
+     "2": null,
+     "3": null,
+     "4": null,
+     "5+": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "paf_statewide_2028": {
+   "forecasts": {
+    "yes_42.0|denver_pass": {
+     "p": null
+    },
+    "yes_42.0|denver_fail": {
+     "p": null
+    },
+    "yes_49.5|denver_pass": {
+     "p": null
+    },
+    "yes_49.5|denver_fail": {
+     "p": null
+    },
+    "yes_50.5|denver_pass": {
+     "p": null
+    },
+    "yes_50.5|denver_fail": {
+     "p": null
+    },
+    "yes_60.0|denver_pass": {
+     "p": null
+    },
+    "yes_60.0|denver_fail": {
+     "p": null
+    },
+    "yes_72.0|denver_pass": {
+     "p": null
+    },
+    "yes_72.0|denver_fail": {
+     "p": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "us_new_coverage_2027_2032": {
+   "forecasts": {
+    "yes_42.0|statewide": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "yes_42.0|no_statewide": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "yes_49.5|statewide": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "yes_49.5|no_statewide": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "yes_50.5|statewide": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "yes_50.5|no_statewide": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "yes_60.0|statewide": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "yes_60.0|no_statewide": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "yes_72.0|statewide": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "yes_72.0|no_statewide": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "other_foie_gras_bans_2030": {
+   "baseline": {
+    "value": null,
+    "as_of": null,
+    "source": null
+   },
+   "forecasts": {
+    "yes_49.5": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    },
+    "yes_50.5": {
+     "p05": null,
+     "p25": null,
+     "p50": null,
+     "p75": null,
+     "p95": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "federal_preemption_2030": {
+   "forecasts": {
+    "yes_49.5": {
+     "p": null
+    },
+    "yes_50.5": {
+     "p": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  },
+  "dc_bans_other_food_2030": {
+   "forecasts": {
+    "yes_49.5": {
+     "p": null
+    },
+    "yes_50.5": {
+     "p": null
+    }
+   },
+   "reasoning": null,
+   "sources": []
+  }
+ }
+}
