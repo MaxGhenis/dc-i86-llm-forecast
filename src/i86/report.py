@@ -53,7 +53,8 @@ def cell(graph: Graph, key: str, entry: dict, condition: str, total_runs: int) -
         return "n/a"
     if desc is None:
         return "–"
-    note = f" ({desc['runs']} of {total_runs} runs)" if desc.get("runs", total_runs) < total_runs else ""
+    shown = given if given is not None else desc
+    note = f" ({shown['runs']} of {total_runs} runs)" if shown.get("runs", total_runs) < total_runs else ""
     if "p" in desc:
         if given is not None and abs(given["p"] - desc["p"]) > 0.005:
             return f"{_p(given)} (joint {_p(desc)}){note}"
@@ -145,13 +146,18 @@ def markdown(graph: Graph, result: dict, meta: dict) -> str:
     lines += [
         "For a question defined only under a condition (the measure passing, or the ban still standing), a "
         "cell shows the probability given that condition, and the joint probability P(condition and event) "
-        "in parentheses where the two differ. The cutoff effect and the per-ballot figure use the joint. "
-        "'n/a' marks conditions where the question is undefined. `certified` means the CFO's section 8(b) "
-        "certification by 2028-12-01, not a legal finding about when the ban is enforceable.",
+        "in parentheses where the two differ. The conditional is each forecaster's own, from draws "
+        "restricted to worlds where the condition holds and weighted by that forecaster's probability of "
+        "it, so every forecaster that gives the condition any probability counts equally. The cutoff "
+        "effect and the per-ballot figure use the joint. 'n/a' marks conditions where the question is "
+        "undefined; '(k of n runs)' marks a cell to which only k forecasters contribute. `certified` "
+        "means the CFO's section 8(b) certification by 2028-12-01, not a legal finding about when the "
+        "ban is enforceable.",
         "",
-        "† Asked only at a bare fail and a bare pass (49.5% and 50.5%). The Fails and Passes columns use "
-        "those answers for every failing and every passing margin, so for these questions they carry no "
-        "information about larger margins.",
+        "† Asked only at a bare fail and a bare pass (49.5% and 50.5%). The Fails and Passes columns apply "
+        "those answers at every failing and every passing margin. They still vary with the margin through "
+        "upstream questions answered at every cell, such as the ban's status, but not through the "
+        "question's own answers.",
         "",
         "In count distributions the top label ('5+') counts as 5 in means. Quantity tails beyond the 5th "
         "and 95th percentiles continue the neighbouring segment's slope, so means of heavy right tails are "

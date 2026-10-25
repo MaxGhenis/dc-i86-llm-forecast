@@ -5,9 +5,13 @@ answers and the operator's notes. The prompt forbids reading local files; this a
 native transcript (Claude stream-json or Codex JSONL) and checks every tool call. It guards against
 accidental and casual reads, not a forecaster set on hiding them.
 
-Each call's local paths are resolved the way the shell would see them: `~` and `$HOME` expand, relative
-paths resolve against the work directory, a `cd` inside a compound command moves the base for what
-follows, and globs are expanded against the real filesystem at audit time. Then:
+Each shell command is tokenized as the shell would: quoting, `&&`, `||`, `;`, pipes, subshells,
+command substitutions and redirections (`cat <file` reads `file`). Local paths are then resolved
+against a tracked working directory: `~`, `$HOME` and simple variable assignments expand, relative
+paths resolve against the work directory, `cd`, `pushd` and `popd` (options included) move the base
+for what follows, nested `sh -c`, `eval` and wrappers such as `xargs` and `env` are parsed in turn,
+quoted paths inside `python -c` style code count, and globs are expanded against the real
+filesystem at audit time. A search command's pattern is not taken for a path. Then:
 
 - **Violations** exclude the run:
   - any resolved path, or the call's text outside URLs, inside a protected place (the repository,
@@ -42,14 +46,45 @@ HOME = Path.home()
 URL = re.compile(r"https?://[^\s'\"<>)`]+")
 # Text, outside URLs, that names a protected place.
 PROTECTED_TEXT = re.compile(
-    r"dc-i86-llm-forecast|dc-ballot|\.subfleet|\.claude\b|\.claude/|\.codex|chief-of-staff|/reviews/|"
-    r"MEMORY\.md|/memory/|\.brier|/predictions/|/private/tmp/claude-|/tmp/claude-",
+    r"dc-i86-llm-forecast|dc-ballot|\.subfleet|\.claude\b|\.codex\b|chief-of-staff|\.brier|"
+    r"(?:~|\$\{?HOME\}?|" + re.escape(str(HOME)) + r")/reviews\b|"
+    r"MEMORY\.md|/memory/|/predictions/|/private/tmp/claude-|/tmp/claude-",
     re.I,
 )
 TERMS = re.compile(r"foie|forecast|i-?86|initiative.?86|ban_status|yes_share|response\.(?:md|json)", re.I)
-SHELL_SPLIT = re.compile(r"\s*(?:&&|\|\||;|\||\n|\$\(|`|\))\s*")
+OPERATOR = re.compile(r"^[;&|()<>]+$")
+ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+VAR = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+# Path-like strings inside code (python -c '...', node -e '...'), quoted or after an opening bracket.
+EMBEDDED_PATH = re.compile(r"""(?:^|(?<=['"\s(=,:\[]))((?:~/|\.\./|\./|/)[^\s'"(),;\]]*)""")
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
+WRAPPERS = {"env", "nice", "nohup", "time", "sudo", "command", "builtin", "exec", "timeout", "stdbuf",
+            "xargs", "caffeinate", "parallel", "watch", "unbuffer"}
 NAME_SEARCH = {"find", "fd", "fdfind", "tree", "du"}
 CONTENT_SEARCH = {"rg", "ag", "ack"}
+GREP = {"grep", "egrep", "fgrep", "zgrep"}
+# Commands whose first operand is a pattern rather than a file.
+PATTERN_FIRST = GREP | CONTENT_SEARCH | {"fd", "fdfind"}
+# Options of grep, rg, ag, ack and fd that take a separate value.
+VALUE_OPTIONS = {
+    "-e", "-f", "-m", "-A", "-B", "-C", "-d", "-D", "-g", "-t", "-T", "-j", "-M", "-r", "-E", "-x", "-X",
+    "-S", "-c", "--regexp", "--file", "--max-count", "--after-context", "--before-context", "--context",
+    "--directories", "--devices", "--include", "--exclude", "--exclude-dir", "--exclude-from", "--label",
+    "--binary-files", "--glob", "--iglob", "--type", "--type-not", "--type-add", "--type-clear",
+    "--threads", "--max-columns", "--replace", "--encoding", "--max-depth", "--maxdepth",
+    "--max-filesize", "--sort", "--sortr", "--colors", "--context-separator", "--path-separator",
+    "--pre", "--pre-glob", "--engine", "--ignore-file", "--extension", "--exec", "--exec-batch",
+    "--size", "--changed-within", "--changed-before", "--owner", "--base-directory", "--search-path",
+}
+PATTERN_OPTIONS = {"-e", "-f", "--regexp", "--file"}
+# find tests whose value is a name, pattern or number, not a path.
+FIND_VALUE_TESTS = {
+    "-name", "-iname", "-path", "-ipath", "-regex", "-iregex", "-wholename", "-iwholename", "-lname",
+    "-ilname", "-type", "-xtype", "-maxdepth", "-mindepth", "-size", "-mtime", "-mmin", "-atime", "-amin",
+    "-ctime", "-cmin", "-perm", "-user", "-group", "-uid", "-gid", "-printf", "-links", "-inum",
+    "-regextype", "-fstype", "-used",
+}
+INTERPRETERS = {"python", "python3", "node", "perl", "ruby", "php", "Rscript", "osascript", "awk", "jq"}
 DISK_SEARCH = {"locate", "mdfind", "plocate", "glocate"}
 # Ways a name search's results reach another command, which can then read them.
 FEED = re.compile(r"\bxargs\b|\$\(|`|\s-(?:exec|execdir|ok|okdir)\b|\bwhile\s+read\b|\bparallel\b")
@@ -131,43 +166,252 @@ def _expand(path: Path) -> list[Path]:
     return [path]
 
 
+def _tokens(text: str) -> list[str]:
+    """Shell words and operators. Newlines and backticks become command separators."""
+    text = text.replace("`", " ; ").replace("\n", " ; ")
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:  # unbalanced quotes: fall back to plain splitting
+        return re.findall(r"[;&|()<>]+|[^\s;&|()<>]+", text)
+
+
+def _commands(tokens: list[str]) -> list[tuple[list[str], list[str]]]:
+    """Split tokens into simple commands, each as (words, files named by redirections)."""
+    out, words, redirects = [], [], []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "$" and i + 1 < len(tokens) and tokens[i + 1].startswith("("):
+            i += 1
+            continue
+        if OPERATOR.match(tok):
+            if "(" in tok or ")" in tok or not re.search(r"[<>]", tok):
+                if words or redirects:
+                    out.append((words, redirects))
+                words, redirects = [], []
+                i += 1
+                continue
+            # A redirection. A file descriptor number before it is not an argument.
+            if words and words[-1].isdigit():
+                words.pop()
+            target = tokens[i + 1] if i + 1 < len(tokens) else None
+            if target is not None and not OPERATOR.match(target):
+                here = tok.startswith("<<")  # a here-document delimiter or here-string, not a file
+                dup = tok.endswith("&") and (target.isdigit() or target == "-")
+                if not (here or dup):
+                    redirects.append(target)
+                i += 2
+                continue
+            i += 1
+            continue
+        words.append(tok)
+        i += 1
+    if words or redirects:
+        out.append((words, redirects))
+    return out
+
+
+class _Shell:
+    """What one shell command reaches: paths, searches and notes, with the working directory tracked."""
+
+    def __init__(self, workdir: Path):
+        self.workdir = workdir
+        self.cwd = workdir
+        self.oldpwd = workdir
+        self.stack: list[Path] = []
+        self.known = True  # False after a cd the audit could not follow
+        self.vars: dict[str, str] = {}
+        self.paths: list[Path] = []
+        self.searches: list[tuple[str, str, Path]] = []
+        self.notes: list[str] = []
+        self.fed = False
+
+    def expand(self, word: str) -> str:
+        def sub(m: re.Match) -> str:
+            name = m.group(1) or m.group(2)
+            if name == "HOME":
+                return str(HOME)
+            if name == "PWD":
+                return str(self.cwd)
+            if name == "OLDPWD":
+                return str(self.oldpwd)
+            return self.vars.get(name, m.group(0))
+
+        return VAR.sub(sub, word)
+
+    def resolve(self, word: str, bare: bool) -> Path | None:
+        return _resolve(self.expand(word), self.cwd, bare=bare)
+
+    def add(self, word: str, bare: bool) -> Path | None:
+        p = self.resolve(word, bare)
+        if p is not None:
+            self.paths.extend(_expand(p))
+            if not self.known and not os.path.isabs(self.expand(word).strip("'\"")) and not word.startswith("~"):
+                self.notes.append("a relative path after a cd the audit could not follow")
+        return p
+
+    def run(self, text: str) -> None:
+        self.fed = self.fed or bool(FEED.search(text))
+        for words, redirects in _commands(_tokens(text)):
+            self.command(words, redirects)
+
+    def chdir(self, target: str | None) -> None:
+        if target is None:
+            new = HOME
+        else:
+            expanded = self.expand(target)
+            if "$" in expanded:
+                self.known = False
+                self.notes.append(f"cd to {target}, which the audit cannot expand")
+                return
+            new = _resolve(expanded, self.cwd, bare=True) or self.cwd
+        self.oldpwd, self.cwd = self.cwd, new
+        self.paths.append(new)
+
+    def command(self, words: list[str], redirects: list[str]) -> None:
+        for r in redirects:
+            self.add(r, bare=True)
+        while words and ASSIGN.match(words[0]):
+            name, value = ASSIGN.match(words[0]).groups()
+            self.vars[name] = self.expand(value)
+            self.add(value, bare=False)
+            words = words[1:]
+        if not words:
+            return
+        verb = os.path.basename(self.expand(words[0]))
+        args = words[1:]
+        if verb == "export":
+            for a in args:
+                if ASSIGN.match(a):
+                    name, value = ASSIGN.match(a).groups()
+                    self.vars[name] = self.expand(value)
+                    self.add(value, bare=False)
+            return
+        if verb in SHELLS:
+            for j, a in enumerate(args):
+                if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", a) and j + 1 < len(args):
+                    self.run(args[j + 1])
+                    return
+            for a in args:
+                if not a.startswith("-"):
+                    self.add(a, bare=True)  # a script file
+            return
+        if verb == "eval":
+            self.run(" ".join(args))
+            return
+        if verb in WRAPPERS:
+            rest = list(args)
+            while rest and (rest[0].startswith("-") or ASSIGN.match(rest[0]) or re.fullmatch(r"[\d.]+[smhd]?", rest[0])
+                            or rest[0] == "{}"):
+                if verb == "xargs" and rest[0] in {"-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"} and len(rest) > 1:
+                    if rest[0] == "-a":
+                        self.add(rest[1], bare=True)
+                    rest = rest[2:]
+                    continue
+                rest = rest[1:]
+            if rest:
+                self.command(rest, [])
+            return
+        if verb in {"cd", "pushd", "chdir"}:
+            operands = [a for a in args if not (a.startswith("-") and a != "-")]
+            if verb == "pushd":
+                self.stack.append(self.cwd)
+            if operands and operands[0] == "-":
+                self.oldpwd, self.cwd = self.cwd, self.oldpwd
+                self.paths.append(self.cwd)
+            else:
+                self.chdir(operands[0] if operands else None)
+            return
+        if verb == "popd":
+            if self.stack:
+                self.oldpwd, self.cwd = self.cwd, self.stack.pop()
+            return
+
+        bare = self.cwd != self.workdir
+        skip: set[int] = set()
+        roots: list[Path] = []
+        if verb in PATTERN_FIRST:
+            positional = []
+            has_pattern_option = False
+            j = 0
+            while j < len(args):
+                a = args[j]
+                if a == "--":
+                    positional += list(range(j + 1, len(args)))
+                    break
+                if a.startswith("-") and a != "-":
+                    name = a.split("=", 1)[0]
+                    if name in PATTERN_OPTIONS or re.fullmatch(r"-[a-zA-Z]*[ef].*", a) and not a.startswith("--"):
+                        has_pattern_option = True
+                    if a in VALUE_OPTIONS and j + 1 < len(args):
+                        if a in {"-f", "--file", "--ignore-file", "--exclude-from", "--base-directory",
+                                 "--search-path"}:
+                            self.add(args[j + 1], bare=True)
+                        skip.add(j + 1)
+                        j += 2
+                        continue
+                    if "=" in a:
+                        self.add(a.split("=", 1)[1], bare=False)
+                    j += 1
+                    continue
+                positional.append(j)
+                j += 1
+            if positional and not has_pattern_option:
+                skip.add(positional[0])
+                positional = positional[1:]
+            operands = [args[k] for k in positional]
+            recursive_grep = verb in GREP and any(
+                re.match(r"-[a-zA-Z]*[rR]", a) or a in {"--recursive", "--dereference-recursive"} for a in args)
+            if verb in CONTENT_SEARCH or recursive_grep or verb in {"fd", "fdfind"}:
+                roots = [p for a in operands for p in [self.resolve(a, bare=True)] if p is not None] or [self.cwd]
+                kind = "names" if verb in {"fd", "fdfind"} and not self.fed else "content"
+                self.searches += [(verb, kind, r) for r in roots]
+        elif verb == "find":
+            j = 0
+            while j < len(args) and args[j] in {"-H", "-L", "-P"}:
+                j += 1
+            start = j
+            while j < len(args) and not (args[j].startswith("-") or args[j] in {"(", "!", ","}):
+                j += 1
+            roots = [p for a in args[start:j] for p in [self.resolve(a, bare=True)] if p is not None] or [self.cwd]
+            for k in range(j, len(args)):
+                if args[k] in FIND_VALUE_TESTS and k + 1 < len(args):
+                    skip.add(k + 1)
+            self.searches += [(verb, "content" if self.fed else "names", r) for r in roots]
+        elif verb in {"tree", "du"} or (verb == "ls" and any(re.match(r"-[a-zA-Z]*R", a) for a in args)):
+            operands = [a for a in args if not a.startswith("-")]
+            roots = [p for a in operands for p in [self.resolve(a, bare=True)] if p is not None] or [self.cwd]
+            self.searches += [(verb, "content" if self.fed else "names", r) for r in roots]
+        elif verb == "ls":
+            operands = [a for a in args if not a.startswith("-")]
+            listed = [p for a in operands for p in [self.resolve(a, bare=True)] if p is not None] or [self.cwd]
+            if any(_at_or_above_home(r) for r in listed):
+                self.notes.append("lists the home directory or above")
+        if verb in DISK_SEARCH:
+            self.searches.append((verb, "disk", Path("/")))
+
+        code = verb in INTERPRETERS or re.match(r"python\d", verb)
+        for j, a in enumerate(args):
+            if j in skip:
+                continue
+            if a.startswith("-") and a != "-":
+                if "=" in a:
+                    self.add(a.split("=", 1)[1], bare=False)
+                continue
+            self.add(a, bare=bare)
+            if code or any(c in a for c in "'\"()"):
+                for m in EMBEDDED_PATH.finditer(self.expand(a)):
+                    self.add(m.group(1), bare=False)
+
+
 def shell_paths(command: str, workdir: Path) -> tuple[list[Path], list[tuple[str, str, Path]], list[str]]:
     """Resolved local paths in a shell command; the searches in it as (verb, kind, root), kind being
     'names', 'content' or 'disk'; and notes for the operator."""
-    body = re.sub(r"^\S*(?:zsh|bash|sh)\s+-l?c\s+", "", command.strip())
-    if len(body) > 1 and body[0] == body[-1] and body[0] in "'\"":
-        body = body[1:-1]
-    fed = bool(FEED.search(body))
-    cwd, paths, searches, notes = workdir, [], [], []
-    for segment in SHELL_SPLIT.split(body):
-        try:
-            tokens = shlex.split(segment, comments=False, posix=True)
-        except ValueError:
-            tokens = segment.split()
-        if not tokens:
-            continue
-        verb = os.path.basename(tokens[0])
-        args = tokens[1:]
-        if verb == "cd":
-            cwd = (_resolve(args[0], cwd, bare=True) if args else HOME) or cwd
-            paths.append(cwd)
-            continue
-        resolved = [p for a in args for p in [_resolve(a, cwd, bare=cwd != workdir)] if p is not None]
-        for p in resolved:
-            paths += _expand(p)
-        roots = resolved or [cwd]
-        if verb in DISK_SEARCH:
-            searches.append((verb, "disk", Path("/")))
-        recursive_grep = verb in {"grep", "egrep", "fgrep"} and any(
-            re.match(r"-[a-zA-Z]*[rR]", a) or a in {"--recursive", "--dereference-recursive"} for a in args)
-        recursive_ls = verb == "ls" and any(re.match(r"-[a-zA-Z]*R", a) for a in args)
-        if verb in CONTENT_SEARCH or recursive_grep:
-            searches += [(verb, "content", r) for r in roots]
-        elif verb in NAME_SEARCH or recursive_ls:
-            searches += [(verb, "content" if fed else "names", r) for r in roots]
-        if verb == "ls" and not recursive_ls and any(_at_or_above_home(r) for r in roots):
-            notes.append("lists the home directory or above")
-    return paths, searches, notes
+    shell = _Shell(workdir)
+    shell.run(command)
+    return shell.paths, shell.searches, shell.notes
 
 
 def _tool_calls(line: dict):
@@ -207,7 +451,8 @@ def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path]) -> tuple[
     if tool in {"shell", "Bash"}:
         paths, searches, notes = shell_paths(inp.get("command", ""), workdir)
     elif tool in {"Read", "Edit", "Write", "NotebookEdit", "LS"}:
-        p = _resolve(str(inp.get("file_path") or inp.get("path") or inp.get("notebook_path") or ""), workdir)
+        p = _resolve(str(inp.get("file_path") or inp.get("path") or inp.get("notebook_path") or ""), workdir,
+                     bare=True)
         paths = [p] if p else []
     elif tool in {"Grep", "Glob"}:
         base = _resolve(str(inp.get("path") or "."), workdir, bare=True) or workdir
@@ -219,7 +464,7 @@ def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path]) -> tuple[
     elif tool in {"file_read", "file_change"}:
         for key in ("path", "file_path"):
             if inp.get(key):
-                p = _resolve(str(inp[key]), workdir)
+                p = _resolve(str(inp[key]), workdir, bare=True)
                 paths += [p] if p else []
     for p in paths:
         for root in roots:

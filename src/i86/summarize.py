@@ -19,7 +19,11 @@ A forecaster that puts no probability on a condition is left out of it; summarie
 runs contributed.
 
 For a question defined only under a condition (the ban still standing, say), `<cond>` holds the joint
-probability P(condition and event) and `<cond>|given` the conditional P(event | condition).
+probability P(condition and event) and `<cond>|given` the conditional P(event | condition). The
+conditional comes from a further simulation restricted to worlds where the condition holds, weighted
+by each draw's probability of it (see simulate.py), so a forecaster that thinks the condition
+unlikely still contributes a full set of draws. Only a forecaster that gives it no probability at all
+is left out.
 
 Y against N is not an effect: it also carries what the result says about public opinion. Every number
 here is a model forecast, not an observation.
@@ -33,11 +37,13 @@ import numpy as np
 
 from .graph import Entry, Graph
 from .response import Forecasts
-from .simulate import band_mass, decisive_probability, simulate
+from .simulate import FILTER, band_mass, condition_restriction, decisive_probability, simulate
 
 SUMMARY_QUANTILES = (0.05, 0.25, 0.5, 0.75, 0.95)
 CUTOFF = (0.495, 0.505)
 CONDITIONS = ("all", "N", "Y", "Nc", "Yc", "cutoff_fail", "cutoff_pass")
+# Which side of 50% each condition's draws lie on (None: both).
+SIDE = {"all": None, "N": False, "Nc": False, "cutoff_fail": False, "Y": True, "Yc": True, "cutoff_pass": True}
 
 
 def condition_bands(graph: Graph) -> dict[str, tuple[float, float]]:
@@ -74,29 +80,59 @@ def _weighted_quantiles(x: np.ndarray, w: np.ndarray, qs) -> np.ndarray:
     return xs[np.clip(idx, 0, len(xs) - 1)]
 
 
-def describe_parts(graph: Graph, key: str, parts: list[np.ndarray]) -> dict | None:
-    """Summarize draws from one or more forecasters, each forecaster's draws weighted equally."""
-    parts = [np.asarray(p) for p in parts if len(p)]
-    if not parts:
+def describe_parts(graph: Graph, key: str, parts: list[np.ndarray], weights: list | None = None) -> dict | None:
+    """Summarize draws from one or more forecasters, each forecaster counting equally.
+
+    `weights` gives each part's draw weights (None: equal). Within a part, draws count in proportion
+    to their weight; a part whose weights are all zero, or that has no draws, is left out.
+    """
+    weights = list(weights) if weights is not None else [None] * len(parts)
+    pairs = []
+    for x, w in zip(parts, weights):
+        x = np.asarray(x)
+        if not len(x):
+            continue
+        if w is not None:
+            w = np.asarray(w, dtype=float)
+            keep = w > 0
+            if not keep.any():
+                continue
+            x, w = x[keep], w[keep]
+        pairs.append((x, w))
+    if not pairs:
         return None
+
+    def mean(x, w):
+        x = x.astype(float)
+        return float(np.mean(x)) if w is None else float(np.sum(w * x) / np.sum(w))
+
+    def ess(x, w):
+        return float(len(x)) if w is None else float(np.sum(w) ** 2 / np.sum(w ** 2))
+
     node = graph.owner(key)
-    out: dict = {"runs": len(parts), "n": int(sum(len(p) for p in parts))}
-    if parts[0].dtype == bool or (node is not None and node.kind in {"binary", "derived"} and "." not in key):
-        out["p"] = float(np.mean([np.mean(p) for p in parts]))
+    out: dict = {
+        "runs": len(pairs),
+        "n": int(sum(len(x) for x, _ in pairs)),
+        # Effective number of draws behind the least-informed forecaster's part.
+        "ess_min": min(ess(x, w) for x, w in pairs),
+    }
+    if pairs[0][0].dtype == bool or (node is not None and node.kind in {"binary", "derived"} and "." not in key):
+        out["p"] = float(np.mean([mean(x, w) for x, w in pairs]))
         return out
-    x = np.concatenate(parts).astype(float)
-    w = np.concatenate([np.full(len(p), 1.0 / len(p)) for p in parts])
-    out["mean"] = float(np.mean([np.mean(p) for p in parts]))
-    qs = _weighted_quantiles(x, w, SUMMARY_QUANTILES)
+    x_all = np.concatenate([x for x, _ in pairs]).astype(float)
+    w_all = np.concatenate([(np.full(len(x), 1.0 / len(x)) if w is None else w / np.sum(w)) / len(pairs)
+                            for x, w in pairs])
+    out["mean"] = float(np.mean([mean(x, w) for x, w in pairs]))
+    qs = _weighted_quantiles(x_all, w_all, SUMMARY_QUANTILES)
     out.update({f"p{round(q * 100):02d}": float(v) for q, v in zip(SUMMARY_QUANTILES, qs)})
     if node is not None and node.kind == "pmf":
         vals = np.array([float(label.rstrip("+")) for label in node.labels])
-        out["pmf"] = {label: float(np.mean([np.mean(p == v) for p in parts])) for label, v in zip(node.labels, vals)}
+        out["pmf"] = {label: float(np.mean([mean(x == v, w) for x, w in pairs])) for label, v in zip(node.labels, vals)}
     return out
 
 
-def describe(graph: Graph, key: str, x: np.ndarray) -> dict | None:
-    return describe_parts(graph, key, [x])
+def describe(graph: Graph, key: str, x: np.ndarray, w: np.ndarray | None = None) -> dict | None:
+    return describe_parts(graph, key, [x], [w])
 
 
 def headline(desc: dict | None) -> float | None:
@@ -146,35 +182,67 @@ def diagnostics(graph: Graph, fc: Forecasts) -> dict:
 def run_summary(graph: Graph, fc: Forecasts, n: int, seed) -> dict:
     """Everything for one forecaster: draws by condition, cutoff contrast, decisive odds."""
     seed = [int(x) for x in np.atleast_1d(seed)]
-    sims = {"all": simulate(graph, fc, n, seed)}
+    setups: dict[str, dict] = {"all": {"seed": seed}}
     masses = {}
     for i, (cond, band) in enumerate(condition_bands(graph).items()):
         masses[cond] = band_mass(graph, fc, band)
-        sims[cond] = simulate(graph, fc, n, [*seed, 3 + i], share_band=band) if masses[cond] > 1e-9 else None
+        setups[cond] = {"seed": [*seed, 3 + i], "share_band": band}
     # Same-day results DC cannot cause (Denver's) are held at 50% in both arms.
-    sims["cutoff_fail"] = simulate(graph, fc, n, [*seed, 1], fixed_share=CUTOFF[0], continuous_share=0.5)
-    sims["cutoff_pass"] = simulate(graph, fc, n, [*seed, 1], fixed_share=CUTOFF[1], continuous_share=0.5)
-    nodes, parts = {}, {}
+    setups["cutoff_fail"] = {"seed": [*seed, 1], "fixed_share": CUTOFF[0], "continuous_share": 0.5}
+    setups["cutoff_pass"] = {"seed": [*seed, 1], "fixed_share": CUTOFF[1], "continuous_share": 0.5}
+    sims = {c: (simulate(graph, fc, n, **kw) if masses.get(c, 1.0) > 1e-9 else None) for c, kw in setups.items()}
+
+    given: dict[tuple[str, str], tuple | None] = {}
+
+    def given_draws(cond: str, condition) -> tuple | None:
+        """(draws, weights) for worlds under `cond` where `condition` holds; None if it cannot."""
+        key = (cond, condition.text)
+        if key in given:
+            return given[key]
+        base, side, result = sims[cond], SIDE[cond], None
+        if base is not None:
+            if side is None:
+                if condition_restriction(graph, condition, False) is None:
+                    # The condition implies passing, so among all draws it is the passing draws'
+                    # conditional.
+                    result = given_draws("Y", condition)
+                else:
+                    mask = condition.evaluate_vec(base)
+                    result = (base, mask.astype(float)) if mask.any() else None
+            else:
+                r = condition_restriction(graph, condition, side)
+                if r == {}:
+                    result = (base, None)
+                elif r == FILTER:
+                    mask = condition.evaluate_vec(base)
+                    result = (base, mask.astype(float)) if mask.any() else None
+                elif r is not None:
+                    d = simulate(graph, fc, n, **setups[cond], restrict=r)
+                    result = (d, d["_weight"]) if d["_weight"].sum() > 0 else None
+        given[key] = result
+        return result
+
+    nodes, parts, weights = {}, {}, {}
     for key in summary_keys(graph):
         owner = graph.owner(key)
         by_cond: dict[str, np.ndarray] = {}
+        w_cond: dict[str, np.ndarray | None] = {}
         for cond in CONDITIONS:
             draws = sims[cond]
-            if draws is None:
-                by_cond[cond] = np.array([], dtype=bool)
-                if owner.exists_if is not None:
-                    by_cond[f"{cond}|given"] = np.array([], dtype=bool)
-                continue
-            x = values(draws, key)
-            by_cond[cond] = x
+            by_cond[cond] = values(draws, key) if draws is not None else np.array([], dtype=bool)
+            w_cond[cond] = None
             if owner.exists_if is not None:
-                by_cond[f"{cond}|given"] = x[owner.exists_if.evaluate_vec(draws)]
-        entry = {c: describe(graph, key, v) for c, v in by_cond.items()}
+                g = given_draws(cond, owner.exists_if)
+                by_cond[f"{cond}|given"] = values(g[0], key) if g is not None else np.array([], dtype=bool)
+                w_cond[f"{cond}|given"] = g[1] if g is not None else None
+        entry = {c: describe(graph, key, v, w_cond[c]) for c, v in by_cond.items()}
         entry["cutoff_effect"] = float(np.mean(by_cond["cutoff_pass"])) - float(np.mean(by_cond["cutoff_fail"]))
         nodes[key] = entry
         parts[key] = by_cond
+        weights[key] = w_cond
     return {
         "parts": parts,
+        "weights": weights,
         "nodes": nodes,
         "masses": masses,
         "vote": decisive_probability(graph, fc, n, [*seed, 2]),
@@ -192,7 +260,8 @@ def pool(graph: Graph, runs: dict[str, Forecasts], n: int = 20000, seed: int = 0
     pooled_nodes = {}
     for key in summary_keys(graph):
         conds = next(iter(per_run.values()))["parts"][key]
-        entry = {c: describe_parts(graph, key, [r["parts"][key][c] for r in per_run.values()]) for c in conds}
+        entry = {c: describe_parts(graph, key, [r["parts"][key][c] for r in per_run.values()],
+                                   [r["weights"][key][c] for r in per_run.values()]) for c in conds}
         effects = [r["nodes"][key]["cutoff_effect"] for r in per_run.values()]
         entry["cutoff_effect"] = float(np.mean(effects))
         entry["cutoff_effect_by_run"] = dict(zip(per_run, effects))

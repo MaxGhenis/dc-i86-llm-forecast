@@ -67,7 +67,8 @@ def cmd_dispatch(args) -> int:
         meta = runners.dispatch_claude(args.label, PROMPT_PATH, sha, args.model or "claude-opus-5-5", args.late)
     else:
         runners.prepare(args.label, PROMPT_PATH, sha, "manual", late=args.late)
-        print(f"runs/{args.label}/prompt.md is ready; save the agent's final message as runs/{args.label}/response.md")
+        print(f"runs/{args.label}/prompt.md is ready; save the agent's final message as "
+              f"{runners.staged_response(args.label)}")
         return 0
     print(json.dumps({k: meta.get(k) for k in ("label", "job_id", "backend", "dispatched_at")}))
     return 0
@@ -78,12 +79,11 @@ def run_dirs() -> list[Path]:
 
 
 def cmd_collect(args) -> int:
-    """Refresh every subfleet run; copy answers in only once all runs have finished."""
+    """Refresh every subfleet run; copy answers in only once every run, of any backend, has finished."""
     dirs = run_dirs()
     metas = {d: (runners.refresh_subfleet(d) if runners.read_meta(d).get("backend") == "subfleet"
                  else runners.read_meta(d)) for d in dirs}
-    pending = [d.name for d, m in metas.items()
-               if m.get("backend") == "subfleet" and m.get("state") not in runners.FINISHED]
+    pending = [d.name for d, m in metas.items() if runners.still_going(m)]
     unknown = {m.get("state") for m in metas.values() if m.get("backend") == "subfleet"} - runners.FINISHED - {
         "queued", "waiting", "running", None}
     if unknown:
@@ -95,7 +95,14 @@ def cmd_collect(args) -> int:
         have = (d / "response.md").exists()
         print(f"{d.name:24s} {meta.get('state') or '-':10s} {meta.get('model_served') or '-':18s} response={'yes' if have else 'no'}")
     if pending:
-        print(f"{len(pending)} subfleet run(s) still going ({', '.join(pending)}); no answers copied yet")
+        print(f"{len(pending)} run(s) still going ({', '.join(pending)}); no answers copied yet. "
+              "`i86 abandon <label>` marks a run that will never finish")
+    return 0
+
+
+def cmd_abandon(args) -> int:
+    meta = runners.abandon(args.label)
+    print(f"{args.label}: abandoned at {meta['abandoned_at']}")
     return 0
 
 
@@ -226,6 +233,8 @@ def main(argv=None) -> int:
     sub.add_parser("collect")
     sub.add_parser("check")
     sub.add_parser("audit")
+    ab = sub.add_parser("abandon", help="mark a run that will never finish, so collection can proceed")
+    ab.add_argument("label")
     s = sub.add_parser("simulate")
     s.add_argument("--n", type=int, default=20000)
     s.add_argument("--seed", type=int, default=0)
@@ -237,7 +246,7 @@ def main(argv=None) -> int:
     pr.add_argument("--no-stamp", action="store_true")
     args = ap.parse_args(argv)
     return {"prompt": cmd_prompt, "dispatch": cmd_dispatch, "collect": cmd_collect, "check": cmd_check,
-            "audit": cmd_audit, "simulate": cmd_simulate, "prereg": cmd_prereg}[args.cmd](args)
+            "audit": cmd_audit, "abandon": cmd_abandon, "simulate": cmd_simulate, "prereg": cmd_prereg}[args.cmd](args)
 
 
 if __name__ == "__main__":

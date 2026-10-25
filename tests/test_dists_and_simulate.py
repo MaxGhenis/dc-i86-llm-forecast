@@ -286,3 +286,74 @@ def test_questions_defined_under_a_condition_report_the_conditional_and_the_join
     assert e["Y"]["p"] == pytest.approx(0.4 * 0.5, abs=0.01)
     assert e["N|given"] is None and e["N"]["p"] == 0.0
     assert result["nodes"]["ban_status.certified"]["Y|given"]["p"] == pytest.approx(0.3, abs=0.01)
+
+
+def _standing_forecaster(graph, status_by_cell, narrowed_by_state):
+    """MOCK: ban_status at each passing cell, and fattened_narrowed's p in each standing state."""
+    obj = MOCK_response(graph)
+    for cell, probs in status_by_cell.items():
+        obj["nodes"]["ban_status"]["forecasts"][cell].update(probs)
+    for key, value in obj["nodes"]["fattened_narrowed"]["forecasts"].items():
+        value["p"] = narrowed_by_state[key.split("|")[1]]
+    return parse(graph, obj)
+
+
+STATUS = {
+    "yes_50.5": dict(repealed=0.6, congress=0.0, court=0.0, not_certified=0.1, certified=0.3),
+    "yes_60.0": dict(repealed=0.3, congress=0.1, court=0.0, not_certified=0.2, certified=0.4),
+    "yes_72.0": dict(repealed=0.05, congress=0.0, court=0.05, not_certified=0.2, certified=0.7),
+}
+
+
+def test_conditional_at_the_cutoff_matches_the_closed_form(graph):
+    fc = _standing_forecaster(graph, STATUS, {"certified": 0.8, "not_certified": 0.2})
+    e = run_summary(graph, fc, 40_000, [0, 1])["nodes"]["fattened_narrowed"]
+    # At 50.5%: P(narrowed | standing) = (0.3 * 0.8 + 0.1 * 0.2) / (0.3 + 0.1) = 0.65.
+    assert e["cutoff_pass|given"]["p"] == pytest.approx(0.65, abs=0.01)
+    assert e["cutoff_pass"]["p"] == pytest.approx(0.4 * 0.65, abs=0.01)
+
+
+def test_weighted_conditional_agrees_with_filtering_many_draws(graph):
+    """Differential: the restricted, weighted simulation against plain filtering of a large sample.
+
+    P(standing) varies with the Yes share here, so restricting without weighting would be wrong.
+    """
+    fc = _standing_forecaster(graph, STATUS, {"certified": 0.8, "not_certified": 0.1})
+    band = (0.5, graph.share_ceiling)
+    weighted = run_summary(graph, fc, 20_000, [0, 2])["nodes"]["fattened_narrowed"]["Y|given"]["p"]
+    d = simulate(graph, fc, 400_000, [7], share_band=band)
+    filtered = float(np.mean(d["fattened_narrowed"][d["ban_standing"]]))
+    assert weighted == pytest.approx(filtered, abs=0.01)
+
+
+@settings(max_examples=12, deadline=None)
+@given(s1=st.floats(1e-9, 1.0), s2=st.floats(1e-9, 1.0), p1=st.sampled_from([0.0, 1.0]),
+       p2=st.sampled_from([0.0, 1.0]))
+def test_every_forecaster_with_any_chance_of_the_condition_counts_equally(graph, s1, s2, p1, p2):
+    runs = {}
+    for label, s, p in [("MOCK-a", s1, p1), ("MOCK-b", s2, p2)]:
+        status = {c: dict(repealed=1 - s, congress=0.0, court=0.0, not_certified=0.0, certified=s)
+                  for c in ["yes_50.5", "yes_60.0", "yes_72.0"]}
+        runs[label] = _standing_forecaster(graph, status, {"certified": p, "not_certified": p})
+    e = pool(graph, runs, n=300, seed=0)["nodes"]["fattened_narrowed"]
+    for cond in ["Y", "Yc", "cutoff_pass", "all"]:
+        assert e[f"{cond}|given"]["runs"] == 2
+        assert e[f"{cond}|given"]["p"] == pytest.approx((p1 + p2) / 2, abs=1e-12)
+    assert e["N|given"] is None and e["cutoff_fail|given"] is None
+
+
+def test_restricted_draws_satisfy_the_condition_and_weights_are_probabilities(graph):
+    from i86.simulate import condition_restriction
+
+    fc = _standing_forecaster(graph, STATUS, {"certified": 0.5, "not_certified": 0.5})
+    cond = graph.nodes["fattened_narrowed"].exists_if
+    r = condition_restriction(graph, cond, True)
+    assert r == {"ban_status": frozenset({"certified", "not_certified"})}
+    assert condition_restriction(graph, cond, False) is None
+    assert condition_restriction(graph, graph.nodes["lawsuit_filed"].exists_if, True) == {}
+    d = simulate(graph, fc, 5000, [3], share_band=(0.5, graph.share_ceiling), restrict=r)
+    assert np.all(d["ban_standing"]) and np.all((d["_weight"] >= 0.4 - 1e-12) & (d["_weight"] <= 0.9 + 1e-12))
+    base = simulate(graph, fc, 5000, [3], share_band=(0.5, graph.share_ceiling))
+    assert np.all(base["_weight"] == 1.0)
+    # Shared random numbers: the Yes share is the same draw for draw.
+    assert np.array_equal(base["yes_share"], d["yes_share"])

@@ -61,6 +61,22 @@ def test_web_calls_pass_and_are_logged(tmp_path):
     codex("cat $(find .. -name response.md)"),
     codex("find .. -name response.md -exec cat {} +"),
     codex("cd .. && ls opus-2"),
+    codex("cat <../opus-2/draft.json"),
+    codex("cat < ../opus-2/draft.json"),
+    codex("cd -- .. && cat opus-2/draft.json"),
+    codex("cd -P .. && cat opus-2/draft.json"),
+    codex("pushd .. && cat opus-2/draft.json"),
+    codex("D=..; cat $D/opus-2/draft.json"),
+    codex("export D=~/.claude && cat $D/x"),
+    codex("bash -c \"cd .. && cat opus-2/draft.json\""),
+    codex("eval \"cat ../opus-2/draft.json\""),
+    codex("xargs -a ../opus-2/list cat"),
+    codex("grep --file=../opus-2/draft.json notes.md"),
+    codex("grep -f ../opus-2/draft.json notes.md"),
+    codex("python3 -c \"print(open(\\\"../opus-2/draft.json\\\").read())\""),
+    codex("cat <(cat ../opus-2/draft.json)"),
+    codex("cd -- ~/reviews && cat notes.md"),
+    codex("ls $HOME/reviews"),
     codex(f"rg foie {HOME}"),
     codex("rg foie /"),
     codex("locate response.md"),
@@ -82,6 +98,7 @@ def test_forbidden_calls_are_violations(tmp_path, event):
 @pytest.mark.parametrize("event", [
     codex("ls ~"),
     codex("cat /tmp/i86.pdf"),
+    codex("cd \"$TARGET\" && cat x"),
     codex("find .. -maxdepth 1 -name AGENTS.md"),
     {"type": "item.completed", "item": {"type": "collab_tool_call", "id": "c"}},
 ])
@@ -96,8 +113,17 @@ def test_work_directory_files_and_ordinary_reads_are_listed_not_excluded(tmp_pat
         codex("cat notes.md && python3 -c \"print(0.42 * 2)\""),
         codex("cat /Users/someone-else/.agents/skills/x/SKILL.md"),
         codex("pdftotext /tmp/report.pdf -"),
+        codex("rg -n / report.txt"),
+        codex("grep -rn -e / ."),
+        codex("rg --glob \"*.md\" -n certification ."),
+        codex("find . -name \"*.txt\" -maxdepth 2"),
+        codex("cd /tmp && ls && cd - && cat notes.md"),
+        codex("cat > notes.md <<\"EOF\"\nThe CFO certification decides it.\nEOF"),
+        codex("python3 - <<\"EOF\"\nprint(0.3 * 0.8)\nEOF"),
+        codex("curl -sL https://code.dccouncil.gov/x.pdf -o law.pdf 2>/dev/null && pdftotext law.pdf -"),
+        codex("sed -n 1,40p law.txt | grep -n certif"),
     ])
-    assert out["passed"] and not out["suspect"] and len(out["local_calls"]) == 4, out
+    assert out["passed"] and not out["suspect"] and not out["violations"], out
 
 
 def test_a_cd_chain_moves_the_base_for_later_paths():

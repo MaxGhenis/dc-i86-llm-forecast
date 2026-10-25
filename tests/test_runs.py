@@ -115,3 +115,38 @@ def test_runs_without_an_audit_are_excluded_unless_manual_and_allowed(area, grap
     runners.write_meta(runners.RUNS / "man", meta)
     assert set(cli.accepted_runs(graph, "sha")) == set()
     assert set(cli.accepted_runs(graph, "sha", allow_unaudited=True)) == {"man"}
+
+
+def test_an_unfinished_claude_run_blocks_collection(area):
+    runners.prepare("claude-done", area.prompt, "sha", "claude")
+    _stage_answer("claude-done")
+    runners.prepare("claude-running", area.prompt, "sha", "claude")
+    cli.cmd_collect(None)
+    assert not (runners.RUNS / "claude-done" / "response.md").exists()
+    runners.abandon("claude-running")
+    cli.cmd_collect(None)
+    assert (runners.RUNS / "claude-done" / "response.md").exists()
+    assert not (runners.RUNS / "claude-running" / "response.md").exists()
+
+
+def test_manual_answers_are_staged_and_sealed_with_the_rest(area):
+    runners.prepare("manual-1", area.prompt, "sha", "manual")
+    runners.prepare("claude-1", area.prompt, "sha", "claude")
+    _stage_answer("claude-1")
+    cli.cmd_collect(None)
+    assert not (runners.RUNS / "claude-1" / "response.md").exists()  # the manual run is still going
+    stage = runners.staged_response("manual-1")
+    stage.parent.mkdir(parents=True)
+    stage.write_text("MOCK manual answer")
+    cli.cmd_collect(None)
+    assert (runners.RUNS / "manual-1" / "response.md").read_text() == "MOCK manual answer"
+    assert runners.read_meta(runners.RUNS / "manual-1")["state"] == "succeeded"
+    assert (runners.RUNS / "claude-1" / "response.md").exists()
+
+
+def test_a_collected_run_cannot_be_abandoned(area):
+    runners.prepare("claude-1", area.prompt, "sha", "claude")
+    _stage_answer("claude-1")
+    cli.cmd_collect(None)
+    with pytest.raises(RuntimeError, match="already collected"):
+        runners.abandon("claude-1")

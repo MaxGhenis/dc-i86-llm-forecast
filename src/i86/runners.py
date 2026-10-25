@@ -6,16 +6,18 @@ message, verbatim), `transcript.jsonl` and, for subfleet, `prompt.sent.md` (exac
 given, with the lane's own preamble). The agent works in an empty directory outside the repository so
 it cannot find other runs' files by browsing its working directory.
 
-No answer enters the repository until every run has finished: the `claude` backend writes to a
-staging directory, and `collect` copies answers in only when no subfleet run is still going. After
-that, `dispatch` refuses new runs unless they are marked `--late`, and the report flags late runs,
-which could have found the others' answers.
+No answer enters the repository until every run has finished: the `claude` and `manual` backends
+write to a staging directory, and `collect` copies answers in only when no run of any backend is
+still going. A run that will never finish (a killed process, a manual run given up) is marked with
+`i86 abandon <label>`. After collection, `dispatch` refuses new runs unless they are marked
+`--late`, and the report flags late runs, which could have found the others' answers.
 
 Backends:
 - `subfleet`: Max Ghenis's supervised lanes (`subfleet run --task research`).
 - `claude`: Claude Code in print mode, bare (no hooks, memory, CLAUDE.md or MCP servers; it needs
   ANTHROPIC_API_KEY), with only WebSearch and WebFetch. The stream-json transcript is its audit trail.
-- `manual`: write the prompt and paste the agent's final message into `response.md` yourself.
+- `manual`: write the prompt; save the agent's final message as `response.md` in the run's staging
+  directory yourself.
 """
 
 from __future__ import annotations
@@ -32,8 +34,8 @@ from .graph import ROOT
 RUNS = ROOT / "runs"
 WORK = Path.home() / ".cache" / "dc-i86-llm-forecast"
 STAGE = Path.home() / ".cache" / "dc-i86-llm-forecast-staging"
-# Subfleet job states. Anything not known to be finished counts as still going.
-FINISHED = {"succeeded", "failed", "cancelled", "canceled", "lost", "killed", "expired"}
+# Run states. Anything not known to be finished counts as still going.
+FINISHED = {"succeeded", "failed", "cancelled", "canceled", "lost", "killed", "expired", "abandoned"}
 
 
 def now() -> str:
@@ -47,6 +49,31 @@ def read_meta(run_dir: Path) -> dict:
 
 def write_meta(run_dir: Path, meta: dict) -> None:
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+
+
+def staged_response(label: str) -> Path:
+    return STAGE / label / "response.md"
+
+
+def still_going(meta: dict) -> bool:
+    """Whether a run may still produce an answer. A manual run is done once its answer is staged."""
+    if meta.get("state") in FINISHED:
+        return False
+    if meta.get("backend") == "manual":
+        return not staged_response(meta["label"]).exists()
+    return True
+
+
+def abandon(label: str) -> dict:
+    run_dir = RUNS / label
+    meta = read_meta(run_dir)
+    if not meta:
+        raise FileNotFoundError(f"no run {label}")
+    if (run_dir / "response.md").exists():
+        raise RuntimeError(f"run {label} is already collected")
+    meta.update(state="abandoned", abandoned_at=now())
+    write_meta(run_dir, meta)
+    return meta
 
 
 def collected_any() -> bool:
@@ -186,6 +213,8 @@ def seal(run_dir: Path) -> bool:
     meta = read_meta(run_dir)
     if (run_dir / "response.md").exists():
         return True
+    if meta.get("backend") == "manual" and staged_response(run_dir.name).exists():
+        meta["state"] = "succeeded"
     if meta.get("state") != "succeeded":
         return False
     if meta.get("backend") == "subfleet":
@@ -198,8 +227,8 @@ def seal(run_dir: Path) -> bool:
             sent = (attempt / "prompt.sent.md").read_bytes()
             (run_dir / "prompt.sent.md").write_bytes(sent)
             meta["prompt_sent_sha256"] = hashlib.sha256(sent).hexdigest()
-    elif meta.get("backend") == "claude":
-        staged = STAGE / run_dir.name / "response.md"
+    elif meta.get("backend") in {"claude", "manual"}:
+        staged = staged_response(run_dir.name)
         if not staged.exists():
             return False
         answer = staged.read_text()

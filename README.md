@@ -49,6 +49,10 @@ number of draws under "fails" however unlikely it thinks failing is. The pooled 
 each forecaster's own conditional distribution equally. Pooling the raw draws of one simulation instead
 would let the forecasters who expect it to pass dominate the "passes" column. Questions defined only
 under a condition (the ban standing, say) report both the conditional probability and the joint one.
+The conditional comes from a further simulation in which the ban's status is drawn only from the
+options that satisfy the condition, each draw weighted by the forecaster's probability of those
+options at its Yes share. So a forecaster that gives the condition 1 in 10,000 still counts as much
+as one that gives it 9 in 10; only one that gives it zero is left out, and the report says so.
 Each node is reported:
 - if the measure fails and if it passes (their gap also carries what the result says about voters, so
   it is not an effect);
@@ -79,13 +83,14 @@ Dispatch forecasters with any of three backends:
 .venv/bin/i86 dispatch subfleet opus-1 --tier standard -m opus      # the author's lanes: Claude Opus 5.5
 .venv/bin/i86 dispatch subfleet sol-1 --tier hard                    # the author's lanes: GPT-6.1 Sol
 .venv/bin/i86 dispatch claude my-run -m claude-opus-5-5              # Claude Code, bare, web tools only
-.venv/bin/i86 dispatch manual my-run                                 # paste any agent's answer yourself
+.venv/bin/i86 dispatch manual my-run                                 # stage any agent's answer yourself
 ```
 
 Then collect, check, audit and pool:
 
 ```bash
 .venv/bin/i86 collect      # once every run has finished, copy answers and transcripts into runs/
+.venv/bin/i86 abandon LABEL  # mark a run that will never finish (a killed process), so collect can proceed
 .venv/bin/i86 check        # parse and validate every response
 .venv/bin/i86 audit        # check each transcript's tool calls
 .venv/bin/i86 simulate     # pool the accepted runs into outputs/ (see Independence for exclusions)
@@ -105,15 +110,18 @@ and in each run's `meta.json`, and `simulate` pools only runs made with the curr
 lanes add their own preamble; `collect` saves exactly what the model was given as
 `runs/<label>/prompt.sent.md`, with its hash. Forecasters work in empty directories outside the
 repository, and the prompt tells them not to read local files. No answer enters the repository until
-every run has finished: the `claude` backend writes to a staging directory, and `collect` copies
-answers in only when nothing is still going.
+every run has finished: the `claude` and `manual` backends write to a staging directory, and
+`collect` copies answers in only when no run of any backend is still going.
 
 Each forecaster reports, before researching, anything in its context other than the brief that
 mentions the measure (`forecaster.prior_context`). `simulate` excludes a run whose report mentions
 these questions, other than a bare "none"; after reading it, `--accept-prior <label>` admits it.
 
-`i86 audit` reads each run's own transcript and resolves every local path the way the shell would
-(`~`, `$HOME`, relative paths, `cd` chains and globs). These exclude the run:
+`i86 audit` reads each run's own transcript and tokenizes every shell command as the shell would:
+quoting, pipes, subshells, command substitutions, redirections (`cat <file`), `cd`, `pushd` and
+`popd` with their options, simple variables, nested `sh -c` and `eval`, wrappers such as `xargs` and
+`env`, and quoted paths inside `python -c` code. It resolves every local path against the tracked
+directory, expands globs, and does not mistake a search pattern for a path. These exclude the run:
 - a path in, or text naming, the repository, the staging area, another run's work directory, an
   agent's home or job store, or the author's notes;
 - a search rooted at the home directory or above, or `locate` or `mdfind`;
@@ -121,8 +129,8 @@ these questions, other than a bare "none"; after reading it, `--accept-prior <la
 - any MCP tool.
 
 Calls that warrant reading without excluding the run are listed as suspect: a name-only search above a
-protected place, a listing of the home directory, a path outside the work directory next to a term
-from these questions, and sub-agent calls. The summary counts them per run. A run with no parseable
+protected place, a listing of the home directory, a `cd` the audit cannot follow, a path outside the
+work directory next to a term from these questions, and sub-agent calls. The summary counts them per run. A run with no parseable
 transcript fails the audit, and `simulate` pools only runs that pass. `--allow-unaudited` admits manual
 runs, which have no transcript. The audit catches accidental and casual reads, not a forecaster set on
 hiding them.
@@ -136,9 +144,11 @@ hiding them.
   parsed response and audit.
 - `outputs/`: pooled summaries (`summary.md`, `summary.json`, `nodes.csv`, `runs.csv`).
 - `src/i86/`: graph loading, response checks, samplers, simulator, pooling, report, runners and audit.
-- `tests/`: property-based tests of the samplers and simulator invariants, a differential test of the
-  decisive-ballot formula against its closed form, audit cases (including known bypasses), and the
-  staging and pooling rules. Test responses are labelled MOCK.
+- `tests/`: property-based tests of the samplers and simulator invariants; differential tests of the
+  decisive-ballot formula against its closed form and of the weighted conditionals against plain
+  filtering; audit cases, including every bypass found in review; and the staging and pooling rules.
+  `test_review_r3_*.py` are the third independent review's probes, kept as regression tests. Test
+  responses are labelled MOCK.
 
 ## What the numbers are
 

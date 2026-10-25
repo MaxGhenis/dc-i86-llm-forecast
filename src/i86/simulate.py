@@ -11,6 +11,13 @@ categorical node, the empty string) wherever its condition is false.
 
 Every node draws its uniforms in the same order whatever the draw's values, so two simulations with
 the same seed share random numbers. The cutoff contrast (49.5% against 50.5%) uses this.
+
+A simulation can also be restricted to worlds where a condition holds (`restrict`), for questions
+defined only under that condition. The restricted node is drawn from the forecaster's answer limited
+to the allowed values and renormalized, and each draw carries the weight `_weight`: the probability
+the forecaster gave those values at that draw. Weighted means over the draws are then the
+forecaster's conditional distribution given the condition (self-normalized importance sampling),
+however unlikely the forecaster thinks the condition is.
 """
 
 from __future__ import annotations
@@ -18,8 +25,32 @@ from __future__ import annotations
 import numpy as np
 
 from . import dists
-from .graph import Entry, Graph, Node
+from .graph import Condition, Entry, Graph, Node, assignments, boolean_scope
 from .response import Forecasts
+
+# condition_restriction's answer for a condition that depends on more than one random node.
+FILTER = "filter"
+
+
+def condition_restriction(graph: Graph, condition: Condition, passes: bool):
+    """How to simulate worlds where `condition` holds, on one side of 50%.
+
+    Returns None if the condition cannot hold on that side, {} if it always holds, {node: allowed
+    values} if it depends on one random node (values: options, None for 'does not exist', or
+    False/True for a binary node), or FILTER if it depends on more than one.
+    """
+    scope = boolean_scope(graph, set(condition.names) | {"passes"})
+    random = [x for x in scope if x != "passes" and graph.nodes[x].kind != "derived"]
+    worlds = [w for w in assignments(graph, scope) if w["passes"] == passes]
+    holds = [w for w in worlds if condition.evaluate(w)]
+    if not holds:
+        return None
+    if len(holds) == len(worlds):
+        return {}
+    if len(random) != 1 or graph.nodes[random[0]].kind not in {"binary", "categorical"}:
+        return FILTER
+    x = random[0]
+    return {x: frozenset(w[x] for w in holds)}
 
 
 def _cell_weights(cells: list[float], v: np.ndarray):
@@ -99,12 +130,15 @@ def band_mass(graph: Graph, fc: Forecasts, band: tuple[float, float]) -> float:
 
 
 def simulate(graph: Graph, fc: Forecasts, n: int, seed, fixed_share: float | None = None,
-             continuous_share: float | None = None, share_band: tuple[float, float] | None = None):
+             continuous_share: float | None = None, share_band: tuple[float, float] | None = None,
+             restrict: dict | None = None):
     """Draws for every node. Booleans are bool arrays; quantities floats; pmf nodes their value;
-    categorical nodes their option name ('' where the node does not exist).
+    categorical nodes their option name ('' where the node does not exist). `_weight` holds each
+    draw's weight: 1 unless `restrict` is given.
 
     The Yes share is drawn from the forecaster's CDF, fixed (`fixed_share`), or drawn from the CDF
     truncated to a band (`share_band`, (lo, hi]; a band whose lower end is 0.5 or more excludes it).
+    `restrict` maps a binary or categorical node to the values it may take (see the module notes).
     """
     rng = np.random.default_rng(seed)
     share_node = graph.nodes["yes_share"]
@@ -123,6 +157,8 @@ def simulate(graph: Graph, fc: Forecasts, n: int, seed, fixed_share: float | Non
     else:
         v = dists.sample_share(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling, u_share)
     draws: dict[str, np.ndarray] = {"yes_share": v, "passes": v > 0.5}
+    weight = np.ones(n)
+    restrict = restrict or {}
     v_cont = None if continuous_share is None else np.full(n, float(continuous_share))
     for nid in graph.order:
         node = graph.nodes[nid]
@@ -138,7 +174,31 @@ def simulate(graph: Graph, fc: Forecasts, n: int, seed, fixed_share: float | Non
             conds = np.column_stack([c.evaluate_vec(draws) for c in node.states.values()])
             state_idx = np.argmax(conds, axis=1)
         params = node_params(graph, node, fc, v, state_idx, v_cont)
-        if node.kind == "binary":
+        allowed = restrict.get(nid)
+        if allowed is not None and node.kind == "binary":
+            p_true = np.where(exists, params[:, 0], 0.0)
+            mass = (p_true if True in allowed else 0.0) + ((1 - p_true) if False in allowed else 0.0)
+            if allowed == {True}:
+                draws[nid] = exists.copy()
+            elif allowed == {False}:
+                draws[nid] = np.zeros(n, bool)
+            else:
+                draws[nid] = (u < params[:, 0]) & exists
+            weight = weight * mass
+        elif allowed is not None and node.kind == "categorical":
+            options = list(node.options)
+            keep = np.array([o in allowed for o in options], dtype=float)
+            p_opts = params * keep[None, :]
+            mass_opts = p_opts.sum(axis=1)
+            mass = np.where(exists, mass_opts, 1.0 if None in allowed else 0.0)
+            ok = mass_opts > 0
+            probs = np.where(ok[:, None], p_opts / np.where(ok, mass_opts, 1.0)[:, None], params)
+            idx = dists.sample_pmf(probs, u)
+            draws[nid] = np.where(exists, np.array(options)[idx], "")
+            weight = weight * mass
+        elif allowed is not None:
+            raise ValueError(f"cannot restrict {node.kind} node {nid}")
+        elif node.kind == "binary":
             draws[nid] = (u < params[:, 0]) & exists
         elif node.kind == "quantity":
             lo, hi = node.bounds
@@ -151,6 +211,7 @@ def simulate(graph: Graph, fc: Forecasts, n: int, seed, fixed_share: float | Non
             draws[nid] = np.where(exists, np.array(list(node.options))[idx], "")
         else:
             raise ValueError(node.kind)
+    draws["_weight"] = weight
     return draws
 
 
