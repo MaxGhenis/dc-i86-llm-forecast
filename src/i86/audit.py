@@ -24,8 +24,9 @@ filesystem at audit time. A search command's pattern is not taken for a path. Th
   - any MCP tool.
 - **Suspect** calls are reported for the operator to read, without excluding the run: a name-only
   search rooted above a protected place, a listing of the home directory or above, a local path
-  outside the work directory next to a term from these questions (foie, forecast, i86, ...), and
-  sub-agent calls whose contents the transcript does not show.
+  outside the work directory next to a term from these questions (foie, forecast, i86, ...), a web
+  call that opens this project's own repository (public, but without answers until every run has
+  finished), and sub-agent calls whose contents the transcript does not show.
 - Other local calls are listed. Web calls (WebSearch, WebFetch, Codex web_search, curl and wget) are
   counted and their URLs logged.
 
@@ -89,6 +90,8 @@ DISK_SEARCH = {"locate", "mdfind", "plocate", "glocate"}
 # Ways a name search's results reach another command, which can then read them.
 FEED = re.compile(r"\bxargs\b|\$\(|`|\s-(?:exec|execdir|ok|okdir)\b|\bwhile\s+read\b|\bparallel\b")
 WEB_TOOLS = {"WebSearch", "WebFetch"}
+# This project's own public repository. It holds no answers until every run has finished.
+OWN_REPO = re.compile(r"dc-i86-llm-forecast", re.I)
 
 
 def protected_roots() -> list[Path]:
@@ -446,6 +449,8 @@ def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path]) -> tuple[
     if tool == "collab":
         return "suspect", "sub-agent call; its work is not in this transcript"
     if tool in WEB_TOOLS or tool == "web_search":
+        if OWN_REPO.search(text):
+            return "suspect", "opens this project's repository on the web"
         return "web", ""
     paths, searches, notes = [], [], []
     if tool in {"shell", "Bash"}:

@@ -130,7 +130,8 @@ directory, expands globs, and does not mistake a search pattern for a path. Thes
 
 Calls that warrant reading without excluding the run are listed as suspect: a name-only search above a
 protected place, a listing of the home directory, a `cd` the audit cannot follow, a path outside the
-work directory next to a term from these questions, and sub-agent calls. The summary counts them per run. A run with no parseable
+work directory next to a term from these questions, a web call that opens this repository (it holds
+no answers until every run has finished), and sub-agent calls. The summary counts them per run. A run with no parseable
 transcript fails the audit, and `simulate` pools only runs that pass. `--allow-unaudited` admits manual
 runs, which have no transcript. The audit catches accidental and casual reads, not a forecaster set on
 hiding them.

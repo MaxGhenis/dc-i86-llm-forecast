@@ -99,6 +99,8 @@ def test_forbidden_calls_are_violations(tmp_path, event):
     codex("ls ~"),
     codex("cat /tmp/i86.pdf"),
     codex("cd \"$TARGET\" && cat x"),
+    claude("WebFetch", url="https://github.com/MaxGhenis/dc-i86-llm-forecast", prompt="read the README"),
+    claude("WebSearch", query="dc-i86-llm-forecast github"),
     codex("find .. -maxdepth 1 -name AGENTS.md"),
     {"type": "item.completed", "item": {"type": "collab_tool_call", "id": "c"}},
 ])
