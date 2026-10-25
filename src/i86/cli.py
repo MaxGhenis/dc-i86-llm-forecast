@@ -75,22 +75,31 @@ def cmd_dispatch(args) -> int:
 
 
 def run_dirs() -> list[Path]:
-    return sorted(p for p in runners.RUNS.iterdir() if (p / "meta.json").exists()) if runners.RUNS.exists() else []
+    return runners.run_dirs()
 
 
 def cmd_collect(args) -> int:
-    """Refresh every subfleet run; copy answers in only once every run, of any backend, has finished."""
-    dirs = run_dirs()
-    metas = {d: (runners.refresh_subfleet(d) if runners.read_meta(d).get("backend") == "subfleet"
-                 else runners.read_meta(d)) for d in dirs}
-    pending = [d.name for d, m in metas.items() if runners.still_going(m)]
-    unknown = {m.get("state") for m in metas.values() if m.get("backend") == "subfleet"} - runners.FINISHED - {
-        "queued", "waiting", "running", None}
-    if unknown:
-        print(f"unknown subfleet state(s) {sorted(unknown)}: treated as still going", file=sys.stderr)
-    if not pending:
-        for d in dirs:
-            runners.seal(d)
+    """Refresh every subfleet run; copy answers in only once every run, of any backend, has finished.
+
+    The whole check-and-copy holds the runs' lock, so no dispatch can start a run in between; before
+    copying, the runs are listed again and must match what was checked."""
+    with runners.bookkeeping_lock():
+        dirs = run_dirs()
+        metas = {d: (runners.refresh_subfleet(d) if runners.read_meta(d).get("backend") == "subfleet"
+                     else runners.read_meta(d)) for d in dirs}
+        pending = [d.name for d, m in metas.items() if runners.still_going(m)]
+        unknown = {m.get("state") for m in metas.values() if m.get("backend") == "subfleet"} - runners.FINISHED - {
+            "queued", "waiting", "running", None}
+        if unknown:
+            print(f"unknown subfleet state(s) {sorted(unknown)}: treated as still going", file=sys.stderr)
+        if not pending:
+            now_dirs = runners.run_dirs()
+            pending = [d.name for d in now_dirs if d not in metas or runners.still_going(runners.read_meta(d))]
+            for d in now_dirs:
+                metas.setdefault(d, runners.read_meta(d))
+        if not pending:
+            for d in dirs:
+                runners.seal(d)
     for d, meta in metas.items():
         have = (d / "response.md").exists()
         print(f"{d.name:24s} {meta.get('state') or '-':10s} {meta.get('model_served') or '-':18s} response={'yes' if have else 'no'}")

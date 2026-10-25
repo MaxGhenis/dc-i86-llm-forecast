@@ -9,8 +9,11 @@ it cannot find other runs' files by browsing its working directory.
 No answer enters the repository until every run has finished: the `claude` and `manual` backends
 write to a staging directory, and `collect` copies answers in only when no run of any backend is
 still going. A run that will never finish (a killed process, a manual run given up) is marked with
-`i86 abandon <label>`. After collection, `dispatch` refuses new runs unless they are marked
-`--late`, and the report flags late runs, which could have found the others' answers.
+`i86 abandon <label>`; abandonment is final, and an answer that run produces later is not collected.
+After collection, `dispatch` refuses new runs unless they are marked `--late`, and the report flags
+late runs, which could have found the others' answers. Dispatch, abandon and collect hold a lock
+file beside the staging directory while they check and change runs, so no run can start between
+collect's check and its copy.
 
 Backends:
 - `subfleet`: Max Ghenis's supervised lanes (`subfleet run --task research`).
@@ -22,10 +25,12 @@ Backends:
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import shutil
 import subprocess
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,6 +41,36 @@ WORK = Path.home() / ".cache" / "dc-i86-llm-forecast"
 STAGE = Path.home() / ".cache" / "dc-i86-llm-forecast-staging"
 # Run states. Anything not known to be finished counts as still going.
 FINISHED = {"succeeded", "failed", "cancelled", "canceled", "lost", "killed", "expired", "abandoned"}
+
+
+_lock_depth = 0
+
+
+@contextmanager
+def bookkeeping_lock():
+    """Hold the runs' lock file (reentrant within a process)."""
+    global _lock_depth
+    if _lock_depth:
+        _lock_depth += 1
+        try:
+            yield
+        finally:
+            _lock_depth -= 1
+        return
+    path = STAGE.with_name(STAGE.name + ".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        _lock_depth = 1
+        try:
+            yield
+        finally:
+            _lock_depth = 0
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def run_dirs() -> list[Path]:
+    return sorted(p for p in RUNS.iterdir() if (p / "meta.json").exists()) if RUNS.exists() else []
 
 
 def now() -> str:
@@ -65,15 +100,16 @@ def still_going(meta: dict) -> bool:
 
 
 def abandon(label: str) -> dict:
-    run_dir = RUNS / label
-    meta = read_meta(run_dir)
-    if not meta:
-        raise FileNotFoundError(f"no run {label}")
-    if (run_dir / "response.md").exists():
-        raise RuntimeError(f"run {label} is already collected")
-    meta.update(state="abandoned", abandoned_at=now())
-    write_meta(run_dir, meta)
-    return meta
+    with bookkeeping_lock():
+        run_dir = RUNS / label
+        meta = read_meta(run_dir)
+        if not meta:
+            raise FileNotFoundError(f"no run {label}")
+        if (run_dir / "response.md").exists():
+            raise RuntimeError(f"run {label} is already collected")
+        meta.update(state="abandoned", abandoned_at=now())
+        write_meta(run_dir, meta)
+        return meta
 
 
 def collected_any() -> bool:
@@ -81,21 +117,22 @@ def collected_any() -> bool:
 
 
 def prepare(label: str, prompt_path: Path, prompt_sha: str, backend: str, late: bool = False, **extra) -> Path:
-    run_dir = RUNS / label
-    if (run_dir / "meta.json").exists():
-        raise FileExistsError(f"run {label} already exists")
-    if collected_any() and not late:
-        raise RuntimeError("answers are already in runs/; a new run could read them. Pass --late to dispatch "
-                           "anyway (the report will flag it)")
-    if late:
-        extra["late"] = True
-    run_dir.mkdir(parents=True)
-    shutil.copyfile(prompt_path, run_dir / "prompt.md")
-    work = WORK / label
-    work.mkdir(parents=True, exist_ok=True)
-    write_meta(run_dir, {"label": label, "backend": backend, "prompt_sha256": prompt_sha,
-                         "workdir": str(work), "prepared_at": now(), **extra})
-    return run_dir
+    with bookkeeping_lock():
+        run_dir = RUNS / label
+        if (run_dir / "meta.json").exists():
+            raise FileExistsError(f"run {label} already exists")
+        if collected_any() and not late:
+            raise RuntimeError("answers are already in runs/; a new run could read them. Pass --late to "
+                               "dispatch anyway (the report will flag it)")
+        if late:
+            extra["late"] = True
+        run_dir.mkdir(parents=True)
+        shutil.copyfile(prompt_path, run_dir / "prompt.md")
+        work = WORK / label
+        work.mkdir(parents=True, exist_ok=True)
+        write_meta(run_dir, {"label": label, "backend": backend, "prompt_sha256": prompt_sha,
+                             "workdir": str(work), "prepared_at": now(), **extra})
+        return run_dir
 
 
 def subfleet_command(run_dir: Path, label: str, tier: str, model: str | None) -> list[str]:
@@ -191,8 +228,11 @@ def refresh_subfleet(run_dir: Path) -> dict:
         return meta
     info = json.loads(proc.stdout)
     job = info.get("job") or {}
-    meta["state"] = job.get("state")
-    meta["finished_at"] = job.get("finished_at")
+    if meta.get("state") == "abandoned":
+        meta["backend_state"] = job.get("state")  # abandonment is final
+    else:
+        meta["state"] = job.get("state")
+        meta["finished_at"] = job.get("finished_at")
     accepted = [a for a in info.get("attempts", []) if a.get("state") == "succeeded"]
     if accepted:
         a = accepted[-1]

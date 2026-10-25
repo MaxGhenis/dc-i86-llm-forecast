@@ -70,6 +70,33 @@ def share_cdf_at(grid, cdf, floor, ceiling, x) -> np.ndarray:
     return np.interp(x, xs, fs)
 
 
+def sample_share_band(grid, cdf, floor, ceiling, lo, hi, u, defensive: float = 0.0):
+    """Shares in (lo, hi] from the forecaster's CDF truncated to the band, and each draw's weight.
+
+    The CDF is linear between knots, so the band splits at the knots into segments within which the
+    share is uniform. A draw picks a segment, then a point in it. With `defensive` d, the segment is
+    picked with probability (1 - d) times the forecaster's own probability plus d spread evenly over
+    every segment the forecaster gives any probability (a defensive mixture), and the weight
+    p/q undoes the mixture: weighted means are exact, and no segment with probability goes unsampled
+    however small that probability. With d = 0 every weight is 1.
+    """
+    xs, fs = share_knots(grid, cdf, floor, ceiling)
+    pts = np.unique(np.concatenate([[lo, hi], xs[(xs > lo) & (xs < hi)]]))
+    mass = np.diff(np.interp(pts, xs, fs))
+    keep = mass > 0
+    if not keep.any():
+        raise ValueError(f"no probability on Yes shares in ({lo}, {hi}]")
+    a, b, m = pts[:-1][keep], pts[1:][keep], mass[keep]
+    p = m / m.sum()
+    q = (1 - defensive) * p + defensive / len(m)
+    cq = np.cumsum(q)
+    cq[-1] = 1.0
+    u = np.asarray(u, dtype=float)
+    seg = np.minimum(np.searchsorted(cq, u, side="right"), len(m) - 1)
+    frac = np.clip((u - (cq[seg] - q[seg])) / q[seg], 0.0, 1.0)
+    return a[seg] + frac * (b[seg] - a[seg]), p[seg] / q[seg]
+
+
 def share_density_at_half(grid, cdf) -> float:
     """Density of the Yes share at 50%, from the 49% and 51% grid points."""
     grid = list(grid)

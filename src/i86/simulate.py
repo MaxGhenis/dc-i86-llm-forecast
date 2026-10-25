@@ -17,7 +17,9 @@ defined only under that condition. The restricted node is drawn from the forecas
 to the allowed values and renormalized, and each draw carries the weight `_weight`: the probability
 the forecaster gave those values at that draw. Weighted means over the draws are then the
 forecaster's conditional distribution given the condition (self-normalized importance sampling),
-however unlikely the forecaster thinks the condition is.
+however unlikely the forecaster thinks the condition is. Such simulations also draw the Yes share
+defensively (`defensive`, see dists.sample_share_band), so a condition that holds only at shares the
+forecaster thinks unlikely still gets draws; the share's weight multiplies into `_weight`.
 """
 
 from __future__ import annotations
@@ -131,33 +133,34 @@ def band_mass(graph: Graph, fc: Forecasts, band: tuple[float, float]) -> float:
 
 def simulate(graph: Graph, fc: Forecasts, n: int, seed, fixed_share: float | None = None,
              continuous_share: float | None = None, share_band: tuple[float, float] | None = None,
-             restrict: dict | None = None):
+             restrict: dict | None = None, defensive: bool = False):
     """Draws for every node. Booleans are bool arrays; quantities floats; pmf nodes their value;
     categorical nodes their option name ('' where the node does not exist). `_weight` holds each
     draw's weight: 1 unless `restrict` is given.
 
     The Yes share is drawn from the forecaster's CDF, fixed (`fixed_share`), or drawn from the CDF
     truncated to a band (`share_band`, (lo, hi]; a band whose lower end is 0.5 or more excludes it).
-    `restrict` maps a binary or categorical node to the values it may take (see the module notes).
+    `restrict` maps a binary or categorical node to the values it may take, and `defensive` draws the
+    share from a defensive mixture (see the module notes).
     """
     rng = np.random.default_rng(seed)
     share_node = graph.nodes["yes_share"]
     cdf = np.asarray(fc.values["yes_share"]["all"], dtype=float)
     u_share = rng.random(n)
+    weight = np.ones(n)
+    if fixed_share is None and share_band is None and defensive:
+        share_band = (graph.share_floor, graph.share_ceiling)
     if fixed_share is not None:
         v = np.full(n, float(fixed_share))
     elif share_band is not None:
-        # The forecaster's Yes-share distribution truncated to (lo, hi]: inverse CDF on [F(lo), F(hi)].
+        # The forecaster's Yes-share distribution truncated to (lo, hi].
         lo, hi = share_band
-        f_lo, f_hi = dists.share_cdf_at(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling,
-                                        np.array([lo, hi]))
-        v = dists.sample_share(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling,
-                               f_lo + u_share * (f_hi - f_lo))
+        v, weight = dists.sample_share_band(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling,
+                                            lo, hi, u_share, defensive=0.5 if defensive else 0.0)
         v = np.clip(v, np.nextafter(lo, 1.0) if lo >= 0.5 else lo, hi)
     else:
         v = dists.sample_share(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling, u_share)
     draws: dict[str, np.ndarray] = {"yes_share": v, "passes": v > 0.5}
-    weight = np.ones(n)
     restrict = restrict or {}
     v_cont = None if continuous_share is None else np.full(n, float(continuous_share))
     for nid in graph.order:

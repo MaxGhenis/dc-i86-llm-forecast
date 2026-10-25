@@ -21,9 +21,11 @@ runs contributed.
 For a question defined only under a condition (the ban still standing, say), `<cond>` holds the joint
 probability P(condition and event) and `<cond>|given` the conditional P(event | condition). The
 conditional comes from a further simulation restricted to worlds where the condition holds, weighted
-by each draw's probability of it (see simulate.py), so a forecaster that thinks the condition
-unlikely still contributes a full set of draws. Only a forecaster that gives it no probability at all
-is left out.
+by each draw's probability of it, with the Yes share drawn from a defensive mixture that reaches every
+share the forecaster gives any probability (see simulate.py). A forecaster that thinks the condition
+unlikely still contributes a full set of draws. One that gives it no probability is left out; so is one
+whose draws all miss it, which takes a condition that also hinges on something rare besides the Yes
+share. The summaries' run counts show either.
 
 Y against N is not an effect: it also carries what the result says about public opinion. Every number
 here is a model forecast, not an observation.
@@ -190,7 +192,7 @@ def run_summary(graph: Graph, fc: Forecasts, n: int, seed) -> dict:
     # Same-day results DC cannot cause (Denver's) are held at 50% in both arms.
     setups["cutoff_fail"] = {"seed": [*seed, 1], "fixed_share": CUTOFF[0], "continuous_share": 0.5}
     setups["cutoff_pass"] = {"seed": [*seed, 1], "fixed_share": CUTOFF[1], "continuous_share": 0.5}
-    sims = {c: (simulate(graph, fc, n, **kw) if masses.get(c, 1.0) > 1e-9 else None) for c, kw in setups.items()}
+    sims = {c: (simulate(graph, fc, n, **kw) if masses.get(c, 1.0) > 0 else None) for c, kw in setups.items()}
 
     given: dict[tuple[str, str], tuple | None] = {}
 
@@ -200,6 +202,13 @@ def run_summary(graph: Graph, fc: Forecasts, n: int, seed) -> dict:
         if key in given:
             return given[key]
         base, side, result = sims[cond], SIDE[cond], None
+
+        def filtered() -> tuple | None:
+            # Draws with the Yes share drawn defensively, kept where the condition holds.
+            d = simulate(graph, fc, n, **setups[cond], defensive=True)
+            w = d["_weight"] * condition.evaluate_vec(d)
+            return (d, w) if w.sum() > 0 else None
+
         if base is not None:
             if side is None:
                 if condition_restriction(graph, condition, False) is None:
@@ -207,17 +216,15 @@ def run_summary(graph: Graph, fc: Forecasts, n: int, seed) -> dict:
                     # conditional.
                     result = given_draws("Y", condition)
                 else:
-                    mask = condition.evaluate_vec(base)
-                    result = (base, mask.astype(float)) if mask.any() else None
+                    result = filtered()
             else:
                 r = condition_restriction(graph, condition, side)
                 if r == {}:
                     result = (base, None)
                 elif r == FILTER:
-                    mask = condition.evaluate_vec(base)
-                    result = (base, mask.astype(float)) if mask.any() else None
+                    result = filtered()
                 elif r is not None:
-                    d = simulate(graph, fc, n, **setups[cond], restrict=r)
+                    d = simulate(graph, fc, n, **setups[cond], restrict=r, defensive=True)
                     result = (d, d["_weight"]) if d["_weight"].sum() > 0 else None
         given[key] = result
         return result

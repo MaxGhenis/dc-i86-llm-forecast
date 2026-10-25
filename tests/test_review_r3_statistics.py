@@ -5,7 +5,6 @@ They first ran as strict expected failures against aa6fbad; the fixes made them 
 """
 
 import numpy as np
-import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 

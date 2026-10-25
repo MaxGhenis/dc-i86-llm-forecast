@@ -7,7 +7,7 @@ from hypothesis import strategies as st
 
 from i86 import dists
 from i86.graph import Entry
-from i86.response import parse, quantile_key, share_key
+from i86.response import parse, quantile_key
 from i86.simulate import decisive_probability, simulate
 from i86.summarize import CUTOFF, pool, run_seed, run_summary
 from mock import MOCK_response
