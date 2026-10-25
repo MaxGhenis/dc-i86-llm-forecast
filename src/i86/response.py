@@ -95,6 +95,9 @@ def parse(graph: Graph, obj: dict) -> Forecasts:
         raise ResponseError(["the response must be an object with a 'nodes' object"])
     out = Forecasts(values={})
     out.forecaster = obj.get("forecaster") or {}
+    prior = out.forecaster.get("prior_context") if isinstance(out.forecaster, dict) else None
+    if not isinstance(prior, str) or not prior.strip():
+        problems.append("forecaster.prior_context: required; quote anything beyond the brief, or write 'none'")
     out.research_summary = obj.get("research_summary") or ""
     given_nodes = obj["nodes"]
     for node in graph.forecast_nodes():

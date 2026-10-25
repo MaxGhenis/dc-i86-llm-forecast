@@ -83,10 +83,11 @@ def test_structural_invariants_hold_in_every_draw(graph, draws):
             assert x.min() >= node.bounds[0] and x.max() <= node.bounds[1], node.id
             if node.integer:
                 assert np.all(x == np.rint(x)), node.id
-    assert np.array_equal(draws["ban_applies"], draws["ban_status"] == "applies")
-    assert not np.any(draws["ban_applies"] & ~passes)
-    assert not np.any(draws["pate_treated_banned"] & ~draws["ban_applies"])
-    assert not np.any(draws["fattened_narrowed"] & ~draws["ban_applies"])
+    assert np.array_equal(draws["ban_certified"], draws["ban_status"] == "certified")
+    assert np.array_equal(draws["ban_standing"], np.isin(draws["ban_status"], ["certified", "not_certified"]))
+    assert not np.any(draws["ban_standing"] & ~passes)
+    assert not np.any(draws["pate_treated_banned"] & ~draws["ban_standing"])
+    assert not np.any(draws["fattened_narrowed"] & ~draws["ban_standing"])
 
 
 def test_categorical_draws_match_the_forecast_probabilities(graph, mock_fc):
@@ -211,7 +212,7 @@ def test_pooling_weights_each_forecasters_conditional_equally(graph):
     ra = run_summary(graph, a, 4000, run_seed(0, "a"))
     rb = run_summary(graph, b, 4000, run_seed(0, "b"))
     assert result["vote"]["p_pass"] == pytest.approx((ra["vote"]["p_pass"] + rb["vote"]["p_pass"]) / 2)
-    for key in ["foie_gras_menus", "paf_statewide_2028", "ban_status.applies"]:
+    for key in ["foie_gras_menus", "paf_statewide_2028", "ban_status.certified"]:
         want = (ra["nodes"][key]["cutoff_effect"] + rb["nodes"][key]["cutoff_effect"]) / 2
         assert result["nodes"][key]["cutoff_effect"] == pytest.approx(want)
         for cond in ["N", "Y"]:
@@ -257,5 +258,31 @@ def test_report_renders(graph, tmp_path):
     report.write(graph, result, {"MOCK-a": {"model_served": "MOCK"}}, tmp_path)
     text = (tmp_path / "summary.md").read_text()
     assert "Chance one ballot decides it" in text and "`foie_gras_menus`" in text
-    assert "`ban_status.applies`" in text and "is not an effect" in text
+    assert "`ban_status.certified`" in text and "is not an effect" in text
     assert (tmp_path / "plots" / "ban-status.svg").exists()
+
+
+def test_conditions_are_simulated_by_truncation_so_every_run_counts(graph):
+    # A confident MOCK forecaster (Yes share about N(0.62, 0.04)) still gets n draws in each condition.
+    fc = parse(graph, MOCK_response(graph, share_mean=0.62, share_sd=0.04))
+    r = run_summary(graph, fc, 3000, [0, 9])
+    share = r["parts"]["yes_share"]
+    assert len(share["N"]) == 3000 and np.all(share["N"] <= 0.5)
+    assert len(share["Y"]) == 3000 and np.all(share["Y"] > 0.5)
+    assert len(share["Nc"]) == 3000 and np.all((share["Nc"] > 0.47) & (share["Nc"] <= 0.50))
+    assert len(share["Yc"]) == 3000 and np.all((share["Yc"] > 0.50) & (share["Yc"] <= 0.53))
+    assert r["masses"]["N"] == pytest.approx(1 - r["vote"]["p_pass"], abs=1e-9)
+
+
+def test_questions_defined_under_a_condition_report_the_conditional_and_the_joint(graph):
+    obj = MOCK_response(graph)
+    for value in obj["nodes"]["pate_treated_banned"]["forecasts"].values():
+        value["p"] = 0.5
+    for value in obj["nodes"]["ban_status"]["forecasts"].values():
+        value.update(repealed=0.3, congress=0.1, court=0.2, not_certified=0.1, certified=0.3)
+    result = pool(graph, {"MOCK": parse(graph, obj)}, n=40_000, seed=0)
+    e = result["nodes"]["pate_treated_banned"]
+    assert e["Y|given"]["p"] == pytest.approx(0.5, abs=0.01)
+    assert e["Y"]["p"] == pytest.approx(0.4 * 0.5, abs=0.01)
+    assert e["N|given"] is None and e["N"]["p"] == 0.0
+    assert result["nodes"]["ban_status.certified"]["Y|given"]["p"] == pytest.approx(0.3, abs=0.01)

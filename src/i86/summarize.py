@@ -1,22 +1,25 @@
 """Pool forecasters and summarize every node under each condition.
 
-Each forecaster is simulated on its own. A pooled summary under a condition gives every forecaster's
-*own conditional distribution* equal weight: P_pool(X | passes) is the average over forecasters of
-P_i(X | passes), whatever each forecaster thinks the chance of passing is. (Pooling the raw draws
-instead would let the forecasters who expect it to pass dominate the 'passes' column and those who
-expect it to fail dominate the other, so a gap between the columns could reflect who believes what
-rather than any effect.) A forecaster with no draws under a condition is left out of that column; the
-summary records how many runs contributed.
+Each forecaster is simulated on its own, once per condition:
 
-Conditions:
+- all: the Yes share drawn from the forecaster's own distribution.
+- N and Y: drawn from that distribution truncated to failing (at most 50%) or passing shares.
+- Nc and Yc: truncated to the close bands from the graph, 47-50% and 50-53%.
+- cutoff_fail and cutoff_pass: fixed at 49.5% and at 50.5%, with shared random numbers. Their
+  difference is the forecaster's estimate of what a bare pass changes. It says nothing about what
+  passing does in a typical passing world (a 60% win can bring a Council less willing to repeal, for
+  example).
 
-- all: unconditional.
-- N and Y: the measure fails or passes (share at or below, or above, 50%).
-- Nc and Yc: the close bands from the graph, 47-50% and 50-53%.
-- cutoff_fail and cutoff_pass: the forecaster simulated at a fixed 49.5% and a fixed 50.5% Yes share
-  with shared random numbers. Their difference is the forecaster's estimate of what a bare pass
-  changes. It says nothing about what passing does in a typical passing world (a 60% win can bring a
-  Council less willing to repeal, for example).
+Truncating, rather than filtering one simulation, gives every forecaster the same number of draws in
+each condition, however unlikely it thinks that condition is. A pooled summary then gives each
+forecaster's *own conditional distribution* equal weight: P_pool(X | passes) is the average over
+forecasters of P_i(X | passes). (Pooling the raw draws instead would let the forecasters who expect it
+to pass dominate the 'passes' column, so a gap between the columns could reflect who believes what.)
+A forecaster that puts no probability on a condition is left out of it; summaries record how many
+runs contributed.
+
+For a question defined only under a condition (the ban still standing, say), `<cond>` holds the joint
+probability P(condition and event) and `<cond>|given` the conditional P(event | condition).
 
 Y against N is not an effect: it also carries what the result says about public opinion. Every number
 here is a model forecast, not an observation.
@@ -30,22 +33,20 @@ import numpy as np
 
 from .graph import Entry, Graph
 from .response import Forecasts
-from .simulate import decisive_probability, simulate
+from .simulate import band_mass, decisive_probability, simulate
 
 SUMMARY_QUANTILES = (0.05, 0.25, 0.5, 0.75, 0.95)
 CUTOFF = (0.495, 0.505)
 CONDITIONS = ("all", "N", "Y", "Nc", "Yc", "cutoff_fail", "cutoff_pass")
 
 
-def condition_masks(graph: Graph, share: np.ndarray) -> dict[str, np.ndarray]:
-    yc_lo, yc_hi = graph.bands["Yc"]
-    nc_lo, nc_hi = graph.bands["Nc"]
+def condition_bands(graph: Graph) -> dict[str, tuple[float, float]]:
+    """Yes-share bands (lo, hi] for the conditions simulated by truncation."""
     return {
-        "all": np.ones(len(share), bool),
-        "N": share <= 0.5,
-        "Y": share > 0.5,
-        "Nc": (share >= nc_lo) & (share <= nc_hi),
-        "Yc": (share > yc_lo) & (share <= yc_hi),
+        "N": (graph.share_floor, 0.5),
+        "Y": (0.5, graph.share_ceiling),
+        "Nc": tuple(graph.bands["Nc"]),
+        "Yc": tuple(graph.bands["Yc"]),
     }
 
 
@@ -124,12 +125,16 @@ def diagnostics(graph: Graph, fc: Forecasts) -> dict:
         if len(cells) < 2:
             continue
         for state in list(node.states) or [None]:
-            vals = [fc.values[node.id].get(Entry(c, state).key) for c in cells]
+            here = [c for c in cells if graph.possible(node, c, state)]
+            if len(here) < 2:
+                continue
+            cells_here = here
+            vals = [fc.values[node.id].get(Entry(c, state).key) for c in cells_here]
             groups += 1
             flat += all(v == vals[0] for v in vals)
-            if CUTOFF[0] in cells and CUTOFF[1] in cells and not node.continuous:
+            if CUTOFF[0] in cells_here and CUTOFF[1] in cells_here and not node.continuous:
                 jumps += 1
-                zero += vals[cells.index(CUTOFF[0])] == vals[cells.index(CUTOFF[1])]
+                zero += vals[cells_here.index(CUTOFF[0])] == vals[cells_here.index(CUTOFF[1])]
     return {
         "groups": groups,
         "flat_share": flat / groups if groups else None,
@@ -141,17 +146,29 @@ def diagnostics(graph: Graph, fc: Forecasts) -> dict:
 def run_summary(graph: Graph, fc: Forecasts, n: int, seed) -> dict:
     """Everything for one forecaster: draws by condition, cutoff contrast, decisive odds."""
     seed = [int(x) for x in np.atleast_1d(seed)]
-    draws = simulate(graph, fc, n, seed)
-    masks = condition_masks(graph, draws["yes_share"])
+    sims = {"all": simulate(graph, fc, n, seed)}
+    masses = {}
+    for i, (cond, band) in enumerate(condition_bands(graph).items()):
+        masses[cond] = band_mass(graph, fc, band)
+        sims[cond] = simulate(graph, fc, n, [*seed, 3 + i], share_band=band) if masses[cond] > 1e-9 else None
     # Same-day results DC cannot cause (Denver's) are held at 50% in both arms.
-    lo = simulate(graph, fc, n, [*seed, 1], fixed_share=CUTOFF[0], continuous_share=0.5)
-    hi = simulate(graph, fc, n, [*seed, 1], fixed_share=CUTOFF[1], continuous_share=0.5)
+    sims["cutoff_fail"] = simulate(graph, fc, n, [*seed, 1], fixed_share=CUTOFF[0], continuous_share=0.5)
+    sims["cutoff_pass"] = simulate(graph, fc, n, [*seed, 1], fixed_share=CUTOFF[1], continuous_share=0.5)
     nodes, parts = {}, {}
     for key in summary_keys(graph):
-        x = values(draws, key)
-        by_cond = {c: x[m] for c, m in masks.items()}
-        by_cond["cutoff_fail"] = values(lo, key)
-        by_cond["cutoff_pass"] = values(hi, key)
+        owner = graph.owner(key)
+        by_cond: dict[str, np.ndarray] = {}
+        for cond in CONDITIONS:
+            draws = sims[cond]
+            if draws is None:
+                by_cond[cond] = np.array([], dtype=bool)
+                if owner.exists_if is not None:
+                    by_cond[f"{cond}|given"] = np.array([], dtype=bool)
+                continue
+            x = values(draws, key)
+            by_cond[cond] = x
+            if owner.exists_if is not None:
+                by_cond[f"{cond}|given"] = x[owner.exists_if.evaluate_vec(draws)]
         entry = {c: describe(graph, key, v) for c, v in by_cond.items()}
         entry["cutoff_effect"] = float(np.mean(by_cond["cutoff_pass"])) - float(np.mean(by_cond["cutoff_fail"]))
         nodes[key] = entry
@@ -159,6 +176,7 @@ def run_summary(graph: Graph, fc: Forecasts, n: int, seed) -> dict:
     return {
         "parts": parts,
         "nodes": nodes,
+        "masses": masses,
         "vote": decisive_probability(graph, fc, n, [*seed, 2]),
         "diagnostics": diagnostics(graph, fc),
     }
@@ -173,7 +191,8 @@ def pool(graph: Graph, runs: dict[str, Forecasts], n: int = 20000, seed: int = 0
     p_dec = [v["p_decisive"] for v in votes]
     pooled_nodes = {}
     for key in summary_keys(graph):
-        entry = {c: describe_parts(graph, key, [r["parts"][key][c] for r in per_run.values()]) for c in CONDITIONS}
+        conds = next(iter(per_run.values()))["parts"][key]
+        entry = {c: describe_parts(graph, key, [r["parts"][key][c] for r in per_run.values()]) for c in conds}
         effects = [r["nodes"][key]["cutoff_effect"] for r in per_run.values()]
         entry["cutoff_effect"] = float(np.mean(effects))
         entry["cutoff_effect_by_run"] = dict(zip(per_run, effects))
@@ -201,6 +220,6 @@ def pool(graph: Graph, runs: dict[str, Forecasts], n: int = 20000, seed: int = 0
         "seed": seed,
         "nodes": pooled_nodes,
         "vote": pooled_vote,
-        "per_run": {rid: {"nodes": r["nodes"], "vote": r["vote"], "diagnostics": r["diagnostics"]}
-                    for rid, r in per_run.items()},
+        "per_run": {rid: {"nodes": r["nodes"], "vote": r["vote"], "diagnostics": r["diagnostics"],
+                          "masses": r["masses"]} for rid, r in per_run.items()},
     }

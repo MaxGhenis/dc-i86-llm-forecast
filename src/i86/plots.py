@@ -153,8 +153,9 @@ def status_chart(graph: Graph, result: dict, nid: str = "ban_status") -> str | N
     rows = []
     for option, text in node.options.items():
         e = result["nodes"][f"{nid}.{option}"]
-        if e.get("Y") and e.get("cutoff_pass"):
-            rows.append((option, text, e["Y"]["p"], e["cutoff_pass"]["p"]))
+        y, c = e.get("Y|given") or e.get("Y"), e.get("cutoff_pass|given") or e.get("cutoff_pass")
+        if y and c:
+            rows.append((option, text, y["p"], c["p"]))
     if not rows:
         return None
     width, left, right, top, row_h = 760, 160, 30, 76, 34

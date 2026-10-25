@@ -9,7 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from .graph import ROOT, Graph, Node, cell_label
+from .graph import ROOT, Graph, Node
 from .response import quantile_key, share_key, template
 
 CONTEXT = ROOT / "context"
@@ -34,11 +34,12 @@ give your own numbers.
    The `yes_49.5` and `yes_50.5` cells differ almost only in whether the measure passed; the difference
    between them is your estimate of what a bare pass changes. Denver votes the same day, so DC's result
    cannot change Denver's: there the two cells should differ only by what one point of DC margin says.
-4. A *state* such as `applies` conditions on other questions in this map, defined below. When a
-   question has both, forecast it for every cell and state pair.
-5. A question with states but no cells is forecast under each state only. For it, average over your own
-   distribution of the Yes share within that state (and within any "defined only if" condition).
-6. Questions marked "defined only if" are forecast assuming their condition holds.
+4. A *state* such as `certified` conditions on other questions in this map, defined below. Each
+   question lists exactly the cell and state pairs to forecast, as `cell|state` keys.
+5. Some questions are asked only at `yes_49.5` and `yes_50.5`: a bare fail and a bare pass. The pooled
+   report uses those answers for every failing and every passing margin.
+6. Questions marked "defined only if" are forecast assuming their condition holds, and are void (not
+   scored) if it does not.
 7. Quantities take five quantiles (p05, p25, p50, p75, p95): your 5th percentile, quartiles, median and
    95th percentile. Quantiles must not decrease and must lie within the stated bounds.
 8. `yes_share` takes your cumulative probability that the certified Yes share is at or below each grid
@@ -61,15 +62,14 @@ research in `research_summary`. Nothing after the block.
 
 
 def _entries_text(graph: Graph, node: Node) -> str:
-    parts = []
-    cells = graph.cells_for(node)
-    if cells != [None]:
-        parts.append("cells " + ", ".join(cell_label(c) for c in cells))
-    if node.states:
-        parts.append(
-            "states " + "; ".join(f"`{name}` = {cond.text}" for name, cond in node.states.items())
-        )
-    return " × ".join(parts) if parts else "one forecast (`all`)"
+    entries = graph.entries(node)
+    if [e.key for e in entries] == ["all"]:
+        return "one forecast (`all`)"
+    return ", ".join(f"`{e.key}`" for e in entries)
+
+
+def _states_text(node: Node) -> list[str]:
+    return [f"  - `{name}`: {cond.text}" for name, cond in node.states.items()]
 
 
 def node_text(graph: Graph, node: Node) -> str:
@@ -91,12 +91,16 @@ def node_text(graph: Graph, node: Node) -> str:
         kind = "probability for each option (they are exclusive and sum to 1)"
     else:
         kind = "cumulative probabilities at " + ", ".join(f"`{share_key(x)}`" for x in graph.share_grid)
-    lines.append(f"- Forecast: {kind}.")
-    lines.append(f"- Conditions: {_entries_text(graph, node)}.")
-    for option, text in node.options.items():
-        lines.append(f"  - `{option}`: {text}")
+    lines.append(f"- Answer each with: {kind}.")
+    lines.append(f"- Forecasts: {_entries_text(graph, node)}.")
+    if node.states:
+        lines.append("- States:")
+        lines += _states_text(node)
+    if node.options:
+        lines.append("- Options:")
+        lines += [f"  - `{option}`: {text}" for option, text in node.options.items()]
     if node.exists_if is not None:
-        lines.append(f"- Defined only if `{node.exists_if.text}`.")
+        lines.append(f"- Defined only if `{node.exists_if.text}`; void otherwise.")
     lines.append(f"- Resolution: {node.resolution}")
     if node.baseline:
         lines.append("- Report a baseline (current value, date, source).")

@@ -1,22 +1,26 @@
 """Dispatch forecaster runs and collect their answers.
 
-A run lives in `runs/<label>/`: `prompt.md` (the shared prompt), `meta.json` (backend, prompt hash,
+A run lives in `runs/<label>/`: `prompt.md` (the shared brief), `meta.json` (backend, prompt hash,
 command, job id, model served, timestamps) and, once collected, `response.md` (the agent's final
-message, verbatim). The agent works in an empty directory outside the repository so it cannot
-find other runs' files by browsing its working directory.
+message, verbatim), `transcript.jsonl` and, for subfleet, `prompt.sent.md` (exactly what the model was
+given, with the lane's own preamble). The agent works in an empty directory outside the repository so
+it cannot find other runs' files by browsing its working directory.
+
+No answer enters the repository until every run has finished: the `claude` backend writes to a
+staging directory, and `collect` copies answers in only when no subfleet run is still going. After
+that, `dispatch` refuses new runs unless they are marked `--late`, and the report flags late runs,
+which could have found the others' answers.
 
 Backends:
-- `subfleet`: Max Ghenis's supervised lanes (`subfleet run --task research`). No answer is written into
-  the repository until every subfleet run has finished, so a run that starts late cannot find an
-  earlier run's answer there. `collect` then copies each job's deliverable.
+- `subfleet`: Max Ghenis's supervised lanes (`subfleet run --task research`).
 - `claude`: Claude Code in print mode, bare (no hooks, memory, CLAUDE.md or MCP servers; it needs
-  ANTHROPIC_API_KEY), with only WebSearch and WebFetch. The stream-json transcript is saved for the
-  audit.
+  ANTHROPIC_API_KEY), with only WebSearch and WebFetch. The stream-json transcript is its audit trail.
 - `manual`: write the prompt and paste the agent's final message into `response.md` yourself.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -27,6 +31,9 @@ from .graph import ROOT
 
 RUNS = ROOT / "runs"
 WORK = Path.home() / ".cache" / "dc-i86-llm-forecast"
+STAGE = Path.home() / ".cache" / "dc-i86-llm-forecast-staging"
+# Subfleet job states. Anything not known to be finished counts as still going.
+FINISHED = {"succeeded", "failed", "cancelled", "canceled", "lost", "killed", "expired"}
 
 
 def now() -> str:
@@ -42,10 +49,19 @@ def write_meta(run_dir: Path, meta: dict) -> None:
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 
 
-def prepare(label: str, prompt_path: Path, prompt_sha: str, backend: str, **extra) -> Path:
+def collected_any() -> bool:
+    return RUNS.exists() and any((d / "response.md").exists() for d in RUNS.iterdir() if d.is_dir())
+
+
+def prepare(label: str, prompt_path: Path, prompt_sha: str, backend: str, late: bool = False, **extra) -> Path:
     run_dir = RUNS / label
     if (run_dir / "meta.json").exists():
         raise FileExistsError(f"run {label} already exists")
+    if collected_any() and not late:
+        raise RuntimeError("answers are already in runs/; a new run could read them. Pass --late to dispatch "
+                           "anyway (the report will flag it)")
+    if late:
+        extra["late"] = True
     run_dir.mkdir(parents=True)
     shutil.copyfile(prompt_path, run_dir / "prompt.md")
     work = WORK / label
@@ -90,8 +106,9 @@ def parse_stream(text: str) -> tuple[str, str | None]:
     return final, model
 
 
-def dispatch_subfleet(label: str, prompt_path: Path, prompt_sha: str, tier: str, model: str | None) -> dict:
-    run_dir = prepare(label, prompt_path, prompt_sha, "subfleet", tier=tier, model_pin=model)
+def dispatch_subfleet(label: str, prompt_path: Path, prompt_sha: str, tier: str, model: str | None,
+                      late: bool = False) -> dict:
+    run_dir = prepare(label, prompt_path, prompt_sha, "subfleet", late=late, tier=tier, model_pin=model)
     cmd = subfleet_command(run_dir, label, tier, model)
     proc = subprocess.run(cmd, capture_output=True, text=True)
     meta = read_meta(run_dir)
@@ -114,26 +131,24 @@ def dispatch_subfleet(label: str, prompt_path: Path, prompt_sha: str, tier: str,
     return meta
 
 
-def dispatch_claude(label: str, prompt_path: Path, prompt_sha: str, model: str) -> dict:
-    run_dir = prepare(label, prompt_path, prompt_sha, "claude", model_pin=model)
+def dispatch_claude(label: str, prompt_path: Path, prompt_sha: str, model: str, late: bool = False) -> dict:
+    run_dir = prepare(label, prompt_path, prompt_sha, "claude", late=late, model_pin=model)
     meta = read_meta(run_dir)
     cmd = claude_command(model)
     meta.update(command=cmd, dispatched_at=now())
     write_meta(run_dir, meta)
     with open(run_dir / "prompt.md") as stdin:
         proc = subprocess.run(cmd, stdin=stdin, capture_output=True, text=True, cwd=meta["workdir"])
-    transcript = run_dir / "transcript.jsonl"
-    transcript.write_text(proc.stdout)
+    stage = STAGE / label
+    stage.mkdir(parents=True, exist_ok=True)
+    (stage / "transcript.jsonl").write_text(proc.stdout)
     final, served = parse_stream(proc.stdout)
     if final:
-        (run_dir / "response.md").write_text(final)
-    meta.update(finished_at=now(), rc=proc.returncode, model_served=served, transcript=str(transcript),
-                stderr=proc.stderr[-2000:])
+        (stage / "response.md").write_text(final)
+    meta.update(finished_at=now(), rc=proc.returncode, model_served=served, state="succeeded" if final else "failed",
+                transcript=str(stage / "transcript.jsonl"), stderr=proc.stderr[-2000:])
     write_meta(run_dir, meta)
     return meta
-
-
-TERMINAL = {"succeeded", "failed", "cancelled", "canceled", "killed", "expired"}
 
 
 def refresh_subfleet(run_dir: Path) -> dict:
@@ -163,15 +178,39 @@ def refresh_subfleet(run_dir: Path) -> dict:
     return meta
 
 
-def fetch_subfleet_output(run_dir: Path) -> bool:
-    """Copy a succeeded job's deliverable into response.md. Call only once every run has finished."""
+def seal(run_dir: Path) -> bool:
+    """Copy a finished run's answer, transcript and model-input prompt into runs/<label>/.
+
+    Call only once every run has finished. Returns whether the run has an answer.
+    """
     meta = read_meta(run_dir)
-    if meta.get("state") != "succeeded" or (run_dir / "response.md").exists():
-        return (run_dir / "response.md").exists()
-    out = subprocess.run(["subfleet", "runs", "show", meta["job_id"], "--out"], capture_output=True, text=True)
-    if out.returncode == 0 and out.stdout.strip():
-        (run_dir / "response.md").write_text(out.stdout)
-        meta["collected_at"] = now()
-        write_meta(run_dir, meta)
+    if (run_dir / "response.md").exists():
         return True
-    return False
+    if meta.get("state") != "succeeded":
+        return False
+    if meta.get("backend") == "subfleet":
+        out = subprocess.run(["subfleet", "runs", "show", meta["job_id"], "--out"], capture_output=True, text=True)
+        if out.returncode != 0 or not out.stdout.strip():
+            return False
+        answer = out.stdout
+        attempt = Path.home() / ".subfleet" / "jobs" / meta["attempt_id"] if meta.get("attempt_id") else None
+        if attempt and (attempt / "prompt.sent.md").exists():
+            sent = (attempt / "prompt.sent.md").read_bytes()
+            (run_dir / "prompt.sent.md").write_bytes(sent)
+            meta["prompt_sent_sha256"] = hashlib.sha256(sent).hexdigest()
+    elif meta.get("backend") == "claude":
+        staged = STAGE / run_dir.name / "response.md"
+        if not staged.exists():
+            return False
+        answer = staged.read_text()
+    else:
+        return False
+    transcript = Path(meta.get("transcript") or "")
+    if transcript.is_file():
+        shutil.copyfile(transcript, run_dir / "transcript.jsonl")
+        meta["transcript_original"] = str(transcript)
+        meta["transcript"] = str(run_dir / "transcript.jsonl")
+    (run_dir / "response.md").write_text(answer)
+    meta["collected_at"] = now()
+    write_meta(run_dir, meta)
+    return True

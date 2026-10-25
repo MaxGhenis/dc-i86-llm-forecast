@@ -33,7 +33,7 @@ def test_states_are_exclusive_and_exhaustive_wherever_the_node_exists(graph):
 
 def test_overlapping_states_are_rejected(tmp_path):
     text = (graph_mod.GRAPH_PATH).read_text().replace(
-        'unfunded: "ban_status.unfunded"', 'unfunded: "passes"'
+        'certified: "ban_certified"', 'certified: "passes"'
     )
     path = tmp_path / "graph.yaml"
     path.write_text(text)
@@ -85,7 +85,7 @@ def _first_entry(obj, node_id):
         (lambda o: _first_entry(o, "paf_measures_2027_2028").update({"0": 5.0}), "sum to 1"),
         (lambda o: o["nodes"]["lawsuit_filed"]["forecasts"].clear(), "missing"),
         (lambda o: o["nodes"]["lawsuit_filed"]["forecasts"].update(extra={"p": 0.1}), "unexpected"),
-        (lambda o: o["nodes"]["ban_status"]["forecasts"]["yes_60.0"].update(applies=5.0), "sum to 1"),
+        (lambda o: o["nodes"]["ban_status"]["forecasts"]["yes_60.0"].update(certified=5.0), "sum to 1"),
         (lambda o: o["nodes"].pop("turnout"), "turnout: missing"),
         (lambda o: _first_entry(o, "turnout").update(p50=None), "numbers"),
     ],
@@ -133,16 +133,15 @@ def _load_edited(tmp_path, old, new):
 
 def test_option_tests_must_name_a_real_option_of_a_categorical_node(tmp_path):
     with pytest.raises(GraphError, match="unknown option"):
-        _load_edited(tmp_path, 'rule: "ban_status.applies"', 'rule: "ban_status.in_force"')
+        _load_edited(tmp_path, 'rule: "ban_status.certified"', 'rule: "ban_status.in_force"')
     with pytest.raises(GraphError, match="not categorical"):
-        _load_edited(tmp_path, 'rule: "ban_status.applies"', 'rule: "lawsuit_filed.applies"')
+        _load_edited(tmp_path, 'rule: "ban_status.certified"', 'rule: "lawsuit_filed.certified"')
     with pytest.raises(GraphError, match="not boolean"):
-        _load_edited(tmp_path, 'rule: "ban_status.applies"', 'rule: "ban_status"')
+        _load_edited(tmp_path, 'rule: "ban_status.certified"', 'rule: "ban_status"')
 
 
 def test_pass_only_cells_need_an_exists_if_that_implies_passes(tmp_path):
-    old = ("    exists_if: passes\n    given: {cells: pass}\n"
-           "    question: \"A lawsuit challenging I-86 is filed between 2026-11-03 and 2028-12-01.\"")
+    old = "    kind: categorical\n    module: implementation\n    exists_if: passes\n"
     with pytest.raises(GraphError, match="cells: pass"):
         _load_edited(tmp_path, old, old.replace("    exists_if: passes\n", ""))
 
@@ -151,5 +150,24 @@ def test_categorical_states_cover_every_option(graph):
     # foie_gras_menus splits the passing worlds by ban_status; every option lands in exactly one state.
     node = graph.nodes["foie_gras_menus"]
     for option in [None, *graph.nodes["ban_status"].options]:
-        values = {"passes": option is not None, "ban_status": option, "ban_applies": option == "applies"}
+        values = {"passes": option is not None, "ban_status": option,
+                  "ban_standing": option in {"certified", "not_certified"}, "ban_certified": option == "certified"}
         assert sum(c.evaluate(values) for c in node.states.values()) == 1, option
+
+
+def test_entries_are_only_the_pairs_that_can_occur(graph):
+    keys = [e.key for e in graph.entries(graph.nodes["foie_gras_menus"])]
+    assert keys == ["yes_49.5|failed", "yes_50.5|removed", "yes_50.5|not_certified", "yes_50.5|certified"]
+    assert [e.key for e in graph.entries(graph.nodes["fattened_narrowed"])] == [
+        "yes_50.5|certified", "yes_50.5|not_certified"]
+    for node in graph.forecast_nodes():
+        for e in graph.entries(node):
+            if e.state == "failed":
+                assert e.cell is not None and e.cell < 0.5, (node.id, e.key)
+
+
+def test_prior_context_is_required(graph):
+    obj = MOCK_response(graph)
+    obj["forecaster"]["prior_context"] = None
+    with pytest.raises(ResponseError, match="prior_context"):
+        parse(graph, obj)

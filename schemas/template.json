@@ -73,22 +73,22 @@
      "repealed": null,
      "congress": null,
      "court": null,
-     "unfunded": null,
-     "applies": null
+     "not_certified": null,
+     "certified": null
     },
     "yes_60.0": {
      "repealed": null,
      "congress": null,
      "court": null,
-     "unfunded": null,
-     "applies": null
+     "not_certified": null,
+     "certified": null
     },
     "yes_72.0": {
      "repealed": null,
      "congress": null,
      "court": null,
-     "unfunded": null,
-     "applies": null
+     "not_certified": null,
+     "certified": null
     }
    },
    "reasoning": null,
@@ -96,13 +96,22 @@
   },
   "lawsuit_filed": {
    "forecasts": {
-    "yes_50.5": {
+    "yes_50.5|blocked": {
      "p": null
     },
-    "yes_60.0": {
+    "yes_50.5|not_blocked": {
      "p": null
     },
-    "yes_72.0": {
+    "yes_60.0|blocked": {
+     "p": null
+    },
+    "yes_60.0|not_blocked": {
+     "p": null
+    },
+    "yes_72.0|blocked": {
+     "p": null
+    },
+    "yes_72.0|not_blocked": {
      "p": null
     }
    },
@@ -111,7 +120,10 @@
   },
   "fattened_narrowed": {
    "forecasts": {
-    "all": {
+    "yes_50.5|certified": {
+     "p": null
+    },
+    "yes_50.5|not_certified": {
      "p": null
     }
    },
@@ -120,10 +132,16 @@
   },
   "pate_treated_banned": {
    "forecasts": {
-    "narrowed": {
+    "yes_50.5|narrowed_certified": {
      "p": null
     },
-    "not_narrowed": {
+    "yes_50.5|narrowed_not_certified": {
+     "p": null
+    },
+    "yes_50.5|not_narrowed_certified": {
+     "p": null
+    },
+    "yes_50.5|not_narrowed_not_certified": {
      "p": null
     }
    },
@@ -137,28 +155,28 @@
     "source": null
    },
    "forecasts": {
-    "failed": {
+    "yes_49.5|failed": {
      "p05": null,
      "p25": null,
      "p50": null,
      "p75": null,
      "p95": null
     },
-    "removed": {
+    "yes_50.5|removed": {
      "p05": null,
      "p25": null,
      "p50": null,
      "p75": null,
      "p95": null
     },
-    "unfunded": {
+    "yes_50.5|not_certified": {
      "p05": null,
      "p25": null,
      "p50": null,
      "p75": null,
      "p95": null
     },
-    "applies": {
+    "yes_50.5|certified": {
      "p05": null,
      "p25": null,
      "p50": null,
@@ -176,28 +194,28 @@
     "source": null
    },
    "forecasts": {
-    "failed": {
+    "yes_49.5|failed": {
      "p05": null,
      "p25": null,
      "p50": null,
      "p75": null,
      "p95": null
     },
-    "not_applied": {
+    "yes_50.5|removed": {
      "p05": null,
      "p25": null,
      "p50": null,
      "p75": null,
      "p95": null
     },
-    "applies_pate_allowed": {
+    "yes_50.5|standing_pate_allowed": {
      "p05": null,
      "p25": null,
      "p50": null,
      "p75": null,
      "p95": null
     },
-    "applies_pate_banned": {
+    "yes_50.5|standing_pate_banned": {
      "p05": null,
      "p25": null,
      "p50": null,
@@ -215,21 +233,21 @@
     "source": null
    },
    "forecasts": {
-    "failed": {
+    "yes_49.5|failed": {
      "p05": null,
      "p25": null,
      "p50": null,
      "p75": null,
      "p95": null
     },
-    "not_applied": {
+    "yes_50.5|not_certified_or_removed": {
      "p05": null,
      "p25": null,
      "p50": null,
      "p75": null,
      "p95": null
     },
-    "applies": {
+    "yes_50.5|certified": {
      "p05": null,
      "p25": null,
      "p50": null,
@@ -247,21 +265,21 @@
     "source": null
    },
    "forecasts": {
-    "failed": {
+    "yes_49.5|failed": {
      "p05": null,
      "p25": null,
      "p50": null,
      "p75": null,
      "p95": null
     },
-    "not_applied": {
+    "yes_50.5|not_certified_or_removed": {
      "p05": null,
      "p25": null,
      "p50": null,
      "p75": null,
      "p95": null
     },
-    "applies": {
+    "yes_50.5|certified": {
      "p05": null,
      "p25": null,
      "p50": null,
@@ -279,21 +297,21 @@
     "source": null
    },
    "forecasts": {
-    "failed": {
+    "yes_49.5|failed": {
      "p05": null,
      "p25": null,
      "p50": null,
      "p75": null,
      "p95": null
     },
-    "not_applied": {
+    "yes_50.5|not_certified_or_removed": {
      "p05": null,
      "p25": null,
      "p50": null,
      "p75": null,
      "p95": null
     },
-    "applies": {
+    "yes_50.5|certified": {
      "p05": null,
      "p25": null,
      "p50": null,
@@ -311,21 +329,21 @@
     "source": null
    },
    "forecasts": {
-    "failed": {
+    "yes_49.5|failed": {
      "p05": null,
      "p25": null,
      "p50": null,
      "p75": null,
      "p95": null
     },
-    "not_applied": {
+    "yes_50.5|not_certified_or_removed": {
      "p05": null,
      "p25": null,
      "p50": null,
      "p75": null,
      "p95": null
     },
-    "applies": {
+    "yes_50.5|certified": {
      "p05": null,
      "p25": null,
      "p50": null,

@@ -36,7 +36,7 @@ def MOCK_response(graph: Graph, seed: int = 0, share_mean: float = 0.62, share_s
             elif node.kind == "quantity":
                 lo, hi = node.bounds
                 mid = rng.uniform(lo + 0.3 * (hi - lo), lo + 0.5 * (hi - lo))
-                if entry.state and entry.state.startswith("applies"):
+                if entry.state in {"certified", "standing_pate_banned"}:
                     mid = lo + 0.8 * (mid - lo)
                 spread = 0.25 * (mid - lo)
                 xs = [mid - 2 * spread, mid - spread, mid, mid + spread, mid + 2 * spread]

@@ -35,8 +35,17 @@ def _cell_weights(cells: list[float], v: np.ndarray):
 
 
 def _table(graph: Graph, node: Node, fc: Forecasts, cells: list[float | None], state: str | None):
-    rows = [np.atleast_1d(np.asarray(fc.values[node.id][Entry(c, state).key], dtype=float)) for c in cells]
-    return np.vstack(rows)  # (cells, k)
+    """Answers for one state at the given cells, shape (cells, k).
+
+    A (cell, state) pair that cannot occur has no answer; any answer of the node's stands in for it.
+    Draws never use those rows: no draw is in that state on that side of 50%, and draws where the node
+    does not exist are masked.
+    """
+    answers = fc.values[node.id]
+    filler = np.atleast_1d(np.asarray(next(iter(answers.values())), dtype=float))
+    rows = [np.atleast_1d(np.asarray(answers[Entry(c, state).key], dtype=float))
+            if Entry(c, state).key in answers else filler for c in cells]
+    return np.vstack(rows)
 
 
 def node_params(graph: Graph, node: Node, fc: Forecasts, v: np.ndarray, state_idx: np.ndarray | None,
@@ -81,18 +90,38 @@ def node_params(graph: Graph, node: Node, fc: Forecasts, v: np.ndarray, state_id
     return out
 
 
+def band_mass(graph: Graph, fc: Forecasts, band: tuple[float, float]) -> float:
+    """The forecaster's probability that the Yes share lies in (lo, hi]."""
+    cdf = np.asarray(fc.values["yes_share"]["all"], dtype=float)
+    lo, hi = band
+    f = dists.share_cdf_at(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling, np.array([lo, hi]))
+    return float(f[1] - f[0])
+
+
 def simulate(graph: Graph, fc: Forecasts, n: int, seed, fixed_share: float | None = None,
-             continuous_share: float | None = None):
+             continuous_share: float | None = None, share_band: tuple[float, float] | None = None):
     """Draws for every node. Booleans are bool arrays; quantities floats; pmf nodes their value;
-    categorical nodes their option name ('' where the node does not exist)."""
+    categorical nodes their option name ('' where the node does not exist).
+
+    The Yes share is drawn from the forecaster's CDF, fixed (`fixed_share`), or drawn from the CDF
+    truncated to a band (`share_band`, (lo, hi]; a band whose lower end is 0.5 or more excludes it).
+    """
     rng = np.random.default_rng(seed)
     share_node = graph.nodes["yes_share"]
     cdf = np.asarray(fc.values["yes_share"]["all"], dtype=float)
     u_share = rng.random(n)
-    if fixed_share is None:
-        v = dists.sample_share(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling, u_share)
-    else:
+    if fixed_share is not None:
         v = np.full(n, float(fixed_share))
+    elif share_band is not None:
+        # The forecaster's Yes-share distribution truncated to (lo, hi]: inverse CDF on [F(lo), F(hi)].
+        lo, hi = share_band
+        f_lo, f_hi = dists.share_cdf_at(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling,
+                                        np.array([lo, hi]))
+        v = dists.sample_share(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling,
+                               f_lo + u_share * (f_hi - f_lo))
+        v = np.clip(v, np.nextafter(lo, 1.0) if lo >= 0.5 else lo, hi)
+    else:
+        v = dists.sample_share(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling, u_share)
     draws: dict[str, np.ndarray] = {"yes_share": v, "passes": v > 0.5}
     v_cont = None if continuous_share is None else np.full(n, float(continuous_share))
     for nid in graph.order:

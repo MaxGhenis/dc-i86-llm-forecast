@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from .graph import Graph
-from .summarize import headline, summary_keys
+from .summarize import CONDITIONS, headline, summary_keys
 
 COLUMNS = [
     ("N", "Fails"),
@@ -33,21 +33,31 @@ def _num(x: float, integer: bool = False) -> str:
 
 def label(graph: Graph, key: str) -> str:
     node = graph.owner(key)
+    mark = " †" if node.cells_mode == "near" else ""
     if "." in key:
         option = key.split(".", 1)[1]
-        return f"`{key}` {node.question.rstrip('.')}: {option}"
-    return f"`{key}` {node.question}"
+        stem = node.question.split(":", 1)[0].rstrip(".")
+        return f"`{key}` {stem}: {option}{mark}"
+    return f"`{key}` {node.question}{mark}"
 
 
-def cell(graph: Graph, key: str, desc: dict | None, condition: str, total_runs: int) -> str:
+def _p(desc: dict) -> str:
+    return f"{desc['p'] * 100:.0f}%"
+
+
+def cell(graph: Graph, key: str, entry: dict, condition: str, total_runs: int) -> str:
     node = graph.owner(key)
-    if node is not None and node.exists_if is not None and condition in FAIL_CONDITIONS:
+    desc = entry.get(condition)
+    given = entry.get(f"{condition}|given") if node is not None and node.exists_if is not None else None
+    if node is not None and node.exists_if is not None and given is None:
         return "n/a"
     if desc is None:
         return "–"
     note = f" ({desc['runs']} of {total_runs} runs)" if desc.get("runs", total_runs) < total_runs else ""
     if "p" in desc:
-        return f"{desc['p'] * 100:.0f}%{note}"
+        if given is not None and abs(given["p"] - desc["p"]) > 0.005:
+            return f"{_p(given)} (joint {_p(desc)}){note}"
+        return f"{_p(desc)}{note}"
     if key == "yes_share":
         return f"{desc['mean'] * 100:.1f}% [{desc['p05'] * 100:.1f}–{desc['p95'] * 100:.1f}]{note}"
     integer = bool(node and node.integer)
@@ -76,8 +86,10 @@ def markdown(graph: Graph, result: dict, meta: dict) -> str:
         "voters. Their gap is not an effect. 'At 49.5%' and 'At 50.5%' fix the certified Yes share, with "
         "shared random numbers. Their difference, the cutoff effect, is the forecasters' estimate of what "
         "a bare pass changes; it does not show what passing does in a typical passing world. 'Per Yes "
-        "ballot' is the cutoff effect times the chance one ballot decides the measure, in the question's "
-        "unit (a probability for yes/no questions). All are model forecasts under stated scenarios.",
+        "ballot' averages, over forecasters, each one's cutoff effect times its chance that one ballot "
+        "decides the measure, in the question's unit (a probability for yes/no questions). Forecasters "
+        "who expect a close vote weigh more in it, so its sign can differ from the pooled cutoff effect. "
+        "All are model forecasts under stated scenarios.",
         "",
         "## The vote",
         "",
@@ -86,22 +98,29 @@ def markdown(graph: Graph, result: dict, meta: dict) -> str:
         f"- Density of the Yes share at 50%: {vote['density_at_half']:.2f} per unit share",
         f"- Chance one ballot decides it: 1 in {vote['one_in']:,.0f}" if vote["one_in"] else "- Chance one ballot decides it: 0",
         "",
-        "| Run | Model | P(passes) | Mean Yes share | 1 ballot decides | Same at every cell | Same at 49.5% and 50.5% |",
-        "|---|---|---:|---:|---:|---:|---:|",
+        "| Run | Model | P(passes) | Mean Yes share | 1 ballot decides | Same at every cell | Same at 49.5% and 50.5% "
+        "| Suspect calls | Prior context | Late |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---|---|",
     ]
     for rid in result["runs"]:
         v = vote["by_run"][rid]
+        m = meta.get(rid) or {}
         mean = result["per_run"][rid]["nodes"]["yes_share"]["all"]["mean"]
-        model = (meta.get(rid) or {}).get("model_served") or "?"
         one_in = f"1 in {v['one_in']:,.0f}" if v["one_in"] else "0"
         d = result["per_run"][rid].get("diagnostics") or {}
         flat = f"{d['flat_share'] * 100:.0f}%" if d.get("flat_share") is not None else "–"
         zero = f"{d['zero_jump_share'] * 100:.0f}%" if d.get("zero_jump_share") is not None else "–"
-        lines.append(f"| {rid} | {model} | {v['p_pass'] * 100:.0f}% | {mean * 100:.1f}% | {one_in} | {flat} | {zero} |")
+        prior = " ".join(str(m.get("prior_context") or "–").split())[:80].replace("|", "/")
+        lines.append(
+            f"| {rid} | {m.get('model_served') or '?'} | {v['p_pass'] * 100:.0f}% | {mean * 100:.1f}% | {one_in} "
+            f"| {flat} | {zero} | {m.get('suspect_calls', '–')} | {prior} | {'yes' if m.get('late') else ''} |")
     lines += [
         "",
-        "The last two columns are the shares of a run's question-and-state groups whose answers are "
-        "identical at every cell, and identical at 49.5% and 50.5%. High values can mean copied answers.",
+        "'Same at every cell' and 'Same at 49.5% and 50.5%' are the shares of a run's question-and-state "
+        "groups whose answers are identical across cells; high values can mean copied answers. 'Suspect "
+        "calls' counts tool calls the audit flagged for reading without excluding the run. 'Prior context' "
+        "is what the forecaster reported seeing, before research, beyond the brief. 'Late' runs were "
+        "dispatched after other answers were in the repository.",
         "",
     ]
     modules = {"vote": "Vote", "implementation": "If it passes", "direct": "Direct outcomes",
@@ -117,17 +136,25 @@ def markdown(graph: Graph, result: dict, meta: dict) -> str:
                 continue
             entry = result["nodes"][key]
             unit = node.unit or ("probability" if node.kind in {"binary", "derived", "categorical"} else "")
-            cells = " | ".join(cell(graph, key, entry[c], c, total) for c, _ in COLUMNS)
+            cells = " | ".join(cell(graph, key, entry, c, total) for c, _ in COLUMNS)
             runs = ", ".join(f"{rid} {effect(graph, key, x)}" for rid, x in entry["cutoff_effect_by_run"].items())
             per = "–" if entry["per_yes_ballot"] is None else f"{entry['per_yes_ballot']:+.2g}"
             lines.append(f"| {label(graph, key)} | {unit} | {cells} | {effect(graph, key, entry['cutoff_effect'])} "
                          f"| {per} | {runs} |")
         lines.append("")
     lines += [
-        "Probabilities for questions defined only if the measure passes (or the ban applies) are joint: "
-        "P(passes and the event). 'n/a' marks conditions where the question is undefined. In count "
-        "distributions the top label ('5+') counts as 5 in means. Quantity tails beyond the 5th and 95th "
-        "percentiles continue the neighbouring segment's slope, so means of heavy right tails are "
+        "For a question defined only under a condition (the measure passing, or the ban still standing), a "
+        "cell shows the probability given that condition, and the joint probability P(condition and event) "
+        "in parentheses where the two differ. The cutoff effect and the per-ballot figure use the joint. "
+        "'n/a' marks conditions where the question is undefined. `certified` means the CFO's section 8(b) "
+        "certification by 2028-12-01, not a legal finding about when the ban is enforceable.",
+        "",
+        "† Asked only at a bare fail and a bare pass (49.5% and 50.5%). The Fails and Passes columns use "
+        "those answers for every failing and every passing margin, so for these questions they carry no "
+        "information about larger margins.",
+        "",
+        "In count distributions the top label ('5+') counts as 5 in means. Quantity tails beyond the 5th "
+        "and 95th percentiles continue the neighbouring segment's slope, so means of heavy right tails are "
         "understated.",
         "",
     ]
@@ -145,7 +172,7 @@ def write(graph: Graph, result: dict, meta: dict, outdir: Path) -> None:
         w = csv.writer(f)
         w.writerow(["node", "condition", "runs", "mean_or_p", "p05", "p25", "p50", "p75", "p95"])
         for key, entry in result["nodes"].items():
-            for cond in ["all", "N", "Y", "Nc", "Yc", "cutoff_fail", "cutoff_pass"]:
+            for cond in [c for c in entry if c in CONDITIONS or c.endswith("|given")]:
                 d = entry.get(cond)
                 if d is None:
                     continue

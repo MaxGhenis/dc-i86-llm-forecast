@@ -1,13 +1,22 @@
-"""The transcript audit, on small MOCK transcripts in the Claude and Codex formats."""
+"""The transcript audit, on small MOCK transcripts in the Claude and Codex formats.
+
+Paths are built from the real home directory and the real work area, because the audit resolves
+them the way the shell would on this machine.
+"""
 
 import json
+from pathlib import Path
 
 import pytest
 
-from i86.audit import audit_transcript
+from i86 import runners
+from i86.audit import audit_transcript, shell_paths
+from i86.cli import discloses
 from i86.runners import parse_stream
 
-WORK = "/Users/someone/.cache/dc-i86-llm-forecast/opus-1"
+HOME = Path.home()
+WORK = runners.WORK / "opus-1"
+SIBLING = runners.WORK / "opus-10"
 
 
 def claude(name, **inp):
@@ -25,7 +34,7 @@ def run(tmp_path, events):
         lines += e if isinstance(e, list) else [e]
     path = tmp_path / "t.jsonl"
     path.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
-    return audit_transcript(path, WORK)
+    return audit_transcript(path, str(WORK))
 
 
 def test_web_calls_pass_and_are_logged(tmp_path):
@@ -40,27 +49,66 @@ def test_web_calls_pass_and_are_logged(tmp_path):
 
 
 @pytest.mark.parametrize("event", [
-    claude("Read", file_path="/Users/someone/dc-i86-llm-forecast/runs/sol-1/response.md"),
-    claude("Read", file_path="/Users/someone/.cache/dc-i86-llm-forecast/sol-2/draft.json"),
+    claude("Read", file_path=str(runners.RUNS / "sol-1" / "response.md")),
+    claude("Read", file_path=str(runners.STAGE / "opus-2" / "response.md")),
+    claude("Read", file_path=str(SIBLING / "draft.json")),
+    codex(f"cat {SIBLING}/draft.json"),
     codex("cat ~/.subfleet/jobs/x/a1/stdout"),
+    codex("cat $HOME/.claude/projects/x/memory/MEMORY.md"),
     codex("cd ~ && find . -name response.md"),
-    codex("ls ~"),
-    codex("rg foie /Users/someone"),
-    codex("cat /Users/someone/.claude/projects/x/memory/MEMORY.md"),
+    codex("cd .. && cd .. && grep -r foie ."),
+    codex("find .. -name response.md | xargs cat"),
+    codex("cat $(find .. -name response.md)"),
+    codex("find .. -name response.md -exec cat {} +"),
+    codex("cd .. && ls opus-2"),
+    codex(f"rg foie {HOME}"),
+    codex("rg foie /"),
+    codex("locate response.md"),
+    codex("mdfind foie"),
+    codex("cat ~/.cache/*/sol-*/response.md"),
+    codex("cat ~/.c*/dc-i86*/opus-2/x"),
+    codex("curl -s https://example.com -o ~/.claude/x"),
+    claude("Grep", pattern="foie", path=str(HOME)),
+    claude("Glob", pattern="**/response.md", path="/"),
+    claude("Bash", command="ls ../opus-2"),
+    claude("mcp__brier__search", query="i86"),
     {"type": "item.completed", "item": {"type": "mcp_tool_call", "server": "s", "tool": "t", "arguments": {}}},
 ])
 def test_forbidden_calls_are_violations(tmp_path, event):
     out = run(tmp_path, [claude("WebSearch", query="x"), event])
-    assert not out["passed"] and out["violations"]
+    assert not out["passed"] and out["violations"], out
 
 
-def test_work_directory_files_and_lane_skill_reads_are_listed_not_excluded(tmp_path):
+@pytest.mark.parametrize("event", [
+    codex("ls ~"),
+    codex("cat /tmp/i86.pdf"),
+    codex("find .. -maxdepth 1 -name AGENTS.md"),
+    {"type": "item.completed", "item": {"type": "collab_tool_call", "id": "c"}},
+])
+def test_suspect_calls_are_reported_without_excluding(tmp_path, event):
+    out = run(tmp_path, [event])
+    assert out["passed"] and out["suspect"] and not out["violations"], out
+
+
+def test_work_directory_files_and_ordinary_reads_are_listed_not_excluded(tmp_path):
     out = run(tmp_path, [
         codex(f"cat {WORK}/forecast.json"),
-        codex("cat /Users/someone/.agents/skills/x/SKILL.md"),
-        codex("python3 -c \"print(0.42 * 2)\""),
+        codex("cat notes.md && python3 -c \"print(0.42 * 2)\""),
+        codex("cat /Users/someone-else/.agents/skills/x/SKILL.md"),
+        codex("pdftotext /tmp/report.pdf -"),
     ])
-    assert out["passed"] and len(out["local_calls"]) == 3
+    assert out["passed"] and not out["suspect"] and len(out["local_calls"]) == 4, out
+
+
+def test_a_cd_chain_moves_the_base_for_later_paths():
+    paths, problems, _ = shell_paths("cd /usr && cd share && cat dict/words", WORK)
+    assert Path("/usr/share/dict/words") in paths and not problems
+
+
+def test_a_sibling_work_directory_is_not_mistaken_for_the_runs_own():
+    # opus-10 starts with the same characters as opus-1; masking the run's own directory must not hide it.
+    paths, _, _ = shell_paths(f"cat {SIBLING}/x", WORK)
+    assert SIBLING / "x" in paths
 
 
 def test_codex_items_count_once(tmp_path):
@@ -71,7 +119,7 @@ def test_codex_items_count_once(tmp_path):
 def test_an_empty_or_unparseable_transcript_fails(tmp_path):
     path = tmp_path / "t.jsonl"
     path.write_text("not json\n")
-    assert not audit_transcript(path, WORK)["passed"]
+    assert not audit_transcript(path, str(WORK))["passed"]
 
 
 def test_parse_stream_takes_the_final_result_and_the_model():
@@ -81,3 +129,16 @@ def test_parse_stream_takes_the_final_result_and_the_model():
         {"type": "result", "result": "```json\n{}\n```"},
     ])
     assert parse_stream(text) == ("```json\n{}\n```", "claude-opus-5-5")
+
+
+@pytest.mark.parametrize("text, excluded", [
+    ("none", False),
+    ("None.", False),
+    ("\"none\"", False),
+    ("None beyond the brief.", False),
+    ("System prompt asks for concise answers.", False),
+    ("My memory notes say an earlier forecast put I-86 at 60%.", True),
+    ("A note about foie gras forecasts from an earlier session.", True),
+])
+def test_prior_context_that_mentions_these_questions_excludes_a_run(text, excluded):
+    assert discloses(text) is excluded

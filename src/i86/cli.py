@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,15 @@ from .response import ResponseError, extract_json, parse, template
 from .summarize import pool
 
 PROMPT_PATH = ROOT / "prompts" / "forecaster.md"
+# A forecaster's prior_context that mentions these questions, other than a bare "none", means it saw
+# something beyond the brief.
+DISCLOSURE = re.compile(r"foie|initiative.?86|\bi-?86\b|force.?fe", re.I)
+BARE_NONE = re.compile(r"\W*(?:none|nothing|n/?a)\W*", re.I)
+
+
+def discloses(prior_context) -> bool:
+    text = str(prior_context or "")
+    return not BARE_NONE.fullmatch(text) and bool(DISCLOSURE.search(text))
 TEMPLATE_PATH = ROOT / "schemas" / "template.json"
 OUTPUTS = ROOT / "outputs"
 
@@ -52,11 +62,11 @@ def _prompt_sha() -> str:
 def cmd_dispatch(args) -> int:
     sha = _prompt_sha()
     if args.backend == "subfleet":
-        meta = runners.dispatch_subfleet(args.label, PROMPT_PATH, sha, args.tier, args.model)
+        meta = runners.dispatch_subfleet(args.label, PROMPT_PATH, sha, args.tier, args.model, args.late)
     elif args.backend == "claude":
-        meta = runners.dispatch_claude(args.label, PROMPT_PATH, sha, args.model or "claude-opus-5-5")
+        meta = runners.dispatch_claude(args.label, PROMPT_PATH, sha, args.model or "claude-opus-5-5", args.late)
     else:
-        runners.prepare(args.label, PROMPT_PATH, sha, "manual")
+        runners.prepare(args.label, PROMPT_PATH, sha, "manual", late=args.late)
         print(f"runs/{args.label}/prompt.md is ready; save the agent's final message as runs/{args.label}/response.md")
         return 0
     print(json.dumps({k: meta.get(k) for k in ("label", "job_id", "backend", "dispatched_at")}))
@@ -68,15 +78,19 @@ def run_dirs() -> list[Path]:
 
 
 def cmd_collect(args) -> int:
-    """Refresh every subfleet run; copy answers only once all of them have finished."""
+    """Refresh every subfleet run; copy answers in only once all runs have finished."""
     dirs = run_dirs()
     metas = {d: (runners.refresh_subfleet(d) if runners.read_meta(d).get("backend") == "subfleet"
                  else runners.read_meta(d)) for d in dirs}
-    pending = [d.name for d, m in metas.items() if m.get("backend") == "subfleet" and m.get("state") not in runners.TERMINAL]
+    pending = [d.name for d, m in metas.items()
+               if m.get("backend") == "subfleet" and m.get("state") not in runners.FINISHED]
+    unknown = {m.get("state") for m in metas.values() if m.get("backend") == "subfleet"} - runners.FINISHED - {
+        "queued", "waiting", "running", None}
+    if unknown:
+        print(f"unknown subfleet state(s) {sorted(unknown)}: treated as still going", file=sys.stderr)
     if not pending:
-        for d, m in metas.items():
-            if m.get("backend") == "subfleet":
-                runners.fetch_subfleet_output(d)
+        for d in dirs:
+            runners.seal(d)
     for d, meta in metas.items():
         have = (d / "response.md").exists()
         print(f"{d.name:24s} {meta.get('state') or '-':10s} {meta.get('model_served') or '-':18s} response={'yes' if have else 'no'}")
@@ -110,21 +124,27 @@ def cmd_audit(args) -> int:
     worst = 0
     for d in run_dirs():
         meta = runners.read_meta(d)
+        if not (d / "response.md").exists() or meta.get("backend") == "manual":
+            continue
         path = meta.get("transcript")
         if not path or not Path(path).exists():
-            print(f"{d.name}: no transcript recorded")
-            continue
-        result = audit.audit_transcript(Path(path), meta.get("workdir", ""))
+            result = {"events": 0, "passed": False, "violations": [], "web_calls": 0, "local_calls": [],
+                      "suspect": [], "error": f"no transcript at {path!r}"}
+        else:
+            result = audit.audit_transcript(Path(path), meta.get("workdir", ""))
         (d / "audit.json").write_text(json.dumps(result, indent=1) + "\n")
         flag = "ok" if result["passed"] else ("VIOLATION" if result["violations"] else "NO EVENTS")
         worst = max(worst, 0 if result["passed"] else 1)
         print(f"{d.name}: {flag}; {result['events']} events, {result['web_calls']} web calls, "
-              f"{len(result['local_calls'])} other local calls")
+              f"{len(result['suspect'])} suspect, {len(result['local_calls'])} other local calls")
+        for rec in result["violations"] + result["suspect"]:
+            print(f"    {rec.get('why', '')}: {rec['call'][:160]}")
     return worst
 
 
-def accepted_runs(g, prompt_sha: str, allow_unaudited: bool = False) -> dict:
-    """Runs with a parsed response, the current prompt's hash and a passing audit."""
+def accepted_runs(g, prompt_sha: str, allow_unaudited: bool = False, accept_prior: set[str] = frozenset()) -> dict:
+    """Runs with a parsed response, the current prompt's hash, a passing audit and no prior context
+    about these questions (unless the operator read it and listed the run in `accept_prior`)."""
     runs = {}
     for d in run_dirs():
         resp = d / "response.json"
@@ -137,23 +157,35 @@ def accepted_runs(g, prompt_sha: str, allow_unaudited: bool = False) -> dict:
             continue
         audit_path = d / "audit.json"
         result = json.loads(audit_path.read_text()) if audit_path.exists() else None
-        if result is None and not allow_unaudited:
-            print(f"excluding {d.name}: no audit (run `i86 audit`, or pass --allow-unaudited)", file=sys.stderr)
+        if result is None and not (allow_unaudited and meta.get("backend") == "manual"):
+            print(f"excluding {d.name}: no audit (run `i86 audit`; manual runs need --allow-unaudited)",
+                  file=sys.stderr)
             continue
         if result is not None and not result.get("passed"):
             print(f"excluding {d.name}: audit failed", file=sys.stderr)
             continue
-        runs[d.name] = parse(g, json.loads(resp.read_text()))
+        fc = parse(g, json.loads(resp.read_text()))
+        disclosed = str(fc.forecaster.get("prior_context") or "")
+        if discloses(disclosed) and d.name not in accept_prior:
+            print(f"excluding {d.name}: prior context mentions these questions (read it; --accept-prior "
+                  f"{d.name} to include): {disclosed[:200]}", file=sys.stderr)
+            continue
+        runs[d.name] = fc
     return runs
 
 
 def cmd_simulate(args) -> int:
     g = graph_mod.load()
-    runs = accepted_runs(g, _prompt_sha(), args.allow_unaudited)
+    runs = accepted_runs(g, _prompt_sha(), args.allow_unaudited, set(args.accept_prior))
     if not runs:
         raise SystemExit("no accepted runs: dispatch, collect and check first")
     result = pool(g, runs, n=args.n, seed=args.seed)
     meta = {d.name: runners.read_meta(d) for d in run_dirs() if d.name in runs}
+    for rid, m in meta.items():
+        m["prior_context"] = runs[rid].forecaster.get("prior_context")
+        audit_path = runners.RUNS / rid / "audit.json"
+        if audit_path.exists():
+            m["suspect_calls"] = len(json.loads(audit_path.read_text()).get("suspect", []))
     report.write(g, result, meta, OUTPUTS)
     print(f"pooled {len(runs)} run(s) into {OUTPUTS.relative_to(ROOT)}/")
     return 0
@@ -190,6 +222,7 @@ def main(argv=None) -> int:
     d.add_argument("label")
     d.add_argument("--tier", default="standard", choices=["standard", "hard"])
     d.add_argument("-m", "--model")
+    d.add_argument("--late", action="store_true", help="dispatch after answers were collected (flagged in the report)")
     sub.add_parser("collect")
     sub.add_parser("check")
     sub.add_parser("audit")
@@ -197,7 +230,9 @@ def main(argv=None) -> int:
     s.add_argument("--n", type=int, default=20000)
     s.add_argument("--seed", type=int, default=0)
     s.add_argument("--allow-unaudited", action="store_true",
-                   help="pool runs with no transcript audit (manual runs); they are still checked otherwise")
+                   help="pool manual runs, which have no transcript to audit")
+    s.add_argument("--accept-prior", action="append", default=[], metavar="LABEL",
+                   help="pool this run although its prior_context mentions these questions (read it first)")
     pr = sub.add_parser("prereg")
     pr.add_argument("--no-stamp", action="store_true")
     args = ap.parse_args(argv)

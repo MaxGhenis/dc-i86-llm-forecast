@@ -1,7 +1,8 @@
 """Load and check the causal map in graph/graph.yaml.
 
-A node is forecast once per *entry*: a (cell, state) pair from its `given` block. Cells are certified
-Yes shares; states are named boolean conditions on other nodes. Conditions are a small expression
+A node is forecast once per *entry*: a (cell, state) pair from its `given` block that can occur. Cells
+are certified Yes shares; states are named boolean conditions on other nodes. A pair whose state
+cannot hold at that cell (a `failed` state at a passing cell, say) is not an entry. Conditions are a small expression
 language (node ids, `passes`, `node.option` for a categorical node, `and`, `or`, `not`, parentheses)
 parsed with `ast` and evaluated without `eval`.
 """
@@ -172,6 +173,7 @@ class Graph:
     share_ceiling: float
     nodes: dict[str, Node]
     order: list[str]
+    _possible: dict = field(default_factory=dict, repr=False)
 
     @property
     def cells(self) -> list[float]:
@@ -199,7 +201,22 @@ class Graph:
         if node.kind == "derived":
             return []
         states = list(node.states) or [None]
-        return [Entry(c, s) for c in self.cells_for(node) for s in states]
+        return [Entry(c, s) for c in self.cells_for(node) for s in states if self.possible(node, c, s)]
+
+    def possible(self, node: Node, cell: float | None, state: str | None) -> bool:
+        """Whether the node exists in this state at this cell in some consistent world."""
+        key = (node.id, cell, state)
+        if key not in self._possible:
+            conds = [c for c in (node.exists_if, node.states.get(state) if state else None) if c is not None]
+            if cell is None or not conds:
+                self._possible[key] = True
+            else:
+                names = set().union(*(c.names for c in conds)) | {"passes"}
+                self._possible[key] = any(
+                    values["passes"] == (cell > 0.5) and all(c.evaluate(values) for c in conds)
+                    for values in assignments(self, boolean_scope(self, names))
+                )
+        return self._possible[key]
 
     def forecast_nodes(self) -> list[Node]:
         return [self.nodes[i] for i in self.order if self.nodes[i].kind != "derived"]
@@ -316,8 +333,8 @@ def load(path: Path | str = GRAPH_PATH) -> Graph:
     )
     if not graph.share_floor < grid[0] or not graph.share_ceiling > grid[-1]:
         raise GraphError("share_floor and share_ceiling must lie outside share_grid")
-    check_states(graph)
     check_pass_cells(graph)
+    check_states(graph)
     return graph
 
 
