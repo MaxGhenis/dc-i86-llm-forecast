@@ -150,3 +150,87 @@ def test_a_collected_run_cannot_be_abandoned(area):
     cli.cmd_collect(None)
     with pytest.raises(RuntimeError, match="already collected"):
         runners.abandon("claude-1")
+
+
+# Recovering a subfleet run reported lost although its agent finished (MOCK job store)
+
+def _lost_job(area, monkeypatch, label="sub-lost", events=None, exit_=None, state="lost"):
+    jobs = area.root / "jobs"
+    monkeypatch.setattr(runners, "JOBS", jobs)
+    run_dir = runners.prepare(label, area.prompt, "sha", "subfleet")
+    runners.record(run_dir, job_id=f"MOCK-{label}")
+    attempt = jobs / f"MOCK-{label}" / "a1"
+    attempt.mkdir(parents=True)
+    if events is None:
+        events = [{"type": "system", "subtype": "init", "model": "MOCK-model"},
+                  {"type": "assistant", "message": {"model": "MOCK-model", "content": []}},
+                  {"type": "result", "subtype": "success", "is_error": False, "result": "MOCK final answer"}]
+    (attempt / "stdout").write_text("".join(json.dumps(e) + "\n" for e in events))
+    (attempt / "exit.json").write_text(json.dumps(exit_ or {"rc": 0, "signal": None}))
+    (attempt / "prompt.sent.md").write_text("MOCK sent prompt\n")
+    info = {"job": {"state": state, "finished_at": "2026-10-26T00:00:00Z"},
+            "attempts": [{"attempt_id": f"MOCK-{label}/a1", "state": "quarantined", "lane_id": "MOCK-lane",
+                          "quarantine_reason": "MOCK writers remain after exit receipt"}]}
+
+    def run(cmd, **kw):
+        assert cmd[:3] == ["subfleet", "runs", "show"] and "--json" in cmd, cmd
+        return SimpleNamespace(returncode=0, stdout=json.dumps(info), stderr="")
+
+    monkeypatch.setattr(runners.subprocess, "run", run)
+    return run_dir, attempt
+
+
+def test_a_lost_run_with_a_finished_transcript_is_recovered_and_flagged(area, monkeypatch):
+    run_dir, attempt = _lost_job(area, monkeypatch)
+    meta = runners.recover("sub-lost")
+    assert meta["state"] == "succeeded" and meta["backend_state"] == "lost" and meta["model_served"] == "MOCK-model"
+    assert meta["recovered"]["supervisor_reason"] == "MOCK writers remain after exit receipt"
+    # A later refresh from subfleet keeps the run recovered; its 'lost' goes to backend_state.
+    runners.record(run_dir, state="lost")
+    assert runners.read_meta(run_dir)["state"] == "succeeded"
+    assert runners.seal(run_dir)
+    assert (run_dir / "response.md").read_text() == "MOCK final answer"
+    assert (run_dir / "prompt.sent.md").read_text() == "MOCK sent prompt\n"
+    assert (run_dir / "transcript.jsonl").read_text() == (attempt / "stdout").read_text()
+    with pytest.raises(RuntimeError):
+        runners.recover("sub-lost")
+
+
+@pytest.mark.parametrize("change", ["failed exit", "signal", "error result", "two results", "no result", "empty",
+                                    "not lost"])
+def test_only_a_clean_finish_is_recovered(area, monkeypatch, change):
+    ok = {"type": "result", "subtype": "success", "is_error": False, "result": "MOCK final answer"}
+    events, exit_, state = None, None, "lost"
+    if change == "failed exit":
+        exit_ = {"rc": 1, "signal": None}
+    elif change == "signal":
+        exit_ = {"rc": 0, "signal": 9}
+    elif change == "error result":
+        events = [{**ok, "subtype": "error_max_turns", "is_error": True}]
+    elif change == "two results":
+        events = [ok, ok]
+    elif change == "no result":
+        events = [{"type": "assistant", "message": {"content": []}}]
+    elif change == "empty":
+        events = [{**ok, "result": "  "}]
+    else:
+        state = "failed"
+    run_dir, _ = _lost_job(area, monkeypatch, events=events, exit_=exit_, state=state)
+    with pytest.raises(RuntimeError):
+        runners.recover("sub-lost")
+    assert runners.read_meta(run_dir).get("state") is None and "recovered" not in runners.read_meta(run_dir)
+
+
+def test_an_abandoned_run_is_not_recovered(area, monkeypatch):
+    _lost_job(area, monkeypatch)
+    runners.abandon("sub-lost")
+    with pytest.raises(RuntimeError):
+        runners.recover("sub-lost")
+
+
+def test_a_transcript_changed_after_recovery_is_not_collected(area, monkeypatch):
+    run_dir, attempt = _lost_job(area, monkeypatch)
+    runners.recover("sub-lost")
+    (attempt / "stdout").write_text(json.dumps({"type": "result", "subtype": "success", "result": "MOCK other"}) + "\n")
+    assert not runners.seal(run_dir)
+    assert not (run_dir / "response.md").exists() and runners.read_meta(run_dir)["collect_error"]

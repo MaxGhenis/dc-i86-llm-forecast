@@ -10,6 +10,9 @@ No answer enters the repository until every run has finished: the `claude` and `
 write to a staging directory, and `collect` copies answers in only when no run of any backend is
 still going. A run that will never finish (a killed process, a manual run given up) is marked with
 `i86 abandon <label>`; abandonment is final, and an answer that run produces later is not collected.
+A subfleet run that its supervisor reports lost although the agent finished (processes the agent
+started outlived it) can instead be recovered with `i86 recover <label>`, which takes the final message
+from the attempt's own transcript under conditions `recover` lists; the report flags such runs.
 After collection, `dispatch` refuses new runs unless they are marked `--late`, and the report flags
 late runs, which could have found the others' answers. Dispatch, abandon and collect hold a lock
 file beside the staging directory while they check and change runs, so no run can start between
@@ -45,6 +48,7 @@ from .graph import ROOT
 RUNS = ROOT / "runs"
 WORK = Path.home() / ".cache" / "dc-i86-llm-forecast"
 STAGE = Path.home() / ".cache" / "dc-i86-llm-forecast-staging"
+JOBS = Path.home() / ".subfleet" / "jobs"  # subfleet's job store: <job_id>/a<N>/ per attempt
 # Run states. Anything not known to be finished counts as still going.
 FINISHED = {"succeeded", "failed", "cancelled", "canceled", "lost", "killed", "expired", "abandoned"}
 
@@ -110,12 +114,12 @@ def write_meta(run_dir: Path, meta: dict) -> None:
 
 def record(run_dir: Path, state: str | None = None, **fields) -> dict:
     """Merge fields (and a state) into a run's metadata, read afresh under the lock. A state that
-    arrives for an abandoned run is kept as `backend_state`: abandonment is final."""
+    arrives for an abandoned or recovered run is kept as `backend_state`: both are final."""
     with bookkeeping_lock():
         meta = read_meta(run_dir)
         meta.update(fields)
         if state is not None:
-            meta["backend_state" if meta.get("state") == "abandoned" else "state"] = state
+            meta["backend_state" if meta.get("state") == "abandoned" or meta.get("recovered") else "state"] = state
         write_meta(run_dir, meta)
         return meta
 
@@ -144,6 +148,69 @@ def abandon(label: str) -> dict:
         meta.update(state="abandoned", abandoned_at=now())
         write_meta(run_dir, meta)
         return meta
+
+
+def recover(label: str) -> dict:
+    """Mark a subfleet run that its supervisor reports lost, but whose agent finished, as succeeded.
+
+    Subfleet reports a run lost, and accepts no answer from it, when processes the agent started are
+    still alive after the agent exits ("writers remain after exit receipt"). The agent may still have
+    exited 0 with its final message in the attempt's stream-json transcript; for an accepted Claude
+    attempt, subfleet's deliverable is exactly that transcript's final `result` text. Recovery takes
+    the message only when the job's state is `lost`, the run is neither collected nor abandoned, and
+    one attempt exited 0 without a signal and has a transcript with exactly one `result` event, a
+    successful one with a non-empty message. It records the attempt, the supervisor's reason and the
+    message's SHA-256, which `seal` checks before copying. Recovery is final, like abandonment.
+    """
+    with bookkeeping_lock():
+        run_dir = RUNS / label
+        meta = read_meta(run_dir)
+        if not meta:
+            raise FileNotFoundError(f"no run {label}")
+        if meta.get("backend") != "subfleet" or not meta.get("job_id"):
+            raise RuntimeError(f"run {label} is not a subfleet run")
+        if (run_dir / "response.md").exists() or meta.get("state") == "abandoned" or meta.get("recovered"):
+            raise RuntimeError(f"run {label} is already collected, abandoned or recovered")
+        proc = subprocess.run(["subfleet", "runs", "show", meta["job_id"], "--json"], capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(f"subfleet runs show failed: {proc.stderr[-1000:]}")
+        info = json.loads(proc.stdout)
+        state = (info.get("job") or {}).get("state")
+        if state != "lost":
+            raise RuntimeError(f"run {label}: subfleet reports {state!r}; only a lost run can be recovered")
+        why = []
+        for a in reversed(info.get("attempts") or []):
+            folder = JOBS / a["attempt_id"]
+            try:
+                exit_ = json.loads((folder / "exit.json").read_text())
+                text = (folder / "stdout").read_text()
+            except (OSError, ValueError) as e:
+                why.append(f"{a['attempt_id']}: {e}")
+                continue
+            results = []
+            for raw in text.splitlines():
+                try:
+                    event = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict) and event.get("type") == "result":
+                    results.append(event)
+            final, served = parse_stream(text)
+            if exit_.get("rc") != 0 or exit_.get("signal") is not None:
+                why.append(f"{a['attempt_id']}: exit {exit_}")
+            elif len(results) != 1 or results[0].get("subtype") != "success" or results[0].get("is_error") \
+                    or not isinstance(results[0].get("result"), str) or not results[0]["result"].strip():
+                why.append(f"{a['attempt_id']}: no single successful result in the transcript")
+            else:
+                meta.update(state="succeeded", backend_state=state, attempt_id=a["attempt_id"],
+                            lane_id=a.get("lane_id"), model_served=served, transcript=str(folder / "stdout"),
+                            finished_at=(info.get("job") or {}).get("finished_at"),
+                            recovered={"at": now(), "attempt_state": a.get("state"),
+                                       "supervisor_reason": a.get("quarantine_reason"),
+                                       "result_sha256": hashlib.sha256(final.encode()).hexdigest()})
+                write_meta(run_dir, meta)
+                return meta
+        raise RuntimeError(f"run {label}: no attempt can be recovered ({'; '.join(why) or 'no attempts'})")
 
 
 def collected_any() -> bool:
@@ -259,7 +326,7 @@ def refresh_subfleet(run_dir: Path) -> dict:
         a = accepted[-1]
         # attempt_id is '<job_id>/a<N>', the attempt's folder under the job store.
         fields.update(model_served=a.get("model_served"), lane_id=a.get("lane_id"), attempt_id=a.get("attempt_id"),
-                      transcript=str(Path.home() / ".subfleet" / "jobs" / a["attempt_id"] / "stdout"))
+                      transcript=str(JOBS / a["attempt_id"] / "stdout"))
     with bookkeeping_lock():
         if read_meta(run_dir).get("state") != "abandoned":
             fields["finished_at"] = job.get("finished_at")
@@ -290,12 +357,19 @@ def _seal(run_dir: Path) -> bool:
         meta["state"] = "succeeded"
     if meta.get("state") != "succeeded":
         return False
-    if meta.get("backend") == "subfleet":
+    if meta.get("backend") == "subfleet" and meta.get("recovered"):
+        answer, _ = parse_stream(Path(meta["transcript"]).read_text())
+        if hashlib.sha256(answer.encode()).hexdigest() != meta["recovered"]["result_sha256"]:
+            meta["collect_error"] = "the recovered transcript changed after `i86 recover`"
+            write_meta(run_dir, meta)
+            return False
+    elif meta.get("backend") == "subfleet":
         out = subprocess.run(["subfleet", "runs", "show", meta["job_id"], "--out"], capture_output=True, text=True)
         if out.returncode != 0 or not out.stdout.strip():
             return False
         answer = out.stdout
-        attempt = Path.home() / ".subfleet" / "jobs" / meta["attempt_id"] if meta.get("attempt_id") else None
+    if meta.get("backend") == "subfleet":
+        attempt = JOBS / meta["attempt_id"] if meta.get("attempt_id") else None
         if attempt and (attempt / "prompt.sent.md").exists():
             sent = (attempt / "prompt.sent.md").read_bytes()
             (run_dir / "prompt.sent.md").write_bytes(sent)

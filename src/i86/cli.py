@@ -1,9 +1,11 @@
-"""Command line: i86 prompt | dispatch | collect | check | audit | simulate.
+"""Command line: i86 prompt | dispatch | collect | abandon | recover | check | audit | simulate | prereg.
 
     i86 prompt                      write prompts/forecaster.md and schemas/template.json
     i86 dispatch subfleet LABEL --tier standard -m opus      (or --tier hard, no -m, for GPT-6.1 Sol)
     i86 dispatch claude LABEL -m claude-opus-5-5
     i86 collect                     refresh subfleet runs; fetch answers once all have finished
+    i86 abandon LABEL               mark a run that will never finish (final)
+    i86 recover LABEL               take a lost subfleet run's final message from its own transcript
     i86 check                       parse every runs/*/response.md into runs/*/response.json
     i86 audit                       check each run's transcript for local file reads
     i86 simulate [--n 20000 --seed 0]
@@ -105,13 +107,20 @@ def cmd_collect(args) -> int:
         print(f"{d.name:24s} {meta.get('state') or '-':10s} {meta.get('model_served') or '-':18s} response={'yes' if have else 'no'}")
     if pending:
         print(f"{len(pending)} run(s) still going ({', '.join(pending)}); no answers copied yet. "
-              "`i86 abandon <label>` marks a run that will never finish")
+              "`i86 abandon <label>` marks a run that will never finish; `i86 recover <label>` takes a lost "
+              "subfleet run's answer from its transcript")
     return 0
 
 
 def cmd_abandon(args) -> int:
     meta = runners.abandon(args.label)
     print(f"{args.label}: abandoned at {meta['abandoned_at']}")
+    return 0
+
+
+def cmd_recover(args) -> int:
+    meta = runners.recover(args.label)
+    print(f"{args.label}: recovered from {meta['attempt_id']} (subfleet: {meta['backend_state']})")
     return 0
 
 
@@ -244,6 +253,8 @@ def main(argv=None) -> int:
     sub.add_parser("audit")
     ab = sub.add_parser("abandon", help="mark a run that will never finish, so collection can proceed")
     ab.add_argument("label")
+    rc = sub.add_parser("recover", help="take a lost subfleet run's final message from its own transcript")
+    rc.add_argument("label")
     s = sub.add_parser("simulate")
     s.add_argument("--n", type=int, default=20000)
     s.add_argument("--seed", type=int, default=0)
@@ -255,7 +266,7 @@ def main(argv=None) -> int:
     pr.add_argument("--no-stamp", action="store_true")
     args = ap.parse_args(argv)
     return {"prompt": cmd_prompt, "dispatch": cmd_dispatch, "collect": cmd_collect, "check": cmd_check,
-            "audit": cmd_audit, "abandon": cmd_abandon, "simulate": cmd_simulate, "prereg": cmd_prereg}[args.cmd](args)
+            "audit": cmd_audit, "abandon": cmd_abandon, "recover": cmd_recover, "simulate": cmd_simulate, "prereg": cmd_prereg}[args.cmd](args)
 
 
 if __name__ == "__main__":

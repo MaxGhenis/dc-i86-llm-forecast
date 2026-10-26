@@ -100,7 +100,7 @@ def markdown(graph: Graph, result: dict, meta: dict) -> str:
         f"- Chance one ballot decides it: 1 in {vote['one_in']:,.0f}" if vote["one_in"] else "- Chance one ballot decides it: 0",
         "",
         "| Run | Model | P(passes) | Mean Yes share | 1 ballot decides | Same at every cell | Same at 49.5% and 50.5% "
-        "| Suspect calls | Prior context | Late |",
+        "| Suspect calls | Prior context | Flags |",
         "|---|---|---:|---:|---:|---:|---:|---:|---|---|",
     ]
     for rid in result["runs"]:
@@ -114,14 +114,15 @@ def markdown(graph: Graph, result: dict, meta: dict) -> str:
         prior = " ".join(str(m.get("prior_context") or "–").split())[:80].replace("|", "/")
         lines.append(
             f"| {rid} | {m.get('model_served') or '?'} | {v['p_pass'] * 100:.0f}% | {mean * 100:.1f}% | {one_in} "
-            f"| {flat} | {zero} | {m.get('suspect_calls', '–')} | {prior} | {'yes' if m.get('late') else ''} |")
+            f"| {flat} | {zero} | {m.get('suspect_calls', '–')} | {prior} | {', '.join(f for f in ('late', 'recovered') if m.get(f))} |")
     lines += [
         "",
         "'Same at every cell' and 'Same at 49.5% and 50.5%' are the shares of a run's question-and-state "
         "groups whose answers are identical across cells; high values can mean copied answers. 'Suspect "
         "calls' counts tool calls the audit flagged for reading without excluding the run. 'Prior context' "
-        "is what the forecaster reported seeing, before research, beyond the brief. 'Late' runs were "
-        "dispatched after other answers were in the repository.",
+        "is what the forecaster reported seeing, before research, beyond the brief. 'late' runs were "
+        "dispatched after other answers were in the repository; 'recovered' runs were reported lost by "
+        "their supervisor, and their answer is the final message in the run's own transcript.",
         "",
     ]
     modules = {"vote": "Vote", "implementation": "If it passes", "direct": "Direct outcomes",
