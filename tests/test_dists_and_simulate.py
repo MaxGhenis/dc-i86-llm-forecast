@@ -440,11 +440,13 @@ def test_tilted_and_defensive_estimates_agree(graph):
 
 @settings(max_examples=200, deadline=None)
 @given(st.lists(st.floats(0.0, 1.0), min_size=8, max_size=8), st.integers(-300, 0),
-       st.lists(st.floats(0.0, 1.0, exclude_max=True), min_size=1, max_size=20))
+       st.lists(st.floats(1e-9, 1 - 1e-9), min_size=1, max_size=20))
 def test_tilted_draws_depend_only_on_the_tilt_shape(ends, exponent, us):
     # Invariant: scaling the tilt by any positive constant leaves the draws unchanged (the
-    # sampler's arithmetic runs on the tilt scaled by its largest value), so a condition with
-    # probability 1e-300 is drawn exactly as one with probability 1.
+    # sampler's arithmetic runs on mantissas and powers of two), so a condition with probability
+    # 1e-300 is drawn exactly as one with probability 1. Within 1e-9 of 0 or 1, u has too few digits
+    # to place a draw inside a segment that holds only a few ulps of probability, so those u are
+    # checked apart (below): the draw must land where the tilt is positive.
     grid = [0.30, 0.35, 0.40, 0.45, 0.47, 0.48, 0.49, 0.50, 0.51, 0.52, 0.53, 0.55, 0.60, 0.65, 0.70,
             0.75, 0.80, 0.85, 0.90]
     cdf = np.linspace(0.02, 0.98, len(grid))
@@ -466,5 +468,10 @@ def test_tilted_draws_depend_only_on_the_tilt_shape(ends, exponent, us):
         return  # the shape gives the band no probability, at any scale
     v2, z2 = dists.sample_share_tilted(grid, cdf, 0.15, 0.97, 0.5, 0.97, u, tilt(small), breaks + knots)
     assert np.allclose(v1, v2, rtol=0, atol=1e-9)
+    ext = np.array([0.0, 2.0 ** -52, 0.5, 1 - 2.0 ** -52])
+    for scale in [1.0, small]:
+        v, _ = dists.sample_share_tilted(grid, cdf, 0.15, 0.97, 0.5, 0.97, ext, tilt(scale), breaks + knots)
+        near = np.maximum(tilt(1.0)(np.clip(v - 1e-9, 0.5, 0.97)), tilt(1.0)(np.clip(v + 1e-9, 0.5, 0.97)))
+        assert np.all(near > 0), (v, near)
     assert z2 == pytest.approx(z1 * small, rel=1e-9)
     assert np.all((v2 >= 0.5) & (v2 <= 0.97))  # u = 0 gives the open end; simulate clips it

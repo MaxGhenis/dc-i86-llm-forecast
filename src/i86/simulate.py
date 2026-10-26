@@ -76,6 +76,15 @@ def _cell_weights(cells: list[float], v: np.ndarray):
     return j, j + 1, w
 
 
+def _lerp(table: np.ndarray, j0: np.ndarray, j1: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """Rows of `table` interpolated between cells j0 and j1, clipped to the two rows' range: a value
+    both cells give comes back exactly, and one between two positive values stays positive, however
+    small (5e-324 * 0.5 + 5e-324 * 0.5 would otherwise round to 0)."""
+    lo, hi = table[j0], table[j1]
+    out = lo * (1 - w)[:, None] + hi * w[:, None]
+    return np.clip(out, np.minimum(lo, hi), np.maximum(lo, hi))
+
+
 def _table(graph: Graph, node: Node, fc: Forecasts, cells: list[float | None], state: str | None):
     """Answers for one state at the given cells, shape (cells, k).
 
@@ -104,7 +113,7 @@ def node_params(graph: Graph, node: Node, fc: Forecasts, v: np.ndarray, state_id
         elif node.continuous:
             table = _table(graph, node, fc, graph.cells, state)
             j0, j1, w = _cell_weights(graph.cells, v if v_continuous is None else v_continuous)
-            params = table[j0] * (1 - w)[:, None] + table[j1] * w[:, None]
+            params = _lerp(table, j0, j1, w)
         else:
             sides = [("pass", graph.pass_cells, v > 0.5)]
             if node.cells_mode == "all":
@@ -115,7 +124,7 @@ def node_params(graph: Graph, node: Node, fc: Forecasts, v: np.ndarray, state_id
             for _, cells, mask in sides:
                 table = _table(graph, node, fc, cells, state)
                 j0, j1, w = _cell_weights(cells, v)
-                side_params = table[j0] * (1 - w)[:, None] + table[j1] * w[:, None]
+                side_params = _lerp(table, j0, j1, w)
                 if params is None:
                     # Draws on a side where the node is not forecast get the first side's values;
                     # they are masked out by exists_if.

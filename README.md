@@ -98,6 +98,7 @@ Then collect, check, audit and pool:
 ```bash
 .venv/bin/i86 collect      # once every run has finished, copy answers and transcripts into runs/
 .venv/bin/i86 abandon LABEL  # mark a run that will never finish (a killed process), so collect can proceed; final
+.venv/bin/i86 recover LABEL  # take a finished agent's answer from its own transcript when subfleet reports the run lost
 .venv/bin/i86 check        # parse and validate every response
 .venv/bin/i86 audit        # check each transcript's tool calls
 .venv/bin/i86 simulate     # pool the accepted runs into outputs/ (see Independence for exclusions)
@@ -118,10 +119,15 @@ lanes add their own preamble; `collect` saves exactly what the model was given a
 `runs/<label>/prompt.sent.md`, with its hash. Forecasters work in empty directories outside the
 repository, and the prompt tells them not to read local files. No answer enters the repository until
 every run has finished: the `claude` and `manual` backends write to a staging directory, and
-`collect` copies answers in only when no run of any backend is still going. `prepare`, `abandon` and
-`collect` take one lock on the staging area, and `collect` checks the list of runs again under it
+`collect` copies answers in only when no run of any backend is still going. `prepare`, `abandon`,
+`recover` and `collect` take one lock on the staging area, and `collect` checks the list of runs again under it
 before copying anything, so a run dispatched while it works holds it back. The lock also holds
-between threads of one process. A run marked abandoned stays abandoned even if its process later
+between threads of one process, and a process forked while it is held waits for it like any other.
+Subfleet reports a run lost when processes the agent started outlive it; if the agent itself exited
+cleanly with one successful final message, `recover` records that attempt and the SHA-256 of its whole
+transcript, and `collect` takes the answer only if the transcript is unchanged. The report flags
+recovered runs. `collect` reads each transcript once and copies exactly what it read, with its hash in
+`meta.json`. A run marked abandoned stays abandoned even if its process later
 reports back or an answer is staged for it; what arrives is kept as the run's `backend_state`.
 
 Each forecaster reports, before researching, anything in its context other than the brief that

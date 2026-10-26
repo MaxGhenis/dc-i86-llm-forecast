@@ -14,6 +14,8 @@ the same order share their random numbers (the cutoff contrast relies on this).
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 _EPS = 1e-12
@@ -108,13 +110,12 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks):
     [0, 1] inverts t (s_a + (s_b - s_a) t / 2) / ((s_a + s_b) / 2) = u. Every draw then counts
     equally under the tilted distribution.
 
-    The draws depend only on the tilt's shape, so the arithmetic runs on the tilt and the masses
-    scaled by their largest values, and each segment's inversion on its ends scaled by the larger:
-    a probability as small as 1e-300 would otherwise underflow when squared or multiplied. (Below
-    about 2e-308 floats are subnormal and too coarse to hold the tilt's shape.) Z, the
-    product of the scales and the scaled sum, may itself underflow to 0 for a condition far below
-    1e-300; the draws are exact all the same. Raises ValueError only if the tilt gives the band no
-    probability at all.
+    Each segment's tilted mass is held as a mantissa and a power of two (frexp), so no product
+    underflows however small its factors: the segments are drawn in proportion to their masses
+    relative to the largest, and Z is rounded once, at the end. Each segment's inversion runs on its
+    ends scaled by the larger. A segment whose tilted mass is more than 2^1074 times smaller than the
+    largest gets no draws. Z itself underflows to 0 below about 5e-324; the draws are exact all the
+    same. Raises ValueError only if no segment has both share mass and tilt.
     """
     xs, fs = share_knots(grid, cdf, floor, ceiling)
     inner = np.concatenate([xs, np.asarray(breaks, dtype=float)])
@@ -129,19 +130,27 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks):
     sa = np.clip(f1 - slope / 3, 0.0, None)
     sb = np.clip(f2 + slope / 3, 0.0, None)
     mass = np.clip(mass, 0.0, None)
-    top, big = max(float(sa.max(initial=0.0)), float(sb.max(initial=0.0))), float(mass.max(initial=0.0))
-    target = (mass / big) * (sa / top + sb / top) / 2 if top > 0 and big > 0 else np.zeros(len(mass))
-    if not target.sum() > 0:
+    # mass * (s_a + s_b) as mantissa * 2^expo; rel is each relative to the largest.
+    fm, em = np.frexp(mass)
+    ft, et = np.frexp(sa + sb)
+    mant, expo = fm * ft, em + et
+    pos = mant > 0
+    if not pos.any():
         raise ValueError(f"no probability on Yes shares in ({lo}, {hi}] where the condition can hold")
-    z = big * top * float(target.sum())
-    keep = target > 0
-    a, b, sa, sb, target = a[keep], b[keep], sa[keep], sb[keep], target[keep]
-    q = target / target.sum()
-    cq = np.cumsum(q)
+    top = int(expo[pos].max())
+    rel = np.where(pos, np.ldexp(mant, np.where(pos, expo - top, 0)), 0.0)
+    total = math.fsum(rel)
+    z = math.ldexp(total, top - 1)  # the sum of mass * (s_a + s_b) / 2
+    keep = rel > 0
+    a, b, sa, sb, rel = a[keep], b[keep], sa[keep], sb[keep], rel[keep]
+    # Correctly rounded partial sums: a running sum's rounding could leave the bulk of the mass an ulp
+    # short of 1 and hand u = 1 - 2^-52 to a segment of negligible weight.
+    cq = np.array([math.fsum(rel[: i + 1]) for i in range(len(rel))]) / total
     cq[-1] = 1.0
+    prev = np.concatenate([[0.0], cq[:-1]])
     u = np.asarray(u, dtype=float)
-    seg = np.minimum(np.searchsorted(cq, u, side="right"), len(q) - 1)
-    r = np.clip((u - (cq[seg] - q[seg])) / q[seg], 0.0, 1.0)
+    seg = np.minimum(np.searchsorted(cq, u, side="right"), len(rel) - 1)
+    r = np.clip((u - prev[seg]) / (cq[seg] - prev[seg]), 0.0, 1.0)
     end = np.maximum(sa[seg], sb[seg])  # positive: a kept segment has positive tilt somewhere
     s0, s1 = sa[seg] / end, sb[seg] / end
     den = s0 + np.sqrt(s0 * s0 + r * (s1 * s1 - s0 * s0))

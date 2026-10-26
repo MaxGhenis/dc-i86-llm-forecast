@@ -13,11 +13,15 @@ still going. A run that will never finish (a killed process, a manual run given 
 A subfleet run that its supervisor reports lost although the agent finished (processes the agent
 started outlived it) can instead be recovered with `i86 recover <label>`, which takes the final message
 from the attempt's own transcript under conditions `recover` lists; the report flags such runs.
+Collection reads each transcript once, checks it, and copies those same bytes, with their SHA-256 in
+`meta.json`; a recovered run's transcript must be byte for byte the one recovery read.
 After collection, `dispatch` refuses new runs unless they are marked `--late`, and the report flags
 late runs, which could have found the others' answers. Dispatch, abandon and collect hold a lock
 file beside the staging directory while they check and change runs, so no run can start between
 collect's check and its copy. The lock is reentrant within one thread; other threads and other
-processes wait for it, and so does a process forked while it is held. Every change to a run's
+processes wait for it, and so does a process forked while it is held: the child lets go of the lock
+file it inherits, so it waits for the lock like any other process and cannot keep it held after its
+parent exits. Every change to a run's
 metadata reads it afresh under the lock. Whatever a run's backend reports after it is abandoned (a
 Claude process that returns, a subfleet job that finishes, a manual answer saved late) is recorded as
 `backend_state`, never as its state.
@@ -57,13 +61,20 @@ FINISHED = {"succeeded", "failed", "cancelled", "canceled", "lost", "killed", "e
 # the lock reentrant for the thread that holds it.
 _mutex = threading.RLock()
 _held = threading.local()
+_lock_fds: set[int] = set()  # descriptors through which this process holds the lock file
 
 
 def _forget_lock_after_fork() -> None:
     # A forked child holds none of its parent's lock: it starts afresh and waits for the file lock
-    # like any other process (its copy of the parent's descriptor does not let it in).
-    global _mutex, _held
-    _mutex, _held = threading.RLock(), threading.local()
+    # like any other process. Its copies of the parent's lock descriptors share the parent's lock, so
+    # they are pointed at /dev/null; otherwise the lock would outlive a parent that exits while the
+    # child still runs, and the child, waiting for it through a new descriptor, would wait forever.
+    global _mutex, _held, _lock_fds
+    for fd in _lock_fds:
+        null = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(null, fd)
+        os.close(null)
+    _mutex, _held, _lock_fds = threading.RLock(), threading.local(), set()
 
 
 os.register_at_fork(after_in_child=_forget_lock_after_fork)
@@ -86,12 +97,15 @@ def bookkeeping_lock():
         with open(path, "a") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             owner = os.getpid()
+            fds = _lock_fds
+            fds.add(f.fileno())
             held.depth = 1
             try:
                 yield
             finally:
                 held.depth = 0
                 if os.getpid() == owner:  # a forked child must not release its parent's lock
+                    fds.discard(f.fileno())
                     fcntl.flock(f, fcntl.LOCK_UN)
 
 
@@ -159,8 +173,9 @@ def recover(label: str) -> dict:
     attempt, subfleet's deliverable is exactly that transcript's final `result` text. Recovery takes
     the message only when the job's state is `lost`, the run is neither collected nor abandoned, and
     one attempt exited 0 without a signal and has a transcript with exactly one `result` event, a
-    successful one with a non-empty message. It records the attempt, the supervisor's reason and the
-    message's SHA-256, which `seal` checks before copying. Recovery is final, like abandonment.
+    successful one with a non-empty message. It records the attempt, the supervisor's reason, and the
+    SHA-256 of the message and of the whole transcript; `seal` copies the transcript only if it is
+    unchanged, so the audit reads what recovery read. Recovery is final, like abandonment.
     """
     with bookkeeping_lock():
         run_dir = RUNS / label
@@ -183,7 +198,8 @@ def recover(label: str) -> dict:
             folder = JOBS / a["attempt_id"]
             try:
                 exit_ = json.loads((folder / "exit.json").read_text())
-                text = (folder / "stdout").read_text()
+                data = (folder / "stdout").read_bytes()
+                text = data.decode()
             except (OSError, ValueError) as e:
                 why.append(f"{a['attempt_id']}: {e}")
                 continue
@@ -207,7 +223,8 @@ def recover(label: str) -> dict:
                             finished_at=(info.get("job") or {}).get("finished_at"),
                             recovered={"at": now(), "attempt_state": a.get("state"),
                                        "supervisor_reason": a.get("quarantine_reason"),
-                                       "result_sha256": hashlib.sha256(final.encode()).hexdigest()})
+                                       "result_sha256": hashlib.sha256(final.encode()).hexdigest(),
+                                       "transcript_sha256": hashlib.sha256(data).hexdigest()})
                 write_meta(run_dir, meta)
                 return meta
         raise RuntimeError(f"run {label}: no attempt can be recovered ({'; '.join(why) or 'no attempts'})")
@@ -357,9 +374,14 @@ def _seal(run_dir: Path) -> bool:
         meta["state"] = "succeeded"
     if meta.get("state") != "succeeded":
         return False
+    # The transcript is read once: what is checked here is what is copied below.
+    transcript = Path(meta.get("transcript") or "")
+    data = transcript.read_bytes() if transcript.is_file() else None
     if meta.get("backend") == "subfleet" and meta.get("recovered"):
-        answer, _ = parse_stream(Path(meta["transcript"]).read_text())
-        if hashlib.sha256(answer.encode()).hexdigest() != meta["recovered"]["result_sha256"]:
+        rec = meta["recovered"]
+        answer = parse_stream(data.decode(errors="replace"))[0] if data is not None else ""
+        if (data is None or hashlib.sha256(answer.encode()).hexdigest() != rec["result_sha256"]
+                or hashlib.sha256(data).hexdigest() != rec.get("transcript_sha256")):
             meta["collect_error"] = "the recovered transcript changed after `i86 recover`"
             write_meta(run_dir, meta)
             return False
@@ -381,11 +403,11 @@ def _seal(run_dir: Path) -> bool:
         answer = staged.read_text()
     else:
         return False
-    transcript = Path(meta.get("transcript") or "")
-    if transcript.is_file():
-        shutil.copyfile(transcript, run_dir / "transcript.jsonl")
+    if data is not None:
+        (run_dir / "transcript.jsonl").write_bytes(data)
         meta["transcript_original"] = str(transcript)
         meta["transcript"] = str(run_dir / "transcript.jsonl")
+        meta["transcript_sha256"] = hashlib.sha256(data).hexdigest()
     (run_dir / "response.md").write_text(answer)
     meta["collected_at"] = now()
     write_meta(run_dir, meta)

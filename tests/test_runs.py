@@ -1,5 +1,6 @@
 """Dispatch bookkeeping: staging, sealing, late runs and which runs get pooled. MOCK runs only."""
 
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -234,3 +235,25 @@ def test_a_transcript_changed_after_recovery_is_not_collected(area, monkeypatch)
     (attempt / "stdout").write_text(json.dumps({"type": "result", "subtype": "success", "result": "MOCK other"}) + "\n")
     assert not runners.seal(run_dir)
     assert not (run_dir / "response.md").exists() and runners.read_meta(run_dir)["collect_error"]
+
+
+def test_a_collected_transcript_is_the_one_its_hash_names(area):
+    runners.prepare("claude-hash", area.prompt, "sha", "claude")
+    _stage_answer("claude-hash")
+    (runners.STAGE / "claude-hash" / "transcript.jsonl").write_text('{"type": "MOCK"}\n')
+    assert runners.seal(runners.RUNS / "claude-hash")
+    meta = runners.read_meta(runners.RUNS / "claude-hash")
+    copied = (runners.RUNS / "claude-hash" / "transcript.jsonl").read_bytes()
+    assert copied == b'{"type": "MOCK"}\n'
+    assert meta["transcript_sha256"] == hashlib.sha256(copied).hexdigest()
+
+
+def test_a_recovered_transcript_with_an_added_event_is_not_collected(area, monkeypatch):
+    # The final message is unchanged; only the audit trail differs, which the whole-transcript hash
+    # catches.
+    run_dir, attempt = _lost_job(area, monkeypatch)
+    runners.recover("sub-lost")
+    with (attempt / "stdout").open("a") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "MOCK"}]}}) + "\n")
+    assert not runners.seal(run_dir)
+    assert runners.read_meta(run_dir)["collect_error"]
