@@ -14,8 +14,10 @@ After collection, `dispatch` refuses new runs unless they are marked `--late`, a
 late runs, which could have found the others' answers. Dispatch, abandon and collect hold a lock
 file beside the staging directory while they check and change runs, so no run can start between
 collect's check and its copy. The lock is reentrant within one thread; other threads and other
-processes wait for it. Whatever a run's backend reports after it is abandoned (a Claude process
-that returns, a manual answer saved late) is recorded as `backend_state`, never as its state.
+processes wait for it, and so does a process forked while it is held. Every change to a run's
+metadata reads it afresh under the lock. Whatever a run's backend reports after it is abandoned (a
+Claude process that returns, a subfleet job that finishes, a manual answer saved late) is recorded as
+`backend_state`, never as its state.
 
 Backends:
 - `subfleet`: Max Ghenis's supervised lanes (`subfleet run --task research`).
@@ -30,6 +32,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -52,27 +55,40 @@ _mutex = threading.RLock()
 _held = threading.local()
 
 
+def _forget_lock_after_fork() -> None:
+    # A forked child holds none of its parent's lock: it starts afresh and waits for the file lock
+    # like any other process (its copy of the parent's descriptor does not let it in).
+    global _mutex, _held
+    _mutex, _held = threading.RLock(), threading.local()
+
+
+os.register_at_fork(after_in_child=_forget_lock_after_fork)
+
+
 @contextmanager
 def bookkeeping_lock():
     """Hold the runs' lock file. Reentrant within a thread; other threads and processes wait."""
-    with _mutex:
-        if getattr(_held, "depth", 0):
-            _held.depth += 1
+    mutex, held = _mutex, _held
+    with mutex:
+        if getattr(held, "depth", 0):
+            held.depth += 1
             try:
                 yield
             finally:
-                _held.depth -= 1
+                held.depth -= 1
             return
         path = STAGE.with_name(STAGE.name + ".lock")
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
-            _held.depth = 1
+            owner = os.getpid()
+            held.depth = 1
             try:
                 yield
             finally:
-                _held.depth = 0
-                fcntl.flock(f, fcntl.LOCK_UN)
+                held.depth = 0
+                if os.getpid() == owner:  # a forked child must not release its parent's lock
+                    fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def run_dirs() -> list[Path]:
@@ -90,6 +106,18 @@ def read_meta(run_dir: Path) -> dict:
 
 def write_meta(run_dir: Path, meta: dict) -> None:
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+
+
+def record(run_dir: Path, state: str | None = None, **fields) -> dict:
+    """Merge fields (and a state) into a run's metadata, read afresh under the lock. A state that
+    arrives for an abandoned run is kept as `backend_state`: abandonment is final."""
+    with bookkeeping_lock():
+        meta = read_meta(run_dir)
+        meta.update(fields)
+        if state is not None:
+            meta["backend_state" if meta.get("state") == "abandoned" else "state"] = state
+        write_meta(run_dir, meta)
+        return meta
 
 
 def staged_response(label: str) -> Path:
@@ -181,11 +209,8 @@ def dispatch_subfleet(label: str, prompt_path: Path, prompt_sha: str, tier: str,
     run_dir = prepare(label, prompt_path, prompt_sha, "subfleet", late=late, tier=tier, model_pin=model)
     cmd = subfleet_command(run_dir, label, tier, model)
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    meta = read_meta(run_dir)
-    meta["command"] = cmd
-    meta["dispatched_at"] = now()
-    meta["dispatch_stdout"] = proc.stdout[-4000:]
-    meta["dispatch_rc"] = proc.returncode
+    fields = {"command": cmd, "dispatched_at": now(), "dispatch_stdout": proc.stdout[-4000:],
+              "dispatch_rc": proc.returncode}
     for line in proc.stdout.splitlines():
         try:
             obj = json.loads(line)
@@ -193,9 +218,9 @@ def dispatch_subfleet(label: str, prompt_path: Path, prompt_sha: str, tier: str,
             continue
         job_id = obj.get("job_id") or (obj.get("job") or {}).get("job_id")
         if job_id:
-            meta["job_id"] = job_id
+            fields["job_id"] = job_id
             break
-    write_meta(run_dir, meta)
+    meta = record(run_dir, **fields)  # fresh: the run may have been abandoned while subfleet ran
     if proc.returncode != 0 or "job_id" not in meta:
         raise RuntimeError(f"subfleet dispatch for {label} failed (rc {proc.returncode}): {proc.stderr[-2000:]}")
     return meta
@@ -203,10 +228,8 @@ def dispatch_subfleet(label: str, prompt_path: Path, prompt_sha: str, tier: str,
 
 def dispatch_claude(label: str, prompt_path: Path, prompt_sha: str, model: str, late: bool = False) -> dict:
     run_dir = prepare(label, prompt_path, prompt_sha, "claude", late=late, model_pin=model)
-    meta = read_meta(run_dir)
     cmd = claude_command(model)
-    meta.update(command=cmd, dispatched_at=now())
-    write_meta(run_dir, meta)
+    meta = record(run_dir, command=cmd, dispatched_at=now())
     with open(run_dir / "prompt.md") as stdin:
         proc = subprocess.run(cmd, stdin=stdin, capture_output=True, text=True, cwd=meta["workdir"])
     stage = STAGE / label
@@ -215,47 +238,32 @@ def dispatch_claude(label: str, prompt_path: Path, prompt_sha: str, model: str, 
     final, served = parse_stream(proc.stdout)
     if final:
         (stage / "response.md").write_text(final)
-    with bookkeeping_lock():
-        meta = read_meta(run_dir)  # fresh: the run may have been abandoned while it ran
-        outcome = "succeeded" if final else "failed"
-        if meta.get("state") == "abandoned":
-            meta["backend_state"] = outcome  # abandonment is final
-        else:
-            meta["state"] = outcome
-        meta.update(finished_at=now(), rc=proc.returncode, model_served=served,
-                    transcript=str(stage / "transcript.jsonl"), stderr=proc.stderr[-2000:])
-        write_meta(run_dir, meta)
-    return meta
+    # Fresh: the run may have been abandoned while it ran.
+    return record(run_dir, state="succeeded" if final else "failed", finished_at=now(), rc=proc.returncode,
+                  model_served=served, transcript=str(stage / "transcript.jsonl"), stderr=proc.stderr[-2000:])
 
 
 def refresh_subfleet(run_dir: Path) -> dict:
     """Refresh one subfleet run's state, model and transcript path; write no answer."""
-    meta = read_meta(run_dir)
-    job_id = meta.get("job_id")
+    job_id = read_meta(run_dir).get("job_id")
     if not job_id:
-        return meta
+        return read_meta(run_dir)
     proc = subprocess.run(["subfleet", "runs", "show", job_id, "--json"], capture_output=True, text=True)
     if proc.returncode != 0:
-        meta["collect_error"] = proc.stderr[-1000:]
-        write_meta(run_dir, meta)
-        return meta
+        return record(run_dir, collect_error=proc.stderr[-1000:])
     info = json.loads(proc.stdout)
     job = info.get("job") or {}
-    if meta.get("state") == "abandoned":
-        meta["backend_state"] = job.get("state")  # abandonment is final
-    else:
-        meta["state"] = job.get("state")
-        meta["finished_at"] = job.get("finished_at")
+    fields = {}
     accepted = [a for a in info.get("attempts", []) if a.get("state") == "succeeded"]
     if accepted:
         a = accepted[-1]
-        meta["model_served"] = a.get("model_served")
-        meta["lane_id"] = a.get("lane_id")
-        meta["attempt_id"] = a.get("attempt_id")
         # attempt_id is '<job_id>/a<N>', the attempt's folder under the job store.
-        meta["transcript"] = str(Path.home() / ".subfleet" / "jobs" / a["attempt_id"] / "stdout")
-    write_meta(run_dir, meta)
-    return meta
+        fields.update(model_served=a.get("model_served"), lane_id=a.get("lane_id"), attempt_id=a.get("attempt_id"),
+                      transcript=str(Path.home() / ".subfleet" / "jobs" / a["attempt_id"] / "stdout"))
+    with bookkeeping_lock():
+        if read_meta(run_dir).get("state") != "abandoned":
+            fields["finished_at"] = job.get("finished_at")
+        return record(run_dir, state=job.get("state"), **fields)
 
 
 def seal(run_dir: Path) -> bool:
@@ -263,6 +271,11 @@ def seal(run_dir: Path) -> bool:
 
     Call only once every run has finished. Returns whether the run has an answer.
     """
+    with bookkeeping_lock():
+        return _seal(run_dir)
+
+
+def _seal(run_dir: Path) -> bool:
     meta = read_meta(run_dir)
     if (run_dir / "response.md").exists():
         return True
