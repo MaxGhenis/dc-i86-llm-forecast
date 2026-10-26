@@ -127,8 +127,8 @@ Subfleet reports a run lost when processes the agent started outlive it; if the 
 cleanly with one successful final message, `recover` records that attempt and the SHA-256 of its whole
 transcript, and `collect` takes the answer only if the transcript is unchanged. The report flags
 recovered runs. `collect` reads each transcript once and copies exactly what it read, with its hash in
-`meta.json`. Once a run is collected, later collects leave its `meta.json` alone, and `audit` reads the
-committed copy of its transcript. A run marked abandoned stays abandoned even if its process later
+`meta.json`. Once a run is collected, later collects leave its `meta.json` alone, and `audit` reads
+only the committed copy of its transcript; a collected run without one fails the audit. A run marked abandoned stays abandoned even if its process later
 reports back or an answer is staged for it; what arrives is kept as the run's `backend_state`.
 
 Each forecaster reports, before researching, anything in its context other than the brief that
@@ -160,7 +160,8 @@ shell's semantics: unquoted `$a` takes bash's first element and zsh's whole arra
 `"${a[@]}"` keeps separate elements. Words split into fields as each shell splits them (bash splits
 unquoted variables at `IFS`; zsh does so with `SH_WORD_SPLIT`), and so do `read` and bash 3.2's
 here-strings. `noglob`, `set -f`, zsh's option spellings and `emulate sh` change expansion in the
-shell state where they run, including functions, branches and subshells. Parameter defaults with
+shell state where they run, including functions, branches and subshells; `emulate sh -c command`
+runs the command in the current shell, keeping its directory changes, and restores only the options. Parameter defaults with
 `=` or `:=` assign their variable; failed `?` and `:?` expansions exit the shell. Unassigned locals
 follow each shell's rules, including bash's unset local `IFS` and zsh's empty local `IFS`. A new shell
 (`sh -c`, a script) sees only exported variables, resets `IFS`, and starts a fresh directory stack.
@@ -178,7 +179,10 @@ script file, a jq filter, a sed script or an awk program, input is data. Path-sh
 a read when the program demonstrably opens it, is suspect when it may supply filenames, and stays
 local for programs that only print or transform it. Awk `-v` values follow their uses in file
 operations, command execution and `ARGV`; a literal `system()` command is audited as shell code
-without turning unrelated values into reads.
+without turning unrelated values into reads. Awk's actions are followed in the order awk runs them:
+a `getline` in a straight-line BEGIN block reads the next known input line, and record actions with
+no line left never run. The output of `echo` and `printf '%s\n'` is known exactly or not at all,
+since the shells' `echo`s differ on options and backslashes.
 Known input also reaches a child shell's `while read` loop, a shell script or an awk shell command;
 when several commands share input and its consumption is unresolved, possible filename uses are
 suspect. Protected glob patterns remain checked when their matches are absent at audit time.

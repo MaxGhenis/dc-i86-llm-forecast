@@ -15,6 +15,7 @@ the same order share their random numbers (the cutoff contrast relies on this).
 from __future__ import annotations
 
 import math
+from fractions import Fraction
 
 import numpy as np
 
@@ -99,7 +100,7 @@ def sample_share_band(grid, cdf, floor, ceiling, lo, hi, u, defensive: float = 0
     return a[seg] + frac * (b[seg] - a[seg]), p[seg] / q[seg]
 
 
-def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks):
+def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2_scale: int = 0):
     """Shares in (lo, hi] drawn exactly in proportion to the forecaster's density times `tilt`, and
     the tilt's mass Z, the integral of density times tilt over the band.
 
@@ -112,10 +113,13 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks):
 
     Each segment's tilted mass is held as a mantissa and a power of two (frexp), so no product
     underflows however small its factors: the segments are drawn in proportion to their masses
-    relative to the largest, and Z is rounded once, at the end. Each segment's inversion runs on its
-    ends scaled by the larger. A segment whose tilted mass is more than 2^1074 times smaller than the
-    largest gets no draws. Z itself underflows to 0 below about 5e-324; the draws are exact all the
-    same. Raises ValueError only if no segment has both share mass and tilt.
+    relative to the largest. Each segment's inversion runs on its ends scaled by the larger. A segment
+    whose tilted mass is more than 2^1074 times smaller than the largest gets no draws.
+
+    `tilt` may return the probability times 2^log2_scale (see simulate._Tilt); Z is then divided by
+    it. Z is the segments' masses times (s_a + s_b) / 2, summed exactly as fractions and rounded once,
+    so it is 0 only if that sum is below about 2.5e-324; the draws are exact all the same. Raises
+    ValueError only if no segment has both share mass and tilt.
     """
     xs, fs = share_knots(grid, cdf, floor, ceiling)
     inner = np.concatenate([xs, np.asarray(breaks, dtype=float)])
@@ -140,7 +144,9 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks):
     top = int(expo[pos].max())
     rel = np.where(pos, np.ldexp(mant, np.where(pos, expo - top, 0)), 0.0)
     total = math.fsum(rel)
-    z = math.ldexp(total, top - 1)  # the sum of mass * (s_a + s_b) / 2
+    exact = sum((Fraction(float(m)) * (Fraction(float(x)) + Fraction(float(y)))
+                 for m, x, y in zip(mass[pos], sa[pos], sb[pos])), Fraction(0))
+    z = float(exact / 2 / Fraction(2) ** log2_scale)  # Fraction -> float rounds once, to nearest
     keep = rel > 0
     a, b, sa, sb, rel = a[keep], b[keep], sa[keep], sb[keep], rel[keep]
     # Correctly rounded partial sums: a running sum's rounding could leave the bulk of the mass an ulp

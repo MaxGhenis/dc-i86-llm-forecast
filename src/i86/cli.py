@@ -151,13 +151,14 @@ def cmd_audit(args) -> int:
         meta = runners.read_meta(d)
         if not (d / "response.md").exists() or meta.get("backend") == "manual":
             continue
-        # The committed copy is what prereg hashes; the metadata path is only a fallback.
-        path = d / "transcript.jsonl" if (d / "transcript.jsonl").exists() else meta.get("transcript")
-        if not path or not Path(path).exists():
+        # Only the committed copy, which prereg hashes: a collected run without one fails, since the
+        # job store's copy can change after collection.
+        path = d / "transcript.jsonl"
+        if not path.is_file():
             result = {"events": 0, "passed": False, "violations": [], "web_calls": 0, "local_calls": [],
-                      "suspect": [], "error": f"no transcript at {path!r}"}
+                      "suspect": [], "error": f"no committed transcript at runs/{d.name}/transcript.jsonl"}
         else:
-            result = audit.audit_transcript(Path(path), meta.get("workdir", ""))
+            result = audit.audit_transcript(path, meta.get("workdir", ""))
         (d / "audit.json").write_text(json.dumps(result, indent=1) + "\n")
         flag = "ok" if result["passed"] else ("VIOLATION" if result["violations"] else "NO EVENTS")
         worst = max(worst, 0 if result["passed"] else 1)

@@ -48,7 +48,8 @@ command's exit status (`_World`):
   unquoted here-string too, joining the fields with spaces. Where the shell is not named and the
   two differ, the command runs each way, or the input is unknown.
   Expansion options (`set -f`, `noglob`, zsh's option spellings and `emulate sh`) travel with each
-  shell state through branches, functions and subshells. `${x:=word}` and `${x=word}` assign in the
+  shell state through branches, functions and subshells; `emulate MODE -c command` runs the command
+  in the current shell and then restores only the options. `${x:=word}` and `${x=word}` assign in the
   current shell; failed `${x:?word}` and `${x?word}` expansions exit it.
   Bash expands a failed parameter's diagnostic word before exiting; native zsh prints its source.
   Brace expansions that duplicate substitutions with effects the audit cannot order are suspect.
@@ -1120,6 +1121,42 @@ class _World(NamedTuple):
     stack: tuple = ()
     status: str = MAYBE
     primary: bool = True
+
+
+def _echo(args: list[str], shell: str | None, tilde) -> str | None:
+    """What echo prints, exactly, or None. bash and zsh read leading -n, -e and -E; macOS's sh (bash
+    in POSIX mode with xpg_echo) reads none and prints them. sh decodes backslash escapes; bash does
+    after -e, the last of -e and -E winning; zsh does unless only -E is given. zsh drops a lone first
+    `-`, which bash prints. `shell` None is the transcript's own shell, bash or zsh: where the two
+    differ, the output is unknown."""
+    if shell not in {None, "bash", "zsh", "sh"}:
+        return None
+    j = 0
+    if shell != "sh":
+        while j < len(args) and re.fullmatch(r"-[neE]+", args[j]):
+            j += 1
+    flags = "".join(a[1:] for a in args[:j])
+    words = [tilde(a) for a in args[j:]]
+    if shell != "bash" and words[:1] == ["-"]:
+        if shell is None:
+            return None
+        if shell == "zsh":
+            words = words[1:]
+    text = " ".join(words)
+    if "\\" in text:
+        last = max(flags.rfind("e"), flags.rfind("E"))
+        bash_decodes = last >= 0 and flags[last] == "e"
+        zsh_decodes = "e" in flags or "E" not in flags  # any -e wins in zsh
+        decode = {"bash": bash_decodes, "zsh": zsh_decodes, "sh": True}.get(shell)
+        if decode is None:
+            if bash_decodes != zsh_decodes:
+                return None
+            decode = bash_decodes
+        if decode:
+            if re.search(r"\\[^nt\\]|\\$", text):
+                return None  # escapes the audit does not decode (\c, octal, ...)
+            text = re.sub(r"\\([nt\\])", lambda m: {"n": "\n", "t": "\t", "\\": "\\"}[m.group(1)], text)
+    return text + ("" if "n" in flags else "\n")
 
 
 class _Shell:
@@ -3390,9 +3427,14 @@ class _Shell:
             if "-c" in args:
                 index = args.index("-c")
                 if args[index + 1:index + 2]:
-                    with self.child():
+                    # The command runs in the current shell, so its directory changes and variables
+                    # outlast it; zsh restores only the options.
+                    options = self.options()
+                    try:
                         self.command(["emulate", *args[:index]])
                         self.run(args[index + 1])
+                    finally:
+                        self.restore_options(options)
                 else:
                     self.notes.append("shell emulation has no available command")
                 return
@@ -3539,10 +3581,12 @@ class _Shell:
             self.output = (os.path.dirname if verb == "dirname" else os.path.basename)(operands[0])
             return
         if verb == "echo":
-            self.output = " ".join(self.tilde(a) for a in args if a not in {"-n", "-e", "-E"})
+            self.output = _echo(args, self.shell_name, self.tilde)
             return  # the words echo prints are data, including words that look like paths
         elif verb == "printf" and args and args[0] in {"%s", "%s\n", "%s\\n"}:
-            self.output = " ".join(args[1:])
+            # The format is reused for each argument, and used once when there is none.
+            end = "" if args[0] == "%s" else "\n"
+            self.output = "".join(a + end for a in args[1:] or [""])
             return
         elif verb == "printf":
             return
@@ -3623,7 +3667,12 @@ class _Shell:
             if any(c in a for c in "'\"()"):
                 self.scan_code(a)
         if verb in AWKS:
-            self.awk_code("\n".join(code), assignments, None if stdin_code else stdin)
+            # awk's operands after the program are files, and `name=value` assignments.
+            files = [a for j, a in enumerate(args)
+                     if j not in skip and not re.fullmatch(r"[A-Za-z_]\w*=.*", a, re.S)]
+            from_stdin = [a in {"-", "/dev/stdin"} for a in files]
+            self.awk_code("\n".join(code), assignments, None if stdin_code else stdin,
+                          True if all(from_stdin) else False if not any(from_stdin) else None)
         else:
             for c in code:
                 self.scan_code(c)
@@ -4118,11 +4167,16 @@ class _Shell:
         imported_aliases: set[str] = set()
         statements(tree.body)
 
-    def awk_code(self, code: str, data: dict[str, str], stdin: str | None) -> None:
+    def awk_code(self, code: str, data: dict[str, str], stdin: str | None, stdin_main: bool | None = True) -> None:
         """Trace awk values to file/command operands; merely printing a -v value is data.
 
         Exact straight-line values prove an operation. Branches, unknown expressions and indirect
         functions remain suspect. Literal system commands are parsed as shell commands separately.
+        Actions are followed in the order awk runs them: BEGIN blocks, then the record actions, then
+        END blocks. `stdin_main` says whether standard input is the main input (True), file operands
+        are (False), or both may be (None). A plain or `getline var` in a straight-line BEGIN block
+        reads the next known record, and the record actions get the records left: none means they
+        never run.
         """
         if not code:
             self.notes.append("awk program is unavailable; its data may supply filenames")
@@ -4163,8 +4217,8 @@ class _Shell:
             return out
 
         def text(expr):
-            if expr == ["$", "0"] and stdin is not None and len(stdin.splitlines()) == 1:
-                return stdin.splitlines()[0]
+            if expr == ["$", "0"] and line is not None:
+                return line
             parts = []
             for t in expr:
                 if t.startswith('"'):
@@ -4195,26 +4249,42 @@ class _Shell:
         uncertain = uncertain or len(while_conditions) > 1
         # Each top-level action has its own guard. A BEGIN block does not make an unrelated
         # record action run, and a pattern may reject every record. Keep assignments in such
-        # actions unknown rather than letting them prove a later filename.
-        actions: dict[int, tuple[bool, bool]] = {}
-        depth, start, active = 0, 0, (False, False)
+        # actions unknown rather than letting them prove a later filename. `kind` gives each
+        # token's action: "BEGIN", "END", "record" (no pattern) or "pattern"; None outside actions.
+        kind: dict[int, str | None] = {}
+        depth, start, current = 0, 0, None
         for i, token in enumerate(tokens):
             if token == "{":
                 if depth == 0:
-                    prefix = [t for t in tokens[start:i] if t != ";"]
-                    record = not prefix
-                    active = (prefix in (["BEGIN"], ["END"]) or record and bool(stdin), record)
+                    prefix = tuple(t for t in tokens[start:i] if t != ";")
+                    current = {("BEGIN",): "BEGIN", ("END",): "END", (): "record"}.get(prefix, "pattern")
                 depth += 1
-            actions[i] = active
+            kind[i] = current
             if token == "}":
                 depth -= 1
                 if depth == 0:
-                    start, active = i + 1, (False, False)
+                    start, current = i + 1, None
+        order = ([i for i in kind if kind[i] == "BEGIN"] + [i for i in kind if kind[i] not in {"BEGIN", "END"}]
+                 + [i for i in kind if kind[i] == "END"])
+        # The main input's records not yet read, while known; `records` is what the record actions
+        # get once BEGIN has run, and `line` is $0 in them while it is known (a single record).
+        main = stdin.splitlines() if stdin is not None and stdin_main is True else None
+        records: list[str] | None = None
+        line: str | None = None
+
+        def status(index) -> tuple[bool, bool]:
+            """Whether the action holding a token certainly runs, and whether it is a record action."""
+            k = kind.get(index)
+            if k in {"BEGIN", "END"}:
+                return True, False
+            if k == "record":
+                return bool(records), True
+            return False, False
 
         def consume(expr, index, command=False, close=False, inherit_input=True, command_input=None):
-            nonlocal stdin
+            nonlocal stdin, line, main
             v = text(expr)
-            guaranteed_action, record = actions.get(index, (False, False))
+            guaranteed_action, record = status(index)
             if "$" in expr and not record:
                 v = None
             certain = (guaranteed_action and not uncertain and not close and
@@ -4229,7 +4299,9 @@ class _Shell:
                     if inherit_input:
                         # A system/pipe-read command shares awk's input descriptor and may
                         # consume it. Later record values cannot reuse the original input.
-                        stdin = None
+                        stdin = line = None
+                        if stdin_main is not False:
+                            main = None
                 else:
                     self.add(v, bare=True)
             elif expr:
@@ -4238,16 +4310,23 @@ class _Shell:
         builtins = {"atan2", "cos", "sin", "exp", "log", "sqrt", "int", "rand", "srand", "gsub", "sub",
                     "index", "length", "match", "split", "sprintf", "substr", "tolower", "toupper",
                     "systime", "strftime", "mktime", "fflush", "system", "close"}
-        for i, t in enumerate(tokens):
+        begun = False
+        for i in order:
+            t = tokens[i]
+            if not begun and kind[i] != "BEGIN":
+                begun, records = True, main
+                line = records[0] if records is not None and len(records) == 1 else None
+            if kind[i] in {"record", "pattern"} and records == []:
+                continue  # no record is left for this action, so it never runs
             if re.fullmatch(r"[A-Za-z_]\w*", t) and tokens[i + 1:i + 2] == ["="]:
-                certain_action, _ = actions.get(i, (False, False))
+                certain_action, _ = status(i)
                 known[t] = text(expression(i + 2, {";", "}", ","})) if not uncertain and certain_action else None
             elif re.fullmatch(r"[A-Za-z_]\w*", t) and (
                     tokens[i + 1:i + 2] in [[op] for op in {"++", "--", "+=", "-=", "*=", "/=", "%=", "^="}] or
                     tokens[max(0, i - 1):i] in [["++"], ["--"]]):
                 known[t] = None
             if t == "$" and tokens[i + 2:i + 3] == ["="]:
-                stdin = None
+                stdin = line = None
             if t in {"sub", "gsub", "split", "match"} and tokens[i + 1:i + 2] == ["("]:
                 # These builtins mutate an argument (or $0). Until those transforms are
                 # evaluated, a preceding -v value cannot prove the later filename.
@@ -4255,17 +4334,28 @@ class _Shell:
                 for name in expr:
                     if name in known:
                         known[name] = None
-                stdin = None
+                stdin = line = None
             if t in {"system", "close"} and tokens[i + 1:i + 2] == ["("]:
                 consume(expression(i + 2, {",", ")"}), i, command=t == "system", close=t == "close")
             elif t == "getline":
                 expr = expression(i + 1, {";", "}"})
+                value = None  # the text read, if known
                 if "<" in expr:
                     consume(expr[expr.index("<") + 1:], i)
+                elif tokens[i - 1:i] not in (["|"], ["|&"]):
+                    # The main input's next record. Only a getline that runs exactly once before any
+                    # record is read, in a straight-line BEGIN block, knows which.
+                    if kind[i] == "BEGIN" and not uncertain and not while_conditions and main is not None:
+                        # At the end of the input macOS's awk empties the variable; it stays unknown.
+                        value = main.pop(0) if main else None
+                    else:
+                        main = None
+                    if stdin_main is not False:
+                        stdin = None
                 if expr and re.fullmatch(r"[A-Za-z_]\w*", expr[0]):
-                    known[expr[0]] = None
+                    known[expr[0]] = value
                 else:
-                    stdin = None
+                    stdin = line = None
             elif t in {"print", "printf"}:
                 expr = expression(i + 1, {";", "}"})
                 depth = 0
@@ -4295,7 +4385,7 @@ class _Shell:
             elif re.fullmatch(r"[A-Za-z_]\w*", t) and tokens[i + 1:i + 2] == ["("] and t not in builtins | {"if", "while", "for", "print", "printf"}:
                 self.notes.append("awk calls a function whose filename effects the audit cannot resolve")
                 known = {name: None for name in known}
-                stdin = None
+                stdin = line = None
 
     def code_args(self, verb: str, syntax: dict, args: list[str], code: list[str], scripts: list[str]) -> tuple[set[int], bool, dict[str, str]]:
         """Read an interpreter's arguments: append its code to `code` and the files it runs as code (a

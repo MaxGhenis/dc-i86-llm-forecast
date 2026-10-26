@@ -19,9 +19,9 @@ After collection, `dispatch` refuses new runs unless they are marked `--late`, a
 late runs, which could have found the others' answers. Dispatch, abandon and collect hold a lock
 file beside the staging directory while they check and change runs, so no run can start between
 collect's check and its copy. The lock is reentrant within one thread; other threads and other
-processes wait for it, and so does a process forked while it is held: the child lets go of the lock
-file it inherits, so it waits for the lock like any other process and cannot keep it held after its
-parent exits. Every change to a run's
+processes wait for it, and so does a process forked while it is held or while a thread waits for
+it: the child lets go of the lock file descriptors it inherits, so it waits for the lock like any other
+process and cannot keep it held after its parent exits. Every change to a run's
 metadata reads it afresh under the lock. Whatever a run's backend reports after it is abandoned (a
 Claude process that returns, a subfleet job that finishes, a manual answer saved late) is recorded as
 `backend_state`, never as its state.
@@ -61,23 +61,35 @@ FINISHED = {"succeeded", "failed", "cancelled", "canceled", "lost", "killed", "e
 # the lock reentrant for the thread that holds it.
 _mutex = threading.RLock()
 _held = threading.local()
-_lock_fds: set[int] = set()  # descriptors through which this process holds the lock file
+_lock_fds: set[int] = set()  # this process's descriptors on the lock file, held or waited on
+_fd_guard = threading.Lock()  # held from opening a descriptor until it is in _lock_fds, and by fork
+
+
+def _before_fork() -> None:
+    _fd_guard.acquire()
+
+
+def _after_fork_in_parent() -> None:
+    _fd_guard.release()
 
 
 def _forget_lock_after_fork() -> None:
     # A forked child holds none of its parent's lock: it starts afresh and waits for the file lock
-    # like any other process. Its copies of the parent's lock descriptors share the parent's lock, so
-    # they are pointed at /dev/null; otherwise the lock would outlive a parent that exits while the
-    # child still runs, and the child, waiting for it through a new descriptor, would wait forever.
-    global _mutex, _held, _lock_fds
+    # like any other process. Its copies of the parent's lock descriptors share the parent's lock, or
+    # the lock a parent thread is still waiting for, so they are pointed at /dev/null; otherwise the
+    # lock would outlive a parent that exits while the child still runs, and the child, waiting for it
+    # through a new descriptor, would wait forever. Fork waits for _fd_guard, so no descriptor can be
+    # open but not yet in _lock_fds.
+    global _mutex, _held, _lock_fds, _fd_guard
     for fd in _lock_fds:
         null = os.open(os.devnull, os.O_RDONLY)
         os.dup2(null, fd)
         os.close(null)
-    _mutex, _held, _lock_fds = threading.RLock(), threading.local(), set()
+    _mutex, _held, _lock_fds, _fd_guard = threading.RLock(), threading.local(), set(), threading.Lock()
 
 
-os.register_at_fork(after_in_child=_forget_lock_after_fork)
+os.register_at_fork(before=_before_fork, after_in_parent=_after_fork_in_parent,
+                    after_in_child=_forget_lock_after_fork)
 
 
 @contextmanager
@@ -94,19 +106,26 @@ def bookkeeping_lock():
             return
         path = STAGE.with_name(STAGE.name + ".lock")
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            owner = os.getpid()
+        # The descriptor is registered before this thread waits on it: a process forked while it
+        # waits lets go of it too, so the lock this thread then takes cannot live on in the child.
+        with _fd_guard:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
             fds = _lock_fds
-            fds.add(f.fileno())
+            fds.add(fd)
+        owner = os.getpid()
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
             held.depth = 1
             try:
                 yield
             finally:
                 held.depth = 0
                 if os.getpid() == owner:  # a forked child must not release its parent's lock
-                    fds.discard(f.fileno())
-                    fcntl.flock(f, fcntl.LOCK_UN)
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            if os.getpid() == owner:
+                fds.discard(fd)
+            os.close(fd)
 
 
 def run_dirs() -> list[Path]:

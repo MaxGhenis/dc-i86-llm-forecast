@@ -48,7 +48,7 @@ def test_exported_bash_shellopts_tracks_live_option_state(review_area, setup):
     proc = real("/bin/bash", program, review_area)
     result = model(program, review_area, "posix")
     assert proc.returncode == 0, proc.stderr
-    assert result.output == proc.stdout.removesuffix("\n"), (program, result.output, proc)
+    assert result.output == proc.stdout, (program, result.output, proc)
 
 
 @pytest.mark.parametrize("setup", ["set -f", "set -o noglob"])

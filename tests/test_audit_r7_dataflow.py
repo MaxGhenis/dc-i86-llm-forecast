@@ -54,7 +54,7 @@ from i86 import audit
     ("awk -vp=../opus-2/draft.json 'BEGIN {p=\"MOCK.txt\"; getline line < p; print line}'", "local", False),
     ("awk -vp=../opus-2/draft.json 'BEGIN {sub(/.*/, \"MOCK.txt\", p); getline line < p; print line}'", "suspect", False),
     ("awk -vp=../opus-2/draft.json 'BEGIN {p++; print \"MOCK\" > p}'", "suspect", False),
-    ("awk -vp=../opus-2/draft.json 'BEGIN {getline p; getline line < p; print line}' <<< MOCK.txt", "suspect", False),
+    ("awk -vp=../opus-2/draft.json 'BEGIN {getline p; getline line < p; print line}' <<< MOCK.txt", "local", False),
     ("awk -vp=../opus-2/draft.json 'BEGIN {q=p; getline line < q; print line}'", "violation", True),
     ("awk -vp=../opus-2/draft.json 'BEGIN {q=\"cat \" p; system(q)}'", "violation", True),
     ("awk -vp=../opus-2/draft.json 'BEGIN {q=\"cat \" p; q | getline line; print line}'", "violation", True),

@@ -33,6 +33,8 @@ multiplies into `_weight`.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from . import dists
@@ -151,10 +153,55 @@ def _allowed_mass(node: Node, params: np.ndarray, exists: np.ndarray, allowed) -
     return np.where(exists, (params * keep[None, :]).sum(axis=1), 1.0 if None in allowed else 0.0)
 
 
+class _Tilt:
+    """The chance that a node takes an allowed value, as a function of the share, times 2^scale.
+
+    The node's answers are cut to the allowed values (a binary node's to p, or 1 - p, or 1) and
+    multiplied by 2^scale before they are interpolated, with `scale` >= 0 chosen so the largest is at
+    least 1/2. Multiplying by a power of two is exact, so for ordinary probabilities this only rescales
+    the tilt. It matters below about 2.2e-308, where floats lose precision: interpolated there, a
+    chance rising from 0 to 5e-324 between two cells would round to 0 over half the segment, where the
+    sampler, taking the tilt as linear, still draws. Scaled first, the tilt is positive wherever its
+    exact value is at least 2^-1022, against a largest value of at least 1/2.
+    """
+
+    def __init__(self, graph: Graph, node: Node, fc: Forecasts, allowed):
+        self.graph, self.node = graph, node
+        answers = fc.values[node.id]
+        if node.kind == "binary":
+            rows = {key: (p if True in allowed else 0.0) + ((1 - p) if False in allowed else 0.0)
+                    for key, p in ((key, float(p)) for key, p in answers.items())}
+            # A binary node that does not exist counts as False (see _allowed_mass).
+            self.absent = 1.0 if False in allowed else 0.0
+        else:
+            keep = np.array([o in allowed for o in node.options])
+            rows = {key: np.where(keep, np.asarray(p, dtype=float), 0.0) for key, p in answers.items()}
+            self.absent = 1.0 if None in allowed else 0.0
+        if node.exists_if is None:
+            self.absent = 0.0  # never used: the node always exists
+        top = max(float(np.sum(r)) for r in [*rows.values(), self.absent])
+        self.scale = max(0, -math.frexp(top)[1]) if top > 0 else 0
+        scaled = {key: np.ldexp(r, self.scale).tolist() for key, r in rows.items()}
+        self.fc = Forecasts(values={**fc.values, node.id: scaled})
+
+    def exists(self, v: np.ndarray) -> np.ndarray:
+        draws = {"yes_share": v, "passes": v > 0.5}
+        return self.node.exists_if.evaluate_vec(draws) if self.node.exists_if is not None else np.ones(len(v), bool)
+
+    def params(self, v) -> np.ndarray:
+        """Per draw, the allowed values' scaled chances (shape (n, 1) for a binary node)."""
+        return node_params(self.graph, self.node, self.fc, np.asarray(v, dtype=float), None)
+
+    def __call__(self, v) -> np.ndarray:
+        v = np.asarray(v, dtype=float)
+        return np.where(self.exists(v), self.params(v).sum(axis=1), math.ldexp(self.absent, self.scale))
+
+
 def exact_tilt(graph: Graph, fc: Forecasts, restrict: dict | None):
     """(node id, tilt, breaks) when a restriction can be met by drawing the share exactly: one
     binary or categorical node with no states whose `exists_if`, if any, mentions only `passes`.
-    `tilt(v)` is the chance the node takes an allowed value at share v, linear between `breaks`."""
+    `tilt(v)` (a _Tilt) is the chance the node takes an allowed value at share v, times
+    2^tilt.scale, linear between `breaks`."""
     if not restrict or len(restrict) != 1:
         return None
     (nid, allowed), = restrict.items()
@@ -163,15 +210,8 @@ def exact_tilt(graph: Graph, fc: Forecasts, restrict: dict | None):
         return None
     if node.exists_if is not None and set(node.exists_if.names) - {"passes"}:
         return None
-
-    def tilt(v):
-        v = np.asarray(v, dtype=float)
-        draws = {"yes_share": v, "passes": v > 0.5}
-        exists = node.exists_if.evaluate_vec(draws) if node.exists_if is not None else np.ones(len(v), bool)
-        return _allowed_mass(node, node_params(graph, node, fc, v, None), exists, allowed)
-
     breaks = sorted({0.5, *graph.cells, *graph.near_cells})
-    return nid, tilt, breaks
+    return nid, _Tilt(graph, node, fc, allowed), breaks
 
 
 def band_mass(graph: Graph, fc: Forecasts, band: tuple[float, float]) -> float:
@@ -212,7 +252,7 @@ def simulate(graph: Graph, fc: Forecasts, n: int, seed, fixed_share: float | Non
         lo, hi = share_band
         try:
             v, z = dists.sample_share_tilted(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling,
-                                             lo, hi, u_share, tilt[1], tilt[2])
+                                             lo, hi, u_share, tilt[1], tilt[2], log2_scale=tilt[1].scale)
             feasible = True
         except ValueError:
             # The restriction cannot hold in the band: every draw gets weight 0.
@@ -247,11 +287,16 @@ def simulate(graph: Graph, fc: Forecasts, n: int, seed, fixed_share: float | Non
             state_idx = np.argmax(conds, axis=1)
         params = node_params(graph, node, fc, v, state_idx, v_cont)
         allowed = restrict.get(nid)
-        if allowed is not None and node.kind in {"binary", "categorical"}:
-            mass = _allowed_mass(node, params, exists, allowed)
-            # Under an exact tilt the share already carries this probability; a draw where it is 0
-            # (only possible at a segment's end) cannot meet the restriction.
-            weight = np.where(mass > 0, weight, 0.0) if tilt is not None and tilt[0] == nid else weight * mass
+        if tilt is not None and tilt[0] == nid:
+            # Under an exact tilt the share already carries this probability. The draw uses the
+            # tilt's own scaled answers, so the allowed values keep their proportions however small;
+            # a draw where the tilt is 0 (at a segment's end, or where its scaled value is below
+            # 2^-1022) cannot meet the restriction.
+            weight = np.where(tilt[1](v) > 0, weight, 0.0)
+            if node.kind == "categorical":
+                params = tilt[1].params(v)
+        elif allowed is not None and node.kind in {"binary", "categorical"}:
+            weight = weight * _allowed_mass(node, params, exists, allowed)
         if allowed is not None and node.kind == "binary":
             if allowed == {True}:
                 draws[nid] = exists.copy()

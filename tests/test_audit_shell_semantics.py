@@ -410,7 +410,7 @@ def test_child_shell_startup_resets_ifs_and_filters_environment(review_area, chi
         real = sh(shell, program, cwd=review_area)
         # zsh has no export -n; its failed command does not clear the export flag.
         model = _model(program, review_area, dialect)
-        assert model.output == real.stdout.removesuffix("\n"), (shell, program, model.output, real)
+        assert model.output == real.stdout, (shell, program, model.output, real)
 
 
 @settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=FIXTURE_OK)
@@ -422,7 +422,7 @@ def test_child_shell_initializes_directory_variables_and_stack(review_area, chil
     for shell, dialect in ((BASH, "posix"), (ZSH, "zsh")):
         real = sh(shell, program, cwd=review_area)
         model = _model(program, review_area, dialect)
-        assert model.output == real.stdout.removesuffix("\n"), (shell, program, model.output, real)
+        assert model.output == real.stdout, (shell, program, model.output, real)
     # Native shells start with one stack entry, so ~1 is unresolved after child startup.
     proc = sh(BASH, setup + f"{child} -c 'echo ~1'", cwd=review_area)
     assert proc.stdout.strip() == "~1" or child == "zsh" and not proc.stdout, proc
@@ -439,7 +439,7 @@ def test_bash_and_sh_import_exported_shellopts(review_area, child, options):
     for shell, dialect in ((BASH, "posix"), (ZSH, "zsh")):
         real = sh(shell, program, cwd=review_area)
         model = _model(program, review_area, dialect)
-        assert model.output == real.stdout.removesuffix("\n"), (shell, program, model.output, real)
+        assert model.output == real.stdout, (shell, program, model.output, real)
 
 
 @settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=FIXTURE_OK)
