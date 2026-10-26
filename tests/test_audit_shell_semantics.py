@@ -283,6 +283,172 @@ def test_child_shells_see_exported_variables_only(review_area, program, moves):
     assert (verdict == "violation") == moves, (program, verdict)
 
 
+# Generated expansion inputs in the MOCK work area. Compare the actual argument vector rather
+# than only a final directory: an extra/missing word can change every later loop iteration.
+
+def _assert_expanded_parameters(review_area, program, shell, dialect):
+    real = sh(shell, program + "; printf '%s\\0' \"$#\" \"$@\"", cwd=review_area)
+    assert real.returncode == 0, (shell, program, real.stderr)
+    model = _model(program, review_area, dialect)
+    n = model.vars.get("#")
+    params = model.vars.get("@", "").split(audit.SPLIT) if n != "0" else []
+    assert [n, *params] == real.stdout.split("\0")[:-1], (shell, program, [n, *params], real.stdout)
+
+
+@settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=FIXTURE_OK)
+@given(st.sampled_from(["~+", "~-", "~0", "~1", "~2", "~+0", "~+1", "~+2", "~-0", "~-1", "~-2"]),
+       st.sampled_from(["", "/MOCK", "/..", "/../MOCK"]), st.booleans())
+def test_directory_tilde_arguments_match_real_shells(review_area, tilde, suffix, in_function):
+    setup = "pushd scratch >/dev/null; pushd deep >/dev/null; "
+    expansion = f"set -- {tilde}{suffix}"
+    # A function gives its positional parameters back, so carry the expanded result in a variable.
+    if in_function:
+        program = setup + f'f(){{ x={tilde}{suffix}; }}; f; set -- "$x"'
+    else:
+        program = setup + expansion
+    for shell, dialect in ((BASH, "posix"), (ZSH, "zsh")):
+        _assert_expanded_parameters(review_area, program, shell, dialect)
+
+
+@settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=FIXTURE_OK)
+@given(st.integers(-3, 3), st.integers(-3, 3), st.sampled_from(["", "MOCK", "scratch/"]),
+       st.sampled_from(["", ".txt", "/MOCK"]), st.booleans(), st.booleans())
+def test_brace_words_and_loop_lists_match_real_shells(review_area, start, end, prefix, suffix, listing, loop):
+    expression = f"{prefix}{{{start},{end}}}{suffix}" if listing else f"{prefix}{{{start}..{end}}}{suffix}"
+    program = (f'x=; for d in {expression}; do x="$x|$d"; done; set -- "$x"'
+               if loop else f"set -- {expression}")
+    for shell, dialect in ((BASH, "posix"), (ZSH, "zsh")):
+        _assert_expanded_parameters(review_area, program, shell, dialect)
+
+
+@settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=FIXTURE_OK)
+@given(st.lists(st.sampled_from(["MOCK", "scratch", "a b", "a:b", ""]), max_size=4),
+       st.sampled_from(["$a", '"${a[@]}"', "${a[*]}", '"${a[*]}"', "${#a[@]}"]),
+       st.sampled_from([None, ":", "", " "]))
+def test_array_expansions_match_real_shells(review_area, values, expression, ifs):
+    setup = "" if ifs is None else f"IFS={shlex.quote(ifs)}; "
+    program = setup + "a=(" + " ".join(map(shlex.quote, values)) + f"); set -- {expression}"
+    for shell, dialect in ((BASH, "posix"), (ZSH, "zsh")):
+        _assert_expanded_parameters(review_area, program, shell, dialect)
+
+
+@settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=FIXTURE_OK)
+@given(st.sampled_from([None, "", "MOCK", "scratch"]), st.sampled_from(["=", ":="]),
+       st.sampled_from(["MOCK", "scratch", "a b", ""]), st.booleans())
+def test_assigning_expansions_preserve_assigned_values(review_area, initial, operator, default, subshell):
+    setup = "unset x; " if initial is None else f"x={shlex.quote(initial)}; "
+    expansion = ': "${x' + operator + default + '}"'
+    body = f"( {expansion} )" if subshell else expansion
+    program = setup + body + '; set -- "${x+SET}" "${x-UNSET}"'
+    for shell, dialect in ((BASH, "posix"), (ZSH, "zsh")):
+        _assert_expanded_parameters(review_area, program, shell, dialect)
+
+
+@settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=FIXTURE_OK)
+@given(st.sampled_from([None, "", "MOCK"]), st.sampled_from(["?", ":?"]), st.booleans())
+def test_failing_parameter_checks_exit_before_later_commands(review_area, initial, operator, subshell):
+    setup = "unset x; " if initial is None else f"x={shlex.quote(initial)}; "
+    check = ': "${x' + operator + 'MOCK required}"'
+    program = setup + (f"( {check} )" if subshell else check) + "; echo MOCK reached"
+    for shell, dialect in ((BASH, "posix"), (ZSH, "zsh")):
+        real = sh(shell, program, cwd=review_area)
+        model = _model(program, review_area, dialect)
+        assert bool(model.worlds) == ("MOCK reached" in real.stdout), (shell, program, model.worlds, real)
+
+
+@settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=FIXTURE_OK)
+@given(st.sampled_from(["local", "typeset", "declare"]), st.sampled_from(["x", "IFS"]),
+       st.sampled_from([None, "", ":", "MOCK"]), st.booleans())
+def test_unassigned_local_values_match_real_shells(review_area, declaration, name, outer, twice):
+    setup = f"unset {name}; " if outer is None else f"{name}={shlex.quote(outer)}; "
+    declarations = f"{declaration} {name}; " * (2 if twice else 1)
+    program = (setup + f'f(){{ {declarations} result="${{{name}+SET}}|${{{name}-UNSET}}"; }}; f; '
+               f'set -- "$result" "${{{name}+SET}}" "${{{name}-UNSET}}"')
+    for shell, dialect in ((BASH, "posix"), (ZSH, "zsh")):
+        # zsh typeset/local prints a repeated existing declaration; suppress declaration output.
+        _assert_expanded_parameters(review_area, program.replace(f"{declaration} {name};", f"{declaration} {name} >/dev/null;"),
+                                    shell, dialect)
+
+
+@settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=FIXTURE_OK)
+@given(st.sampled_from(["local", "typeset", "declare"]), st.sampled_from([None, "", "MOCK"]), st.booleans())
+def test_unassigned_top_level_declarations_match_real_shells(review_area, declaration, outer, negate):
+    setup = "unset x; " if outer is None else f"x={shlex.quote(outer)}; "
+    command = ("! " if negate else "") + f"{declaration} x >/dev/null"
+    program = (setup + 'marker=failed; if ' + command + '; then marker=ok; fi; '
+               'set -- "$marker" "${x+SET}" "${x-UNSET}"')
+    for shell, dialect in ((BASH, "posix"), (ZSH, "zsh")):
+        _assert_expanded_parameters(review_area, program, shell, dialect)
+
+
+@settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=FIXTURE_OK)
+@given(st.sampled_from(["bash", "sh", "zsh"]), st.sampled_from([None, "", ":", " /"]),
+       st.sampled_from(["x=MOCK", "export x=MOCK", "x=MOCK; export -n x", "export x=MOCK; unset x",
+                        "a=(MOCK scratch); export a"]), st.booleans())
+def test_child_shell_startup_resets_ifs_and_filters_environment(review_area, child, ifs, setup, clear):
+    parent = "unset IFS; " if ifs is None else f"export IFS={shlex.quote(ifs)}; "
+    # A known output from each child can be compared without observing its private variables.
+    code = 'echo "${x+SET}|${x-UNSET}|${a+SET}|${a-UNSET}|$IFS"'
+    command = f"{'env -i ' if clear else ''}{child} -c {shlex.quote(code)}"
+    program = parent + setup + "; " + command
+    for shell, dialect in ((BASH, "posix"), (ZSH, "zsh")):
+        real = sh(shell, program, cwd=review_area)
+        # zsh has no export -n; its failed command does not clear the export flag.
+        model = _model(program, review_area, dialect)
+        assert model.output == real.stdout.removesuffix("\n"), (shell, program, model.output, real)
+
+
+@settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=FIXTURE_OK)
+@given(st.sampled_from(["bash", "sh", "zsh"]), st.booleans(), st.booleans())
+def test_child_shell_initializes_directory_variables_and_stack(review_area, child, clear, changed):
+    setup = "pushd scratch >/dev/null; pushd deep >/dev/null; " if changed else ""
+    code = 'echo "${OLDPWD+SET}|${OLDPWD-UNSET}|$PWD"'
+    program = setup + f"{'env -i ' if clear else ''}{child} -c {shlex.quote(code)}"
+    for shell, dialect in ((BASH, "posix"), (ZSH, "zsh")):
+        real = sh(shell, program, cwd=review_area)
+        model = _model(program, review_area, dialect)
+        assert model.output == real.stdout.removesuffix("\n"), (shell, program, model.output, real)
+    # Native shells start with one stack entry, so ~1 is unresolved after child startup.
+    proc = sh(BASH, setup + f"{child} -c 'echo ~1'", cwd=review_area)
+    assert proc.stdout.strip() == "~1" or child == "zsh" and not proc.stdout, proc
+    model = _model(setup + f"{child} -c 'echo ~1'", review_area, "posix")
+    assert model.notes, (child, model.output)
+
+
+@pytest.mark.parametrize("child", ["bash", "sh", "zsh"])
+@pytest.mark.parametrize("options", ["noglob", "braceexpand:noglob", "hashall:noglob"])
+def test_bash_and_sh_import_exported_shellopts(review_area, child, options):
+    # env supplies SHELLOPTS because bash's variable is readonly in the parent shell.
+    code = "set -- scratch/*; echo \"$#|$*\""
+    program = f"env SHELLOPTS={shlex.quote(options)} {child} -c {shlex.quote(code)}"
+    for shell, dialect in ((BASH, "posix"), (ZSH, "zsh")):
+        real = sh(shell, program, cwd=review_area)
+        model = _model(program, review_area, dialect)
+        assert model.output == real.stdout.removesuffix("\n"), (shell, program, model.output, real)
+
+
+@settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=FIXTURE_OK)
+@given(st.sampled_from(["set -o noglob", "set -f", "setopt noglob", "setopt NO_GLOB", "set -o no_glob"]),
+       st.sampled_from(["", "set +o noglob; ", "unsetopt noglob; "]),
+       st.sampled_from(["", "( {option}; ); ", "f(){{ {option}; }}; f; "]))
+def test_globbing_option_state_matches_real_shells(review_area, option, reset, scope):
+    # Only zsh accepts all setopt spellings; bash's portable controls have their own generated case.
+    program = (scope.format(option=option) if scope else option + "; ") + reset + "set -- scratch/*"
+    _assert_expanded_parameters(review_area, program, ZSH, "zsh")
+    if option in {"set -o noglob", "set -f"} and "unsetopt" not in reset:
+        _assert_expanded_parameters(review_area, program, BASH, "posix")
+
+
+@settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=FIXTURE_OK)
+@given(st.sampled_from(["setopt shwordsplit", "setopt sh_word_split", "setopt SH_WORD_SPLIT",
+                        "set -o shwordsplit", "set -o SH_WORD_SPLIT", "emulate sh"]),
+       st.sampled_from(["", "unsetopt SH_WORD_SPLIT; "]),
+       st.sampled_from(["", "( {option}; ); ", "f(){{ {option}; }}; f; "]))
+def test_zsh_field_splitting_option_state_matches_real_shell(review_area, option, reset, scope):
+    program = (scope.format(option=option) if scope else option + "; ") + reset + "x='MOCK scratch'; set -- $x"
+    _assert_expanded_parameters(review_area, program, ZSH, "zsh")
+
+
 # Attached option values and interpreter data
 
 @pytest.mark.parametrize("command,verdict", [

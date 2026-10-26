@@ -31,7 +31,7 @@ from i86 import audit, runners
 ANSWER = "MOCK OTHER ANSWER"
 SHELLS = [["/bin/bash", "--norc", "--noprofile", "-c"], ["/bin/zsh", "-f", "-c"]]
 DIRS = ["scratch", "scratch/deep", "..", "../..", "gone", "scratch/gone", "-", "newd", '"$x"', '"$1"',
-        '"$PWD/.."', "report.txt"]
+        '"$PWD/.."', "report.txt", "~+", "~-", "~0", "~1", "~+1", "~-0", "~-1"]
 TARGETS = [
     "../opus-2/draft.json", "opus-2/draft.json", "../../opus-2/draft.json", "../../../opus-2/draft.json",
     "repository/draft.json", "../repository/draft.json", "../../repository/draft.json",
@@ -54,6 +54,13 @@ atoms = st.one_of(
                      # what functions, variables and child shells see
                      "unset -f g", "unset x", "export x", "export -n x 2>/dev/null", "set -- .. scratch",
                      "shift", 'IFS=: read y x <<< "scratch:.."', "x=$PWD",
+                     # Expansion state, arrays, assigning parameters and shell startup (MOCK values).
+                     "set -f", "set +f", "set -o noglob", "set +o noglob",
+                     "setopt sh_word_split 2>/dev/null", "unsetopt SH_WORD_SPLIT 2>/dev/null",
+                     "setopt noglob 2>/dev/null", "unsetopt noglob 2>/dev/null", "emulate sh 2>/dev/null",
+                     "a=(scratch ..)", "a=(1 2)", 'set -- "${a[@]}"', "set -- ${a[*]}",
+                     ": ${x:=..}", ": ${x=scratch}", ": ${x:?MOCK}", ": ${x?MOCK}",
+                     "export IFS=:; export x=scratch:..; bash -c 'cd $x'",
                      # scripts written, then sourced or run
                      "echo 'cd ..' > s.sh", "echo 'cd scratch' > s.sh", ". ./s.sh 2>/dev/null", "sh s.sh"]),
     st.sampled_from(DIRS).map(lambda d: f"pushd {d} >/dev/null 2>&1"),
@@ -90,6 +97,11 @@ def compound(inner):
         st.tuples(name, inner).map(lambda t: f"{t[0]}=0; until [ $(({t[0]}+=1)) -gt 2 ]; do {t[1]}; done"),
         st.tuples(name, inner).map(lambda t: f"for (({t[0]}=0; {t[0]}<2; {t[0]}++)); do {t[1]}; done"),
         inner.map(lambda a: f"for d in 1 2; do {a}; done"),
+        st.tuples(st.sampled_from(["{1..2}", "{2..1}", "pre{a,b}post", "{x,y}{1,2}",
+                                  "$a", '"${a[@]}"', "${a[*]}"]), inner)
+        .map(lambda t: f"for d in {t[0]}; do {t[1]}; done"),
+        st.tuples(name, st.sampled_from(["local", "typeset", "declare"]), inner)
+        .map(lambda t: f"{t[0]}(){{ {t[1]} IFS x; {t[2]}; }}; {t[0]}"),
         st.tuples(inner, inner).map(lambda t: f"for d in 1 2; do for e in 1 2; do {t[0]}; done; {t[1]}; done"),
         st.tuples(name, inner, inner).map(lambda t: f"{t[0]}(){{ {t[1]}; return 1; {t[2]}; }}; {t[0]}"),
         st.tuples(name, inner).map(lambda t: f"{t[0]}(){{ local x=scratch; {t[1]}; }}; {t[0]}"),
@@ -111,6 +123,9 @@ READS = [
     # a script written, then run or sourced
     "echo 'cat {t}' > r.sh; sh r.sh", "printf 'cat %s\\n' {t} > r.sh; . ./r.sh",
     "cat > r.sh <<'EOF'\ncat {t}\nEOF\nbash r.sh",
+    "cat ~+/{t}", "cd scratch; cat ~-/{t}", "pushd scratch >/dev/null; cat ~1/{t}",
+    "export IFS=:; export x=scratch:..; bash -c 'cd $x 2>/dev/null; cat {t}'",
+    "cat {t}{{,}}",  # duplicate MOCK operands from brace expansion
 ]
 
 
@@ -150,7 +165,7 @@ def run(shell: list[str], program: str, work: Path, top: Path) -> tuple[Path | N
             if attempt == 2:
                 raise
     lines = proc.stdout.splitlines()
-    read = bool(lines) and lines[-1] == ANSWER
+    read = ANSWER in lines
     marker = [line for line in lines if line.startswith("PWD=")]
     # No marker: the shell rejected the program (zsh does not parse `x=1 &`) or exited before the
     # end, so it never reached the read either.
@@ -166,7 +181,8 @@ def test_audit_agrees_with_bash_and_zsh(case):
         with tempfile.TemporaryDirectory() as tmp:
             top = Path(tmp).resolve()
             work = layout(top)
-            program = f'{prefix}echo "PWD=$(pwd -P)"; {read_with.format(t=target)} 2>/dev/null'
+            program = (f'{prefix}echo "PWD=$(pwd -P)"; {read_with.format(t=target)} 2>/dev/null; '
+                       'echo "PWD=$(pwd -P)"')
             cwd, read = run(shell, program, work, top)
             roots = [top / "repository", top / "staging"]
             with mock.patch.object(runners, "WORK", top / "work"), \

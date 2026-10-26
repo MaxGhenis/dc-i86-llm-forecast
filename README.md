@@ -149,19 +149,39 @@ exception twice over: it runs a pipeline's last stage in the current shell (`x |
 loop at the end of a pipeline), and of `cd a && make &` it runs only `make` in the background. The
 audit follows the shell a command names (`zsh -c`, `bash -c`) and otherwise keeps both outcomes. Scratch
 directories are often gone by the time the audit runs, so a `cd` to a missing directory (or one the
-command makes only later) leaves the shell either there or where it was, and the second place is an
-alternative. Loops are followed pass by pass, through `break`, `continue` and `return`, until they
+command makes only later) leaves the shell either there or where it was. The second place is an
+alternative for a literal scratch directory; an expansion-generated target keeps both as main
+places, since expansion can produce a filename rather than the intended directory.
+Loops are followed pass by pass, through `break`, `continue` and `return`, until they
 end or repeat a state (after 12 passes changing variables become unknown, and after 24 the audit
 stops following the directory), and arithmetic is evaluated where bash and zsh agree on it. Words
-split into fields as each shell splits them (bash splits unquoted variables at `IFS`, zsh does not;
-both split command substitutions and drop empty unquoted expansions), and so do `read` and bash
-3.2's here-strings. A new shell (`sh -c`, a script) sees only exported variables. A script written by
+expand brace lists and ranges, directory tildes (`~+`, `~-`, `~N`, `~+N`, `~-N`) and arrays with each
+shell's semantics: unquoted `$a` takes bash's first element and zsh's whole array, while quoted
+`"${a[@]}"` keeps separate elements. Words split into fields as each shell splits them (bash splits
+unquoted variables at `IFS`; zsh does so with `SH_WORD_SPLIT`), and so do `read` and bash 3.2's
+here-strings. `noglob`, `set -f`, zsh's option spellings and `emulate sh` change expansion in the
+shell state where they run, including functions, branches and subshells. Parameter defaults with
+`=` or `:=` assign their variable; failed `?` and `:?` expansions exit the shell. Unassigned locals
+follow each shell's rules, including bash's unset local `IFS` and zsh's empty local `IFS`. A new shell
+(`sh -c`, a script) sees only exported variables, resets `IFS`, and starts a fresh directory stack.
+Bash and sh import supported expansion options from exported `SHELLOPTS`; zsh starts with its own
+options. A script written by
 an earlier tool call, or present in the work directory, is read when it is run. Variables, `read`
 from a known input, and variables, functions and aliases that branches may each have set
-differently (or not at all) are followed in each version. The audit resolves every local path from every place, expands globs, takes a command's own
-directory option (`git -C`, `tar -C`) as a further base, and reads each search tool's and
+differently (or not at all) are followed in each version. The audit resolves every local path from
+every place, expands globs, takes a command's own directory option (`git -C`, `tar -C`) as a further
+base, and reads each search tool's and
 interpreter's options as that tool does, so it mistakes neither a search pattern nor a `python -c`
 or awk program for a path, while still scanning that code for paths and for a literal `os.chdir`.
+An interpreter's standard input is code only when it takes its program there. With `-c`, `-e`, a
+script file, a jq filter, a sed script or an awk program, input is data. Path-shaped input counts as
+a read when the program demonstrably opens it, is suspect when it may supply filenames, and stays
+local for programs that only print or transform it. Awk `-v` values follow their uses in file
+operations, command execution and `ARGV`; a literal `system()` command is audited as shell code
+without turning unrelated values into reads.
+Known input also reaches a child shell's `while read` loop, a shell script or an awk shell command;
+when several commands share input and its consumption is unresolved, possible filename uses are
+suspect. Protected glob patterns remain checked when their matches are absent at audit time.
 Running a file by path counts as reading it, and so does a `file://` URL. These exclude the run:
 - a path resolved from a main place in, or text naming, the repository, the staging area, another
   run's work directory, an agent's home or job store, or the author's notes;
@@ -183,7 +203,12 @@ same command makes or removes. A generated-program test (`tests/test_audit_shell
 runs each program under bash and zsh and checks that every program that reads a MOCK answer is
 reported, that the audit's possible places include where the shell ended, and that where the audit
 has one place it is that one. `tests/test_audit_shell_semantics.py` checks the arithmetic, `read`,
-field splitting and here-strings against both shells on generated inputs. The audit catches
+field splitting, here-strings, directory tildes, brace lists and ranges, arrays, assigning and error
+parameters, shell options, locals and exported child environments against both shells on generated
+inputs. Boundary tests also check failed parameter diagnostics, unset arrays, live exported shell
+options and options on script files. Bash's directory tildes follow assigned `PWD` and `OLDPWD`;
+zsh uses its internal directory state. When brace duplication or interpreter data flow exceeds the
+model, the call is suspect with a reason. The audit catches
 accidental and casual reads, not a forecaster set on hiding them.
 
 ## Files
