@@ -1,0 +1,32 @@
+{
+  "backend": "subfleet",
+  "command": [
+    "subfleet",
+    "run",
+    "--task",
+    "research",
+    "--tier",
+    "standard",
+    "-m",
+    "opus",
+    "-s",
+    "read-only",
+    "-C",
+    "/Users/maxghenis/.cache/dc-i86-llm-forecast/opus-2",
+    "-p",
+    "/Users/maxghenis/dc-i86-llm-forecast/runs/opus-2/prompt.md",
+    "-n",
+    "i86-opus-2",
+    "--json"
+  ],
+  "dispatch_rc": 0,
+  "dispatch_stdout": "{\"created\": true, \"detached\": true, \"job_id\": \"20261025-223152-i86-opus-2\", \"lane\": null, \"log\": \"/Users/maxghenis/.subfleet/jobs/20261025-223152-i86-opus-2/a1/lane.log\", \"model\": null, \"out\": \"/Users/maxghenis/.subfleet/jobs/20261025-223152-i86-opus-2/a1/deliverable.md\", \"outcome\": \"created\", \"reason\": \"inside a Claude session \\u2014 the job must outlive it\", \"requeried\": false, \"request_id\": \"b09d79f2-5a4d-4bc4-9d40-146aa9d171b5\", \"run_id\": \"20261025-223152-i86-opus-2\", \"sandbox\": \"read-only\", \"state\": null, \"wait_inline\": false, \"worktree\": null}\n",
+  "dispatched_at": "2026-10-26T05:31:52Z",
+  "job_id": "20261025-223152-i86-opus-2",
+  "label": "opus-2",
+  "model_pin": "opus",
+  "prepared_at": "2026-10-26T05:31:52Z",
+  "prompt_sha256": "2b6cd481ddb6eca123d5ac1f9da4afb1a47ef95fea4eb63bd03d64dbfe272799",
+  "tier": "standard",
+  "workdir": "/Users/maxghenis/.cache/dc-i86-llm-forecast/opus-2"
+}

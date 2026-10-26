@@ -1,0 +1,30 @@
+{
+  "backend": "subfleet",
+  "command": [
+    "subfleet",
+    "run",
+    "--task",
+    "research",
+    "--tier",
+    "hard",
+    "-s",
+    "read-only",
+    "-C",
+    "/Users/maxghenis/.cache/dc-i86-llm-forecast/sol-4",
+    "-p",
+    "/Users/maxghenis/dc-i86-llm-forecast/runs/sol-4/prompt.md",
+    "-n",
+    "i86-sol-4",
+    "--json"
+  ],
+  "dispatch_rc": 0,
+  "dispatch_stdout": "{\"created\": true, \"detached\": true, \"job_id\": \"20261025-223151-i86-sol-4\", \"lane\": null, \"log\": \"/Users/maxghenis/.subfleet/jobs/20261025-223151-i86-sol-4/a1/lane.log\", \"model\": null, \"out\": \"/Users/maxghenis/.subfleet/jobs/20261025-223151-i86-sol-4/a1/deliverable.md\", \"outcome\": \"created\", \"reason\": \"inside a Claude session \\u2014 the job must outlive it\", \"requeried\": false, \"request_id\": \"8bbd56ff-209e-4267-b73c-e7ea354b6730\", \"run_id\": \"20261025-223151-i86-sol-4\", \"sandbox\": \"read-only\", \"state\": null, \"wait_inline\": false, \"worktree\": null}\n",
+  "dispatched_at": "2026-10-26T05:31:51Z",
+  "job_id": "20261025-223151-i86-sol-4",
+  "label": "sol-4",
+  "model_pin": null,
+  "prepared_at": "2026-10-26T05:31:51Z",
+  "prompt_sha256": "2b6cd481ddb6eca123d5ac1f9da4afb1a47ef95fea4eb63bd03d64dbfe272799",
+  "tier": "hard",
+  "workdir": "/Users/maxghenis/.cache/dc-i86-llm-forecast/sol-4"
+}
