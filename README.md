@@ -53,7 +53,7 @@ The conditional comes from a further simulation. When the condition turns on one
 status), that node is drawn only from the values that satisfy it. The ban's status depends on nothing
 but the Yes share, so the chance that a draw meets the condition is linear in the share between the
 forecast cells, and the share is drawn exactly from the forecaster's distribution tilted by that
-chance. Every draw then counts fully and carries the same weight, the condition's probability, and a
+chance. Every draw then counts fully, with weight 1 (the condition's probability is kept apart), and a
 forecaster that gives the condition 1 in 10,000 counts as much as one that gives it 9 in 10; only one
 that gives it zero is left out, and the report says so. For a condition this cannot handle (one on a
 node that also depends on other nodes, or on more than one node; the current map has none), each draw
@@ -143,8 +143,15 @@ loop at the end of a pipeline), and of `cd a && make &` it runs only `make` in t
 audit follows the shell a command names (`zsh -c`, `bash -c`) and otherwise keeps both outcomes. Scratch
 directories are often gone by the time the audit runs, so a `cd` to a missing directory (or one the
 command makes only later) leaves the shell either there or where it was, and the second place is an
-alternative. Variables, `read` from a known input, and variables, functions and aliases that
-branches may each have set differently (or not at all) are followed in each version. The audit resolves every local path from every place, expands globs, takes a command's own
+alternative. Loops are followed pass by pass, through `break`, `continue` and `return`, until they
+end or repeat a state (after 12 passes changing variables become unknown, and after 24 the audit
+stops following the directory), and arithmetic is evaluated where bash and zsh agree on it. Words
+split into fields as each shell splits them (bash splits unquoted variables at `IFS`, zsh does not;
+both split command substitutions and drop empty unquoted expansions), and so do `read` and bash
+3.2's here-strings. A new shell (`sh -c`, a script) sees only exported variables. A script written by
+an earlier tool call, or present in the work directory, is read when it is run. Variables, `read`
+from a known input, and variables, functions and aliases that branches may each have set
+differently (or not at all) are followed in each version. The audit resolves every local path from every place, expands globs, takes a command's own
 directory option (`git -C`, `tar -C`) as a further base, and reads each search tool's and
 interpreter's options as that tool does, so it mistakes neither a search pattern nor a `python -c`
 or awk program for a path, while still scanning that code for paths and for a literal `os.chdir`.
@@ -168,7 +175,8 @@ runs, which have no transcript. Whether a directory exists is judged at audit ti
 same command makes or removes. A generated-program test (`tests/test_audit_shell_differential.py`)
 runs each program under bash and zsh and checks that every program that reads a MOCK answer is
 reported, that the audit's possible places include where the shell ended, and that where the audit
-has one place it is that one. The audit catches
+has one place it is that one. `tests/test_audit_shell_semantics.py` checks the arithmetic, `read`,
+field splitting and here-strings against both shells on generated inputs. The audit catches
 accidental and casual reads, not a forecaster set on hiding them.
 
 ## Files

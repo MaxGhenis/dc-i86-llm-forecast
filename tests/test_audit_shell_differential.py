@@ -1,11 +1,13 @@
 """The audit's shell model against the real shells, on generated MOCK programs.
 
 Each program mixes directory changes (to directories present, missing or made on the way),
-statuses, && and ||, if, case, loops, functions (with arguments), subshells, background jobs,
-pipelines (whose last stage zsh runs in the current shell), sh, bash and zsh -c (with positional
-parameters), eval, read, variables and pushd/popd, then prints its
-directory and reads a relative path, in one of several ways, that may reach another run's MOCK
-answer or a protected place. It runs under bash and zsh (no startup files) in a fresh temporary layout, and the
+statuses, && and ||, if, case, loops (while, until, for, C-style, with counters), break, continue
+and return, arithmetic, file tests, functions (with arguments and locals), subshells, background
+jobs, pipelines (whose last stage zsh runs in the current shell), sh, bash and zsh -c (with
+positional parameters), exported and unexported variables, env -i, eval, read (with IFS), set --
+and shift, unset, variables, pushd/popd/dirs with stack rotations, and scripts written and then
+sourced or run, then prints its directory and reads a relative path, in one of several ways, that
+may reach another run's MOCK answer or a protected place. It runs under bash and zsh (no startup files) in a fresh temporary layout, and the
 audit then reads it. Properties, for every program and both shells:
 
 - soundness: if the shell printed a MOCK answer, the audit reports a violation or a suspect call;
@@ -28,7 +30,8 @@ from i86 import audit, runners
 
 ANSWER = "MOCK OTHER ANSWER"
 SHELLS = [["/bin/bash", "--norc", "--noprofile", "-c"], ["/bin/zsh", "-f", "-c"]]
-DIRS = ["scratch", "scratch/deep", "..", "../..", "gone", "scratch/gone", "-", "newd", '"$x"']
+DIRS = ["scratch", "scratch/deep", "..", "../..", "gone", "scratch/gone", "-", "newd", '"$x"', '"$1"',
+        '"$PWD/.."', "report.txt"]
 TARGETS = [
     "../opus-2/draft.json", "opus-2/draft.json", "../../opus-2/draft.json", "../../../opus-2/draft.json",
     "repository/draft.json", "../repository/draft.json", "../../repository/draft.json",
@@ -40,7 +43,19 @@ atoms = st.one_of(
     st.sampled_from(["true", "false", ":", "[ a = a ]", "[ a = b ]", "[ ! a = b ]", "[ -d scratch ]",
                      "[ -d gone ]", "[ -d newd ]", '[ "$x" = .. ]', "x=..", "x=scratch", "x=gone",
                      "mkdir -p newd", "mkdir newd 2>/dev/null", "rmdir newd 2>/dev/null",
-                     "popd >/dev/null 2>&1", "shopt -s lastpipe 2>/dev/null"]),
+                     "popd >/dev/null 2>&1", "shopt -s lastpipe 2>/dev/null",
+                     # loops' and functions' exits, arithmetic and file tests
+                     "break", "continue", "break 2", "return", "return 1", "[ -d report.txt ]",
+                     "[ -f scratch ]", "[ -f report.txt ]", "[ -e newd ]", "i=0", "i=$((i+1))", "((i++))",
+                     "let i+=1", '[ "$i" -lt 2 ]', "(( i < 2 ))", ": $((i+=2))",
+                     # the directory stack
+                     "pushd +1 >/dev/null 2>&1", "pushd -0 >/dev/null 2>&1", "pushd >/dev/null 2>&1",
+                     "popd +1 >/dev/null 2>&1", "popd -0 >/dev/null 2>&1", "dirs -c",
+                     # what functions, variables and child shells see
+                     "unset -f g", "unset x", "export x", "export -n x 2>/dev/null", "set -- .. scratch",
+                     "shift", 'IFS=: read y x <<< "scratch:.."', "x=$PWD",
+                     # scripts written, then sourced or run
+                     "echo 'cd ..' > s.sh", "echo 'cd scratch' > s.sh", ". ./s.sh 2>/dev/null", "sh s.sh"]),
     st.sampled_from(DIRS).map(lambda d: f"pushd {d} >/dev/null 2>&1"),
     st.sampled_from(DIRS).map(lambda d: f"cd {d} | cat"),
     st.sampled_from(DIRS).map(lambda d: f"eval {shlex.quote('cd ' + d)}"),
@@ -70,6 +85,15 @@ def compound(inner):
         inner.map(lambda a: f"until true; do {a}; done"),
         inner.map(lambda a: f"for d in 1; do {a}; done"),
         st.tuples(st.sampled_from(["sh -c", "bash -c", "zsh -f -c"]), inner).map(lambda t: f"{t[0]} {shlex.quote(t[1])}"),
+        # Loops with counters no generated atom touches, so each ends.
+        st.tuples(name, inner).map(lambda t: f"{t[0]}=0; while [ $(({t[0]}+=1)) -le 2 ]; do {t[1]}; done"),
+        st.tuples(name, inner).map(lambda t: f"{t[0]}=0; until [ $(({t[0]}+=1)) -gt 2 ]; do {t[1]}; done"),
+        st.tuples(name, inner).map(lambda t: f"for (({t[0]}=0; {t[0]}<2; {t[0]}++)); do {t[1]}; done"),
+        inner.map(lambda a: f"for d in 1 2; do {a}; done"),
+        st.tuples(inner, inner).map(lambda t: f"for d in 1 2; do for e in 1 2; do {t[0]}; done; {t[1]}; done"),
+        st.tuples(name, inner, inner).map(lambda t: f"{t[0]}(){{ {t[1]}; return 1; {t[2]}; }}; {t[0]}"),
+        st.tuples(name, inner).map(lambda t: f"{t[0]}(){{ local x=scratch; {t[1]}; }}; {t[0]}"),
+        st.tuples(name, inner).map(lambda t: f"{t[0]}(){{ {t[1]}; }}; export -f {t[0]} 2>/dev/null; bash -c {t[0]}"),
     )
 
 
@@ -78,6 +102,15 @@ READS = [
     "cat {t}", "cat < {t}", "sh -c 'cat \"$1\"' sh {t}", "echo {t} | xargs cat", "f(){{ cat \"$1\"; }}; f {t}",
     "echo {t} | while read f; do cat \"$f\"; done", "(cd scratch && cat ../{t})", "env -C scratch cat ../{t}",
     "y={t}; cat $y", "zsh -f -c 'true | cd scratch; cat ../{t}'", "bash -c 'true | cd scratch; cat ../{t}'",
+    # child shells see exported variables only; env -i, none
+    "sh -c 'cd \"$x\" 2>/dev/null; cat {t}'", "env -i sh -c 'cd \"$x\" 2>/dev/null; cat {t}'",
+    "env -C.. cat opus-1/{t}", "env -S'cat {t}'", "cat \"$PWD/{t}\"",
+    # interpreters with attached option values and awk reading a -v path
+    "python3 -c\"print(open('{t}').read(), end='')\"", "awk -vf={t} 'BEGIN {{ while ((getline l < f) > 0) print l }}'",
+    "IFS=/ read a b <<< '{t}'; cat \"$a/$b\"",
+    # a script written, then run or sourced
+    "echo 'cat {t}' > r.sh; sh r.sh", "printf 'cat %s\\n' {t} > r.sh; . ./r.sh",
+    "cat > r.sh <<'EOF'\ncat {t}\nEOF\nbash r.sh",
 ]
 
 
@@ -97,6 +130,7 @@ def layout(top: Path) -> Path:
     """The review_area layout (see conftest.py) under top; returns this run's work directory."""
     work = top / "work" / "opus-1"
     (work / "scratch" / "deep").mkdir(parents=True)
+    (work / "report.txt").write_text("MOCK own report\n")
     for root in [top / "work" / "opus-2", top / "repository", top / "staging"]:
         root.mkdir(parents=True)
         (root / "draft.json").write_text(ANSWER + "\n")
@@ -136,7 +170,8 @@ def test_audit_agrees_with_bash_and_zsh(case):
             cwd, read = run(shell, program, work, top)
             roots = [top / "repository", top / "staging"]
             with mock.patch.object(runners, "WORK", top / "work"), \
-                    mock.patch.object(audit, "protected_roots", lambda: roots):
+                    mock.patch.object(audit, "protected_roots", lambda: roots), \
+                    mock.patch.object(audit, "HOME", top / "home"):
                 model = audit._shell(program, work)
                 verdict, why = audit.check_call("shell", {"command": program}, work, roots)
             places = {w.cwd for w in model.worlds}

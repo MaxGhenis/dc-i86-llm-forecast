@@ -14,17 +14,34 @@ audit reads those itself, and any other command it cannot fully read is suspect.
 The working directory is tracked as the set of places the shell could be, each with the last
 command's exit status (`_World`):
 
-- `cd`, `pushd` and `popd` move every place. A `cd` to a directory missing at audit time (often a
-  scratch directory since deleted), or one the same command makes only later or removed earlier,
-  may have worked or failed: the shell is then in either place, and the failed one is an
-  alternative. `CDPATH` is followed, and a `cd -` before any `cd` in the command goes where the
-  audit cannot follow.
-- `&&`, `||`, `if`, `while`, `until`, `case` and loops run their parts only where the status allows.
-  The audit knows the status of `true`, `false`, `:`, `cd`, `!`, tests of known strings and numbers
-  (`[ a = b ]`, `[[ ... ]]`, `test`), file tests of things present at audit time, literal `case`
-  values, and commands that all but always succeed (`echo`, `mkdir -p`, assignments); after anything
-  else, both ways may have run. Where the way was unknown, places reached only by the way not meant
-  (the skipped side of `x && cd ..`) are alternatives too.
+- `cd`, `pushd` and `popd` move every place, and the directory stack is kept as each shell keeps
+  it (`pushd +N` and `popd -N` rotate or drop entries, `dirs -c` clears it, zsh's `cd +N` takes an
+  entry, bash's `pushd -n` adds one without moving). A `cd` to a directory missing at audit time
+  (often a scratch directory since deleted), or one the same command makes only later or removed
+  earlier, may have worked or failed: the shell is then in either place, and the failed one is an
+  alternative. A `cd` to a file fails. `CDPATH` is followed, `cd -` and `pushd -` go to `$OLDPWD`,
+  and one before any `cd` in the command goes where the audit cannot follow.
+- `&&`, `||`, `if`, `case` and loops run their parts only where the status allows. The audit knows
+  the status of `true`, `false`, `:`, `cd`, `!`, tests of known strings and numbers (`[ a = b ]`,
+  `[[ ... ]]`, `test`), file tests of things present at audit time, arithmetic (`(( ))`, `let`),
+  literal `case` values, and commands that all but always succeed (`echo`, `mkdir -p`,
+  assignments); after anything else, both ways may have run. Where the way was unknown, places
+  reached only by the way not meant (the skipped side of `x && cd ..`) are alternatives too.
+- A `for` loop over a list runs its body once per item and one over a glob once per match at audit
+  time; `while`, `until` and C-style `for` loops run pass by pass while their condition allows.
+  `break`, `continue` and `return`, with counts, leave the loops and functions they name. Passes
+  are followed until the loop ends or repeats a state; after 12, variables still changing become
+  unknown, and after 24 the audit stops following the directory.
+- Arithmetic (`$(( ))`, `(( ))`, `let`, `declare -i`, C-style `for`) is evaluated where bash and zsh
+  agree: they bind the shifts and bitwise operators differently, read a variable operand at
+  different times (`a + (a = 2)`), and bash 3.2 also checks a skipped branch for division by zero;
+  elsewhere the value is unknown.
+- Words split into fields as each shell splits them: bash and sh split unquoted parameter and
+  arithmetic expansions and command substitutions at `IFS`, zsh only command substitutions; both
+  drop unquoted expansions that leave nothing (`cd $empty` goes home). `read` splits its line at
+  `IFS` (bash drops a trailing delimiter that zsh keeps), and bash 3.2 (macOS's /bin/bash) splits an
+  unquoted here-string too, joining the fields with spaces. Where the shell is not named and the
+  two differ, the command runs each way, or the input is unknown.
 - Subshells, command substitutions, pipeline stages, background jobs, `sh -c` and wrapped commands
   with their own directory (`env -C`, `sudo -D`) leave the places after them unchanged, with two
   exceptions in zsh: it runs a pipeline's last stage in the current shell (`x | cd d`,
@@ -32,11 +49,17 @@ command's exit status (`_World`):
   list ending in `&` it runs only the last pipeline in the background (`cd a && make &` leaves zsh
   in a). The audit follows the shell a command names (`zsh -c`, `bash -c`); where none is named,
   or it is `sh`, it keeps the places either way would leave.
-- Functions run in the calling shell with their arguments as positional parameters; aliases are
-  followed. Variables, `export`, `read` from a known input (`while read` loops line by line), and
-  positional parameters for `sh -c CODE NAME ARGS`, `sh -s ARGS` and shell code on standard input
-  are expanded. A variable that branches may each have set differently has each of their values,
-  and a function or alias they may each have defined differently, or not at all, runs as each.
+- Functions run in the calling shell with their arguments as positional parameters and their
+  `local` variables; aliases are followed. Variables, `read` from a known input (`while read` loops
+  line by line), `set --`, `shift`, `unset`, and positional parameters for `sh -c CODE NAME ARGS`,
+  `sh -s ARGS` and shell code on standard input are expanded, and `$PWD` is the directory of each
+  place. A new shell (`sh -c`, a script) starts with the exported variables only (`export`,
+  `export -n`, `set -a`, a command's own assignments, `env -i` and `env -u` all count) and bash's
+  exported functions. A variable that branches may each have set differently has each of their
+  values, and a function or alias they may each have defined differently, or not at all, runs as each.
+- A script run by path, by a shell (`bash s.sh`, `. s.sh`) or by an interpreter is read as the
+  code it holds: the text an earlier tool call wrote there (Write, Edit, a here-document, `tee`, a
+  redirection), else the file at audit time if it is in the work directory or a temporary directory.
 - Past 64 places the audit stops following the directory.
 
 Local paths are then resolved from every place:
@@ -50,7 +73,10 @@ Local paths are then resolved from every place:
   base for its relative paths;
 - interpreter code (`python -c`, `node -e`, awk and jq programs, sed scripts, code on standard input)
   is scanned for path-like strings and file URLs, never taken as a path itself, and a literal
-  directory change in it (`os.chdir('x')`) moves the base for the paths after it;
+  directory change in it (`os.chdir('x')`) moves the base for the paths after it; options are read
+  with each interpreter's own syntax (clusters such as `-uc'...'`, attached values such as
+  `perl -i.bak`), an awk `-v` value is data unless the program reads files, and jq's `--args` are
+  strings;
 - running a file by path counts as reading it, and `file://` URLs count as paths;
 - globs are expanded against the real filesystem at audit time.
 
@@ -73,8 +99,9 @@ for a path and a file operand is not taken for a pattern. Then:
   relative path after a `cd` the audit cannot follow (an unexpandable target, a `cd` at the end of a
   pipeline, more places than it tracks), a path or search from an alternative place that would reach
   a protected place, a path with an unknown part that could, a command the parser cannot fully read,
-  a web call that opens this project's own repository (public, but without answers until every run
-  has finished), and sub-agent calls whose contents the transcript does not show.
+  a web call (a search, or a Codex web_search that opens a page) that reaches this project's own
+  repository (public, but without answers until every run has finished), and sub-agent calls whose
+  contents the transcript does not show.
 - Other local calls are listed. Web calls (WebSearch, WebFetch, Codex web_search, curl and wget) are
   counted and their URLs logged.
 
@@ -231,23 +258,38 @@ DIR_BARE = {"tar", "gtar", "bsdtar"}
 # neither code nor paths; `files`: options whose last value is a file the interpreter reads;
 # `empty_value`: options that take an empty-string value (BSD `sed -i ''`). Code is scanned for
 # paths (`scan_code`), never taken as a path itself.
+# Short options cluster (`-uc`, `-ne`) and take a value attached (`-c'...'`, `-F:`, `-vx=1`), except
+# where `next_only` (node: `-pe CODE`); `attached`: options whose value can only be attached and may
+# be empty (perl `-i.bak`); `digits`: those whose attached value is digits only (perl `-l`, `-0`);
+# `anywhere`: options may follow operands (jq). With no code option,
+# the first operand of an interpreter without `first` is a script file it runs.
 _PYTHON = {"code": {"-c"}, "values": {"-m": 1, "-W": 1, "-X": 1}}
-_AWK = {"code": {"-e", "--source"}, "values": {"-F": 1, "-v": 1}, "files": {"-f": 1, "--file": 1}, "first": True}
+_AWK = {"code": {"-e", "--source"}, "values": {"-F": 1, "-v": 1, "--assign": 1, "--field-separator": 1},
+        "files": {"-f": 1, "--file": 1}, "first": True}
 CODE_SYNTAX = {
     "python": _PYTHON, "python3": _PYTHON,
     **dict.fromkeys(["node", "nodejs"], {"code": {"-e", "--eval", "-p", "--print"},
-                                         "files": {"-r": 1, "--require": 1, "--import": 1}}),
-    "perl": {"code": {"-e", "-E"}, "values": {"-I": 1, "-M": 1, "-m": 1}},
-    "ruby": {"code": {"-e"}, "values": {"-I": 1, "-r": 1}},
+                                         "files": {"-r": 1, "--require": 1, "--import": 1}, "next_only": True}),
+    "perl": {"code": {"-e", "-E"}, "values": {"-I": 1, "-M": 1, "-m": 1}, "attached": {"-i", "-x", "-d"},
+             "digits": {"-l", "-0"}},
+    "ruby": {"code": {"-e"}, "values": {"-I": 1, "-r": 1}, "attached": {"-i", "-x", "-K"},
+             "digits": {"-0", "-W", "-T"}},
     "php": {"code": {"-r"}, "values": {"-d": 1}},
     "Rscript": {"code": {"-e"}},
     "osascript": {"code": {"-e"}, "values": {"-l": 1}},
     **dict.fromkeys(["awk", "gawk", "mawk", "nawk"], _AWK),
     "jq": {"values": {"--arg": 2, "--argjson": 2, "--indent": 1},
-           "files": {"-f": 1, "--from-file": 1, "--slurpfile": 2, "--rawfile": 2, "-L": 1}, "first": True},
+           "files": {"-f": 1, "--from-file": 1, "--slurpfile": 2, "--rawfile": 2, "-L": 1}, "first": True,
+           "anywhere": True},
     **dict.fromkeys(["sed", "gsed"], {"code": {"-e", "--expression"}, "values": {"-l": 1},
-                                      "files": {"-f": 1, "--file": 1}, "first": True, "empty_value": {"-i"}}),
+                                      "files": {"-f": 1, "--file": 1}, "first": True, "empty_value": {"-i"},
+                                      "attached": {"-i"}}),
 }
+# Options whose file is the program itself (awk -f, sed -f, jq -f): its text is code.
+PROGRAM_FILES = {"-f", "--file", "--from-file"}
+# awk code that reads files or runs commands named by its variables: then `-v name=value` values may
+# be paths; otherwise they are data.
+AWK_READS = re.compile(r"getline|system\s*\(|close\s*\(|\|\s*getline|print[^;}]*[>|]")
 # A literal directory change inside interpreter code: os.chdir('x'), process.chdir('x'),
 # Dir.chdir('x'), chdir('x') in Perl or PHP, setwd('x') in R.
 CODE_CHDIR = re.compile(r"""(?:\b(?:os\.|process\.|Dir\.)?chdir|\bsetwd)\s*\(?\s*(['"])([^'"]+)\1""")
@@ -266,9 +308,27 @@ SPLIT = "\x03"
 # run): \x06a\x05b\x07 is a or b.
 CHOICE = re.compile("\x06([^\x06\x07]*)\x07")
 POSITIONAL = [*map(str, range(1, 10)), "#", "@", "*"]
+# Variables a shell may have from its environment, and so exports, unless the command says otherwise.
+INHERITED = {"HOME", "PATH", "PWD", "OLDPWD", "CDPATH", "TMPDIR", "USER", "LOGNAME", "SHELL", "LANG", "TERM"}
+# Variables whose value the audit never knows, in arithmetic or elsewhere.
+VOLATILE = {"RANDOM", "SRANDOM", "SECONDS", "EPOCHSECONDS", "EPOCHREALTIME", "LINENO", "BASHPID", "PPID", "UID",
+            "EUID", "SHLVL", "COLUMNS", "LINES", "OPTIND", "OPTARG", "HISTCMD", "REPLY"}
+# Marks a choice's alternative (see CHOICE) seen only from an alternative place: `$PWD` there.
+ALT = "\x04"
+# Marks inside a word's value until it is split into fields (see `_fields`): quoted text
+# (\x11...\x12), an unquoted parameter or arithmetic expansion (\x0e...\x0f) and an unquoted
+# command substitution (\x10...\x0f). `_Shell.value` leaves them out unless asked for them.
+Q_OPEN, Q_CLOSE, FIELD, FIELD_CMD, FIELD_END = "\x11", "\x12", "\x0e", "\x10", "\x0f"
+_UNMARK = str.maketrans("", "", Q_OPEN + Q_CLOSE + FIELD + FIELD_CMD + FIELD_END)
+# Directories where a script a command runs may be read at audit time, besides the work directory.
+TEMP_DIRS = (Path("/tmp"), Path("/private/tmp"), Path("/var/folders"), Path("/private/var/folders"))
 # A command's exit status as far as the audit can tell, in each place the shell could be.
 OK, FAILED, MAYBE, EXITED = "ok", "failed", "maybe", "exited"
 MAX_WORLDS = 64
+# test's unary operators in bash and zsh.
+_TEST_UNARY = {"-" + c for c in "abcdefghknoprstuvwxzGLNORS"}
+# Passes of a loop the audit follows before it stops following the directory.
+MAX_PASSES = 12
 STATEMENTS = {
     "command", "redirected_statement", "pipeline", "list", "subshell", "compound_statement", "if_statement",
     "elif_clause", "else_clause", "while_statement", "for_statement", "c_style_for_statement",
@@ -354,6 +414,131 @@ def _resolve(token: str, cwd: Path, bare: bool = False) -> Path | None:
     return Path(os.path.normpath(cwd / token))
 
 
+def _alt(text: str) -> tuple[str, bool]:
+    """A text without ALT marks, and whether it had any."""
+    return text.replace(ALT, ""), ALT in text
+
+
+def _unmark(text: str) -> str:
+    return text.translate(_UNMARK)
+
+
+def _fields(word: str, ifs: str | None, params: bool, literal: bool = False) -> list[str]:
+    """The fields an expanded word, marked as `_Shell.value` marks it, becomes (POSIX 2.6.5, with
+    the shells' differences). Unquoted expansions are split at IFS (None: unset, as space, tab and
+    newline): IFS white space at the start or end of a field is dropped and runs of it separate
+    fields; any other IFS character, with white space around it, ends a field, so two in a row make
+    an empty one and one at the very end makes none. Command substitutions are split in every
+    shell, parameter and arithmetic expansions only where `params` (sh and bash; zsh splits them
+    only under SH_WORD_SPLIT), and unquoted literal text only where `literal` (bash 3.2's
+    here-strings). A word made only of unquoted expansions that leave nothing becomes no field;
+    quoted text makes one, but in bash an empty quoted part counts only in a word with nothing
+    else in it. zsh (not `params`) also makes an empty last field after a final IFS character
+    other than white space. $@'s separators always end a field. Where IFS, or a part
+    that would be split, is not known, the word stays one field (unknown, where IFS is)."""
+    ifs = " \t\n" if ifs is None else ifs
+    white = {c for c in ifs if c in " \t\n"}
+    chars: list[tuple[str | None, bool, bool]] = []  # (character or None for quoting, split, expanded)
+    mode = None
+    for c in word:
+        if c == Q_OPEN:
+            mode = Q_OPEN
+            chars.append((None, False, False))
+        elif c in (FIELD, FIELD_CMD):
+            mode = c
+        elif c in (Q_CLOSE, FIELD_END):
+            mode = None
+        else:
+            split = mode == FIELD_CMD or (mode == FIELD and params) or (mode is None and literal)
+            chars.append((c, split, mode in (FIELD, FIELD_CMD)))
+    live = "".join(c for c, split, _ in chars if split and c)
+    if live and any(m in ifs for m in (UNKNOWN, "$", "\x01", "\x06")):
+        return [UNKNOWN]
+    if UNKNOWN in live or "$" in live or "\x01" in live:
+        return [_unmark(word)]
+    if "\x06" in live and any(not alt or any(c in ifs for c in alt)
+                              for m in CHOICE.finditer(_unmark(word)) for alt in m.group(1).split("\x05")):
+        return [UNKNOWN]
+    if params and any(c for c, _, _ in chars):
+        # In bash, a quoted empty part ('' or "") keeps the word only if nothing else is in it:
+        # `''$y` with y=' ' is no word at all.
+        chars = [x for x in chars if x[0] is not None]
+    out: list[str] = []
+    cur: list[str] = []
+    started = hard = False  # hard: the last delimiter had an IFS character other than white space
+    i, n = 0, len(chars)
+    while i < n:
+        c, split, expanded = chars[i]
+        i += 1
+        if c is None:
+            started = True
+        elif c == SPLIT:
+            # Quoted, "$@" keeps every parameter, empty ones included; unquoted, it drops them.
+            if started or cur or not expanded:
+                out.append("".join(cur))
+            cur, started = [], not expanded
+        elif split and c in ifs:
+            space = c in white
+            if space and not (started or cur):
+                continue
+            out.append("".join(cur))
+            cur, started, hard = [], False, not space
+            while i < n and chars[i][1] and chars[i][0] and chars[i][0] in ifs:
+                if chars[i][0] in white:
+                    i += 1
+                elif space:
+                    space, hard = False, True
+                    i += 1
+                else:
+                    break
+        else:
+            cur.append(c)
+            started, hard = True, False
+    if started or cur:
+        out.append("".join(cur))
+    elif hard and not params:
+        out.append("")  # zsh: `a:` split at `:` is `a` and an empty field
+    return out
+
+
+def _read_fields(line: str, ifs: str, n: int, bash: bool = True) -> list[str]:
+    """What `read` with n names sets from one line, splitting it at IFS as the shell does: runs of
+    IFS white space (space, tab, newline) and single other IFS characters, with any white space
+    around them, separate fields; leading and trailing IFS white space is dropped; the last name
+    takes the rest of the line. Where that rest is one field and a delimiter, bash drops the
+    delimiter (`IFS=: read a b <<< a:b:` sets b to `b`) and zsh keeps it (`b:`)."""
+    white = {c for c in ifs if c in " \t\n"}
+    hard = {c for c in ifs if c not in " \t\n"}
+    i, end = 0, len(line)
+    while i < end and line[i] in white:
+        i += 1
+    while end > i and line[end - 1] in white:
+        end -= 1
+    fields: list[str] = []
+    while len(fields) < n - 1 and i < end:
+        j = i
+        while j < end and line[j] not in white and line[j] not in hard:
+            j += 1
+        fields.append(line[i:j])
+        while j < end and line[j] in white:
+            j += 1
+        if j < end and line[j] in hard:
+            j += 1
+            while j < end and line[j] in white:
+                j += 1
+        i = j
+    if len(fields) < n:
+        last = line[i:end]
+        j = 0
+        while j < len(last) and last[j] not in white and last[j] not in hard:
+            j += 1
+        tail = last[j:]
+        if bash and tail and sum(c in hard for c in tail) == 1 and all(c in white or c in hard for c in tail):
+            last = last[:j]
+        fields.append(last)
+    return fields + [""] * (n - len(fields))
+
+
 def _choices(text: str) -> list[str]:
     """Each value a text with \\x06a\\x05b\\x07 groups can take (at most 64)."""
     groups = [m.group(1).split("\x05") for m in CHOICE.finditer(text)]
@@ -364,6 +549,248 @@ def _choices(text: str) -> list[str]:
     for combo in itertools.islice(itertools.product(*groups), 64):
         out.append("".join(p + c for p, c in zip(pieces, combo)) + pieces[-1])
     return out
+
+
+class _ArithError(Exception):
+    """An arithmetic expression the audit cannot evaluate."""
+
+
+_ARITH_TOKEN = re.compile(r"""\s*(?:(0[xX][0-9a-fA-F]+|\d+)|([A-Za-z_][A-Za-z0-9_]*)|"""
+                          r"""(\+\+|--|\*\*=?|<<=|>>=|<=|>=|==|!=|&&|\|\||[-+*/%&^|]=|<<|>>|[-+*/%<>=!~&^|?:,()]))""")
+# Binary operators by precedence, loosest first; all left-associative except ** (POW, right-
+# associative). bash uses C's order; zsh (without C_PRECEDENCES) binds the shifts and the bitwise
+# operators tighter than ** and the rest, so `2 * 3 & 1` is 0 in bash and 2 in zsh.
+POW = frozenset({"**"})
+_ARITH_BINARY = {
+    "bash": [{"||"}, {"&&"}, {"|"}, {"^"}, {"&"}, {"==", "!="}, {"<", ">", "<=", ">="}, {"<<", ">>"},
+             {"+", "-"}, {"*", "/", "%"}, POW],
+    "zsh": [{"||"}, {"&&"}, {"==", "!="}, {"<", ">", "<=", ">="}, {"+", "-"}, {"*", "/", "%"}, POW,
+            {"|"}, {"^"}, {"&"}, {"<<", ">>"}],
+}
+_ARITH_ASSIGN = {"=", "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "^=", "|=", "**="}
+
+
+def _arith_parse(text: str, shell: str = "bash"):
+    """An arithmetic expression (bash and zsh `$(( ))`, `(( ))`, `let`) as a tree, read with that
+    shell's operator precedence."""
+    table = _ARITH_BINARY[shell]
+    tokens, pos = [], 0
+    text = text.strip()
+    while pos < len(text):
+        m = _ARITH_TOKEN.match(text, pos)
+        if not m or m.end() == pos:
+            raise _ArithError(text)
+        num, name, op = m.groups()
+        if num is not None:
+            if len(num) > 1 and num.startswith("0") and not num[1:2] in {"x", "X"}:
+                raise _ArithError(num)  # octal in bash, decimal in zsh
+            tokens.append(("num", int(num, 0)))
+        elif name is not None:
+            tokens.append(("name", name))
+        elif op is not None:
+            tokens.append(("op", op))
+        pos = m.end()
+    i = 0
+
+    def peek():
+        return tokens[i] if i < len(tokens) else ("end", None)
+
+    def take(value=None):
+        nonlocal i
+        tok = peek()
+        if value is not None and tok != ("op", value):
+            raise _ArithError(text)
+        i += 1
+        return tok
+
+    def comma():
+        node = assign()
+        while peek() == ("op", ","):
+            take()
+            node = ("comma", node, assign())
+        return node
+
+    def assign():
+        if peek()[0] == "name" and i + 1 < len(tokens) and tokens[i + 1][0] == "op" and tokens[i + 1][1] in _ARITH_ASSIGN:
+            name = take()[1]
+            op = take()[1]
+            return ("assign", op, name, assign())
+        return ternary()
+
+    def ternary():
+        # Both branches parse as conditionals: `c ? x : a = 1` is an error in both shells, and an
+        # assignment or comma between `?` and `:` is accepted by bash but not by zsh.
+        cond = binary(0)
+        if peek() == ("op", "?"):
+            take()
+            yes = ternary()
+            take(":")
+            return ("cond", cond, yes, ternary())
+        return cond
+
+    def binary(level):
+        if level == len(table):
+            return unary()
+        node = binary(level + 1)
+        if table[level] is POW:
+            if peek() == ("op", "**"):
+                take()
+                return ("bin", "**", node, binary(level))
+            return node
+        while peek()[0] == "op" and peek()[1] in table[level]:
+            op = take()[1]
+            node = ("bin", op, node, binary(level + 1))
+        return node
+
+    def unary():
+        tok = peek()
+        if tok[0] == "op" and tok[1] in {"++", "--"}:
+            take()
+            name = take()
+            if name[0] != "name":
+                raise _ArithError(text)
+            return ("pre", tok[1], name[1])
+        if tok[0] == "op" and tok[1] in {"+", "-", "!", "~"}:
+            take()
+            return ("un", tok[1], unary())
+        return postfix()
+
+    def postfix():
+        tok = take()
+        if tok[0] == "num":
+            return tok
+        if tok[0] == "name":
+            if peek()[0] == "op" and peek()[1] in {"++", "--"}:
+                return ("post", take()[1], tok[1])
+            return ("var", tok[1])
+        if tok == ("op", "("):
+            node = comma()
+            take(")")
+            return node
+        raise _ArithError(text)
+
+    tree = comma() if tokens else ("num", 0)
+    if i != len(tokens):
+        raise _ArithError(text)
+    return tree
+
+
+def _arith(text: str, lookup, depth: int = 0) -> tuple[int, dict[str, str]]:
+    """Evaluate an arithmetic expression: its value, and the variables it assigns (`i++`, `x=2`).
+    `lookup(name)` gives a variable's value, or None when the audit does not know it; an empty or
+    unset one counts as 0, and a value that is itself an expression is evaluated, as the shells do.
+    Raises _ArithError for anything else (an unknown variable, division by zero, overflow), and
+    where bash and zsh disagree. They differ in three ways. zsh binds the shifts and bitwise
+    operators tighter (see _ARITH_BINARY). bash reads a variable operand when it reaches it, zsh a
+    plain variable (`a`, `(a)`) only when the operator applies, after the right side has run, so
+    `a + (a = 2)` is 3 in bash and 4 in zsh. And bash 3.2 also checks the branch it skips, in
+    `?:`, `&&` and `||`, for division by zero."""
+    if depth > 8:
+        raise _ArithError(text)
+    bash = _arith_run(text, _arith_parse(text, "bash"), lookup, depth, late=False, checks_skipped=True)
+    zsh = _arith_run(text, _arith_parse(text, "zsh"), lookup, depth, late=True, checks_skipped=False)
+    if bash != zsh:
+        raise _ArithError(text)
+    return bash
+
+
+def _arith_run(text: str, tree, lookup, depth: int, late: bool, checks_skipped: bool) -> tuple[int, dict[str, str]]:
+    """Evaluate a parsed expression (see `_arith`), reading plain variable operands late, as zsh
+    does, or when reached, as bash does; `checks_skipped`: evaluate a skipped branch too, for its
+    errors only, as bash 3.2 does."""
+    env: dict[str, str] = {}
+
+    def get(name):
+        raw = env[name] if name in env else lookup(name)
+        if raw is None or UNKNOWN in raw or CHOICE.search(raw) or "$" in raw or "\x01" in raw:
+            raise _ArithError(name)
+        return _arith(raw, lambda n: env.get(n, lookup(n)), depth + 1)[0] if raw.strip() else 0
+
+    def check(v):
+        if not -(2 ** 63) <= v < 2 ** 63:
+            raise _ArithError(text)
+        return v
+
+    def binop(op, a, b):
+        if op in {"/", "%"}:
+            if b == 0:
+                raise _ArithError(text)
+            q = abs(a) // abs(b) * (1 if (a >= 0) == (b >= 0) else -1)  # truncates toward zero
+            return q if op == "/" else a - b * q
+        if op == "**":
+            if b < 0 or b > 64:
+                raise _ArithError(text)
+            return a ** b
+        if op in {"<<", ">>"}:
+            if not 0 <= b < 64:
+                raise _ArithError(text)
+            return a << b if op == "<<" else a >> b
+        return {"+": a + b, "-": a - b, "*": a * b, "&": a & b, "|": a | b, "^": a ^ b,
+                "==": int(a == b), "!=": int(a != b), "<": int(a < b), ">": int(a > b),
+                "<=": int(a <= b), ">=": int(a >= b)}[op]
+
+    def ev(node):
+        kind = node[0]
+        if kind == "num":
+            return check(node[1])
+        if kind == "var":
+            return get(node[1])
+        if kind == "un":
+            x = ev(node[2])
+            return {"+": x, "-": -x, "!": int(x == 0), "~": ~x}[node[1]]
+        if kind in {"pre", "post"}:
+            old = get(node[2])
+            new = check(old + (1 if node[1] == "++" else -1))
+            env[node[2]] = str(new)
+            return new if kind == "pre" else old
+        if kind == "assign":
+            op, name = node[1], node[2]
+            if op == "=":
+                value = ev(node[3])
+            elif late:
+                x = ev(node[3])
+                value = binop(op[:-1], get(name), x)
+            else:
+                old = get(name)
+                value = binop(op[:-1], old, ev(node[3]))
+            env[name] = str(check(value))
+            return check(value)
+        if kind == "cond":
+            taken, skipped = (node[2], node[3]) if ev(node[1]) else (node[3], node[2])
+            skip(skipped)
+            return ev(taken)
+        if kind == "comma":
+            ev(node[1])
+            return ev(node[2])
+        op = node[1]
+        if late and op not in {"&&", "||"} and node[2][0] == "var":
+            b = ev(node[3])
+            return check(binop(op, get(node[2][1]), b))
+        a = ev(node[2])
+        if op == "&&":
+            if not a:
+                skip(node[3])
+            return int(bool(a) and bool(ev(node[3])))
+        if op == "||":
+            if a:
+                skip(node[3])
+            return int(bool(a) or bool(ev(node[3])))
+        return check(binop(op, a, ev(node[3])))
+
+    def skip(node):
+        nonlocal env
+        if checks_skipped:
+            saved = dict(env)
+            ev(node)  # raises where the branch would; what it assigns is discarded
+            env = saved
+
+    return ev(tree), env
+
+
+def _arith_targets(text: str) -> set[str]:
+    """Variables an arithmetic expression may assign, read from its text."""
+    names = set(re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:\+\+|--|(?:\*\*|<<|>>|[-+*/%&^|])?=(?!=))", text))
+    return names | set(re.findall(r"(?:\+\+|--)\s*([A-Za-z_][A-Za-z0-9_]*)", text))
 
 
 # Words the grammar takes as command names only when it has misread a compound command.
@@ -524,6 +951,19 @@ def _search_args(verb: str, args: list[str]) -> dict:
     return out
 
 
+class _Frame:
+    """A loop, a function call or a subshell (`barrier`) the shell is inside, and the worlds that
+    left it by `break`, `continue` or `return`, each with the shell state it left with."""
+
+    def __init__(self, kind: str):
+        self.kind = kind
+        self.jumps: dict[str, list[tuple[list, tuple]]] = {"break": [], "continue": [], "return": []}
+
+    def take(self, what: str) -> list[tuple[list, tuple]]:
+        out, self.jumps[what] = self.jumps[what], []
+        return out
+
+
 class _World(NamedTuple):
     """One place the shell could be: its directory, `$OLDPWD` (None before any cd in the command:
     the shell's own, which the audit cannot know), its pushd stack, the last command's status, and
@@ -561,13 +1001,32 @@ class _Shell:
         # Which shell runs the code where shells differ: "zsh", "posix" (bash, dash) or None when the
         # audit cannot tell, which keeps what either would do. `lastpipe`: bash's `shopt -s lastpipe`.
         self.dialect: str | None = None
+        self.shell_name: str | None = None  # the shell a command names (bash, sh, dash, zsh), if any
         self.lastpipe = False
+        # The loops, function calls and subshells the shell is inside (see `jump`).
+        self.frames: list[_Frame] = []
         self.vars: dict[str, str] = {}
+        # Whether each variable is exported (True), not (False), or only in some of the branches that
+        # may have run ("maybe"); a variable not listed is exported if INHERITED. `inherit`: False in a
+        # command `env -i` runs, which has no environment. `allexport`: `set -a`.
+        self.exports: dict[str, object] = {}
+        self.func_exports: set[str] = set()  # bash `export -f`
+        self.inherit = True
+        self.allexport = False
+        self.integers: set[str] = set()  # `declare -i`: assignments to these are arithmetic
+        # Files written earlier (in the transcript, or by this command), by path, as the texts each may
+        # have (None: what is on disk at audit time), like functions: a script the command runs is
+        # read from here (see `scripts`). `wrote_ever`: files this command writes somewhere;
+        # `wrote_later` (from the first pass): those, before it writes them.
+        self.files: dict[Path, tuple] = {}
+        self.wrote_ever: set[Path] = set()
+        self.wrote_later: set[Path] = set()
         # Each function's body and each alias's text, as a tuple of alternatives: one, or several
         # where branches that may each have run left it defined differently (None: not defined).
         self.functions: dict[str, tuple] = {}
         self.aliases: dict[str, tuple] = {}
         self.calls = 0  # depth of function calls being followed
+        self.locals: list[dict[str, str | None]] = []  # per call being followed: a local's outer value
         self.inlined = 0  # function calls followed in all
         self.feeding = 0  # > 0 while a search's results reach another command
         self.paths: list[Path] = []
@@ -583,20 +1042,23 @@ class _Shell:
         # What the last command printed, when the audit can tell (pwd, echo, cat of a here-document);
         # None when it cannot. Command substitutions and pipelines read it.
         self.output: str | None = None
+        self.memo: dict | None = None  # word values inside a test being read (see `value`)
 
     # Worlds
 
     @property
     def cwd(self) -> Path:
-        return self.worlds[0].cwd
+        return self.worlds[0].cwd if self.worlds else self.workdir
 
     @property
     def oldpwd(self) -> Path | None:
-        return self.worlds[0].oldpwd
+        return self.worlds[0].oldpwd if self.worlds else None
 
     def set_worlds(self, worlds: list[_World]) -> None:
         """Merge worlds in the same place, drop exited ones while any other remains, primary first.
-        Past MAX_WORLDS the audit stops following the directory (relative paths become suspect)."""
+        Past MAX_WORLDS the audit stops following the directory (relative paths become suspect).
+        No world at all is a state of its own: every world has left by `break`, `continue` or
+        `return`, and nothing runs until the loop or function it left takes it back."""
         live = [w for w in worlds if w.status != EXITED] or [w._replace(status=MAYBE) for w in worlds]
         merged: dict = {}
         for w in live:
@@ -610,7 +1072,7 @@ class _Shell:
                 self.notes.append("more possible working directories than the audit tracks")
             self.known = False
             out = out[:MAX_WORLDS]
-        self.worlds = out or [_World(self.workdir, None)]
+        self.worlds = out
 
     def set_status(self, status: str) -> None:
         self.worlds = [w._replace(status=status) for w in self.worlds]
@@ -667,17 +1129,24 @@ class _Shell:
         self.set_worlds(taken + rest + gone)
 
     def state(self) -> tuple:
-        return dict(self.vars), set(self.made), set(self.removed), dict(self.functions), dict(self.aliases)
+        return (dict(self.vars), set(self.made), set(self.removed), dict(self.functions), dict(self.aliases),
+                dict(self.exports), dict(self.files))
 
     def restore(self, state: tuple) -> None:
         self.vars, self.made, self.removed = dict(state[0]), set(state[1]), set(state[2])
-        self.functions, self.aliases = dict(state[3]), dict(state[4])
+        self.functions, self.aliases, self.exports = dict(state[3]), dict(state[4]), dict(state[5])
+        self.files = dict(state[6])
+
+    def exported(self, name: str, exports: dict | None = None) -> object:
+        """Whether a variable is exported: True, False or "maybe"."""
+        exports = self.exports if exports is None else exports
+        return exports.get(name, self.inherit and name in INHERITED)
 
     def join(self, states: list[tuple]) -> None:
         """After branches that may each have run, from the same start: a variable they leave
         different has each of their values, a function or alias each of their definitions (or
-        none, where one left it undefined), a directory counts as made only if each made it, and
-        as removed if any removed it."""
+        none, where one left it undefined), a file each of their texts, a directory counts as made
+        only if each made it, and as removed if any removed it."""
         if not states:
             return
         merged = {}
@@ -687,6 +1156,13 @@ class _Shell:
         self.vars = merged
         self.made = set.intersection(*(st[1] for st in states))
         self.removed = set.union(*(st[2] for st in states))
+        exports = {}
+        for name in set().union(*(st[5] for st in states)):
+            seen = {self.exported(name, st[5]) for st in states}
+            exports[name] = seen.pop() if len(seen) == 1 else "maybe"
+        self.exports = exports
+        self.files = {path: tuple(dict.fromkeys(a for st in states for a in st[6].get(path, (None,))))
+                      for path in set().union(*(st[6] for st in states))}
         for k, key in ((3, lambda b: None if b is None else _text(b)), (4, lambda a: a)):
             table = {}
             for name in set().union(*(st[k] for st in states)):
@@ -697,6 +1173,16 @@ class _Shell:
             else:
                 self.aliases = table
 
+    def not_directory(self, p: Path) -> bool:
+        """Whether p is, at audit time, something other than a directory that this command did not
+        make, remove or make later: then a cd to it certainly failed."""
+        if p in self.made or p in self.later or any(_under(p, r) for r in self.removed):
+            return False
+        try:
+            return p.exists() and not p.is_dir()
+        except OSError:
+            return False
+
     def exists(self, p: Path, directory: bool = True) -> bool:
         if p in self.made:
             return True
@@ -706,30 +1192,281 @@ class _Shell:
 
     @contextmanager
     def child(self):
-        """A subshell: directory changes, variables, functions and aliases inside it do not outlast it."""
+        """A subshell: directory changes, variables, functions and aliases inside it do not outlast it.
+        It keeps the loops and functions around it, so a `break` or `return` inside it ends it."""
         saved = (list(self.worlds), self.known, dict(self.vars), dict(self.functions), dict(self.aliases),
-                 self.dialect, self.lastpipe)
+                 self.dialect, self.shell_name, self.lastpipe, self.frames, dict(self.exports),
+                 set(self.func_exports), self.inherit, self.allexport, set(self.integers))
+        self.frames = [*self.frames, _Frame("barrier")]
+        memo, self.memo = self.memo, None  # a substitution's words are its own
         try:
             yield
         finally:
-            (self.worlds, self.known, self.vars, self.functions, self.aliases, self.dialect,
-             self.lastpipe) = saved
+            self.memo = memo
+            (self.worlds, self.known, self.vars, self.functions, self.aliases, self.dialect, self.shell_name,
+             self.lastpipe, self.frames, self.exports, self.func_exports, self.inherit, self.allexport,
+             self.integers) = saved
             self.set_status(MAYBE)
+
+    @contextmanager
+    def process(self, verb: str | None = None):
+        """A new shell process (`sh -c`, a script): like a subshell, but it starts with only the
+        exported variables (one exported in only some branches is unknown), bash's exported
+        functions (if the new shell is bash or sh), no aliases and no loops around it."""
+        with self.child():
+            names = set(self.vars) | {n for n in self.exports if n not in self.vars}
+            env = {}
+            for name in names:
+                how = self.exported(name)
+                if how is True and name in self.vars:
+                    env[name] = self.vars[name]
+                elif how == "maybe":
+                    env[name] = UNKNOWN
+            self.vars = env
+            self.exports = {name: True for name in env}
+            self.functions = {n: f for n, f in self.functions.items()
+                              if n in self.func_exports and verb in {"bash", "sh", None}}
+            self.func_exports = set(self.functions)
+            self.aliases, self.frames, self.allexport, self.integers = {}, [], False, set()
+            self.dialect, self.shell_name, self.lastpipe = DIALECTS.get(verb or ""), verb, False
+            locals_, self.locals = self.locals, []
+            try:
+                yield
+            finally:
+                self.locals = locals_
+
+    # Loops, functions and jumps
+
+    def jump(self, what: str, n: int = 1, status: str | None = None) -> None:
+        """`break n`, `continue n` or `return` in every world: the worlds leave for the nth loop
+        around them (or the outermost, if there are fewer) or the function call, taking the shell
+        state with them. Functions are transparent to break and continue (dash ignores those that
+        would leave a function, and `sh` may be dash), and loops to return. Where the target lies
+        outside a subshell, the subshell just ends. With no target, bash carries on (return fails)
+        while zsh exits; dash exits on return only. `status`: the status `return n` sets."""
+        if not self.worlds:
+            return
+        worlds = [w if status is None else w._replace(status=status) for w in self.worlds]
+        target, barrier, loops, crossed = None, False, 0, False
+        for f in reversed(self.frames):
+            if f.kind == "barrier":
+                barrier = True
+            elif what == "return":
+                if f.kind == "function":
+                    target = f
+                    break
+            elif f.kind == "function":
+                crossed = True
+            elif f.kind == "loop":
+                target, loops = f, loops + 1
+                if loops >= n:
+                    break
+        if crossed and self.shell_name == "dash":
+            target = None  # dash ignores a break or continue that would leave a function
+        if target is None:
+            exits = {"zsh", "dash"} if what == "return" else {"zsh"}
+            if self.shell_name in exits and not crossed:
+                self.set_status(EXITED)
+            elif what == "return":
+                self.set_status(FAILED)
+            else:
+                self.set_status(OK)
+            return
+        if not barrier:
+            target.jumps[what].append((worlds, self.state()))
+        # `sh` may be dash, which goes on in the function: there the shell stays, as an alternative.
+        self.worlds = [w._replace(primary=False) for w in worlds] if crossed and self.shell_name == "sh" else []
+
+    def rejoin(self, entries: list[tuple[list, tuple]]) -> None:
+        """Take back worlds that left by a jump, joining the shell state they left with."""
+        if entries:
+            states = [st for _, st in entries]
+            self.join([self.state(), *states] if self.worlds else states)
+            self.set_worlds(self.worlds + [w for ws, _ in entries for w in ws])
+
+    def loop_key(self) -> tuple:
+        """The shell's state at a loop's head; a loop whose head repeats a state has no new pass."""
+        return (frozenset(self.worlds), frozenset(self.vars.items()), frozenset(self.made), frozenset(self.removed),
+                frozenset((k, tuple(None if b is None else _text(b) for b in v)) for k, v in self.functions.items()),
+                frozenset(self.aliases.items()), frozenset(self.exports.items()))
+
+    def loop(self, test, body, when: str, update=None) -> None:
+        """A while, until or C-style for loop: `test()` sets the status, the body runs where it
+        is `when` (or unknown), `update()` runs after each pass. The audit follows the passes,
+        through `continue` and `break`, until the loop ends in every world or its head repeats a
+        state it has had (further passes add nothing). After MAX_PASSES passes, variables still
+        changing from pass to pass (a counter) become unknown, so that the passes after cover
+        every value; after twice as many, the audit stops following the directory. Where the
+        condition was unknown before the first pass, places reached only by not running the body at
+        all are alternatives, as in `fork`."""
+        frame = _Frame("loop")
+        self.frames = [*self.frames, frame]
+        exits: list[_World] = []
+        states: list[tuple] = []
+        zero: list[_World] = []  # left before any pass, where the condition was unknown
+        zero_definite = False
+        seen: set = set()
+        last: dict[str, str] = {}
+        ran = False
+        try:
+            for k in range(2 * MAX_PASSES + 1):
+                if not self.worlds:
+                    break
+                if k == MAX_PASSES:
+                    for name, value in self.vars.items():
+                        if last.get(name, value) != value:
+                            self.vars[name] = UNKNOWN
+                last = dict(self.vars)
+                key = self.loop_key()
+                if key in seen:
+                    self.worlds = []  # these worlds' further passes were followed already
+                    break
+                seen.add(key)
+                test()
+                live = [w for w in self.worlds if w.status != EXITED]
+                gone = [w for w in self.worlds if w.status == EXITED]
+                staying = [w for w in live if w.status in (when, MAYBE)]
+                leaving = [w for w in live if w.status != when] + gone
+                if leaving:
+                    states.append(self.state())
+                    if k == 0:
+                        zero += [w for w in leaving if w.status == MAYBE]
+                        zero_definite = any(w.primary for w in leaving if w.status != MAYBE)
+                        exits += [w for w in leaving if w.status != MAYBE]
+                    else:
+                        exits += leaving
+                if not staying:
+                    self.worlds = []
+                    break
+                if k == 2 * MAX_PASSES:
+                    if self.known:
+                        self.notes.append("a loop that runs more times than the audit follows")
+                    self.known = False
+                    exits += staying
+                    states.append(self.state())
+                    self.worlds = []
+                    break
+                self.set_worlds(staying)
+                ran = True
+                body()
+                self.rejoin(frame.take("continue"))
+                for ws, st in frame.take("break"):
+                    exits += ws
+                    states.append(st)
+                if update is not None and self.worlds:
+                    update()
+        finally:
+            self.frames = self.frames[:-1]
+        cwds = {w.cwd for w in exits if w.primary and w.status != EXITED}
+        if zero and cwds and not zero_definite:
+            zero = [w if w.cwd in cwds else w._replace(primary=False) for w in zero]
+        if states:
+            self.join(states)
+        self.set_worlds(exits + zero)
+        self.set_status(MAYBE if ran else OK)
+
+    def each(self, setups: list, body, end=None) -> None:
+        """A loop whose passes are known (a literal `for` list, `while read` on known input): before
+        pass k, `setups[k]()` binds the loop variable; `end()` runs where the loop runs out."""
+        frame = _Frame("loop")
+        self.frames = [*self.frames, frame]
+        exits: list[_World] = []
+        states: list[tuple] = []
+        try:
+            for setup in setups:
+                if not self.worlds:
+                    break
+                setup()
+                self.visit(body)
+                self.rejoin(frame.take("continue"))
+                for ws, st in frame.take("break"):
+                    exits += ws
+                    states.append(st)
+        finally:
+            self.frames = self.frames[:-1]
+        if self.worlds:
+            if end is not None:
+                end()
+            exits += self.worlds
+            states.append(self.state())
+        if states:
+            self.join(states)
+        self.set_worlds(exits)
+        if not setups:
+            self.set_status(OK)
+
+    def call(self, body) -> None:
+        """Run a function's body (or a sourced file) in the calling shell; `return` comes back here."""
+        frame = _Frame("function")
+        self.frames = [*self.frames, frame]
+        try:
+            self.visit(body) if not isinstance(body, str) else self.run(body)
+        finally:
+            self.frames = self.frames[:-1]
+        self.rejoin(frame.take("return"))
+
+    def arith(self, text: str) -> int | None:
+        """Evaluate shell arithmetic, applying what it assigns; None if the audit cannot, and then
+        what it may assign is unknown."""
+        if "$(" in text or "`" in text:
+            value = None
+        else:
+            def lookup(name):
+                # A variable this command never set is unset (0), unless it may come from the
+                # environment or is one of the shell's own.
+                if name in self.vars:
+                    return self.vars[name]
+                return None if name in VOLATILE or (name.isupper() and self.inherit) else ""
+
+            def known(m: re.Match) -> str:
+                v = lookup(m.group(1))
+                return UNKNOWN if v is None else v
+
+            expanded = re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*|[0-9#])\}?", known, text)
+            try:
+                value, assigned = _arith(expanded, lookup)
+            except _ArithError:
+                value = None
+            else:
+                self.vars.update(assigned)
+        if value is None:
+            for name in _arith_targets(text):
+                self.vars[name] = UNKNOWN
+        return value
 
     # Values
 
     def expand(self, word: str) -> str:
         def sub(m: re.Match) -> str:
             name = m.group(1)
-            if name == "HOME":
-                return str(HOME)
             if name == "PWD":
-                return str(self.cwd)
+                return self.pwd()
             if name == "OLDPWD":
                 return "$OLDPWD" if self.oldpwd is None else str(self.oldpwd)
-            return self.vars.get(name, "$" + name)
+            if name == "*" and "@" in self.vars:
+                ifs = self.vars.get("IFS")
+                return self.vars["@"].replace(SPLIT, " " if ifs is None else ifs[:1])
+            if name in self.vars:
+                return self.vars[name]
+            if name == "HOME" and self.inherit:
+                return str(HOME)
+            return "$" + name if self.inherit else ""
 
         return _VAR.sub(sub, word)
+
+    def home(self) -> str | None:
+        """Where `cd` with no operand goes: $HOME, or None where it is unset."""
+        value = self.expand("\x01HOME\x02")
+        return value or None
+
+    def pwd(self) -> str:
+        """$PWD: the directory of each place the shell could be (a choice, where there are several,
+        whose alternatives from alternative places carry ALT)."""
+        places: dict[Path, bool] = {}
+        for w in self.worlds:
+            places[w.cwd] = places.get(w.cwd, False) or w.primary
+        texts = [str(c) if primary else ALT + str(c) for c, primary in places.items()] or [str(self.workdir)]
+        return texts[0] if len(texts) == 1 else "\x06" + "\x05".join(texts) + "\x07"
 
     def bind(self, args: list[str], zero: str | None = None) -> None:
         """Set the positional parameters ($0 to $9, $#, $@ and $*)."""
@@ -741,20 +1478,35 @@ class _Shell:
         self.vars["@"] = SPLIT.join(args)
         self.vars["*"] = " ".join(args)
 
-    def value(self, node) -> str:
+    def value(self, node, split: bool = False) -> str:
         """A word's value after quote removal, with variables marked for `expand`. Command
-        substitutions inside it are run (in a subshell) along the way."""
+        substitutions and arithmetic inside it are run along the way (once, in a test the audit
+        reads several ways: see `memo`). `split`: keep the marks `_fields` splits by (quoted text
+        and unquoted expansions), for words the shell splits into fields."""
+        if self.memo is None:
+            marked = self._value(node)
+        else:
+            key = (node.id, node.start_byte, node.end_byte)
+            if key not in self.memo:
+                self.memo[key] = self._value(node)
+            marked = self.memo[key]
+        return marked if split else _unmark(marked)
+
+    def _value(self, node) -> str:
         t = node.type
         if t == "word":
-            return re.sub(r"\\(.)", r"\1", _text(node), flags=re.S)
+            # A backslash quotes the character after it.
+            return re.sub(r"\\(.)", lambda m: Q_OPEN + m.group(1) + Q_CLOSE, _text(node), flags=re.S)
         if t == "raw_string":
-            return _text(node)[1:-1]
+            return Q_OPEN + _text(node)[1:-1] + Q_CLOSE
         if t == "ansi_c_string":
             try:
-                return _text(node)[2:-1].encode().decode("unicode_escape")
+                return Q_OPEN + _text(node)[2:-1].encode().decode("unicode_escape") + Q_CLOSE
             except UnicodeDecodeError:
-                return _text(node)[2:-1]
+                return Q_OPEN + _text(node)[2:-1] + Q_CLOSE
         if t in {"string", "translated_string"}:
+            if _text(node) in {'"$@"', '"${@}"'} and self.vars.get("#") == "0":
+                return ""  # "$@" with no parameters is no word at all
             # Build from the source span: the grammar leaves some characters (newlines among them)
             # outside every child node.
             src, base = node.text, node.start_byte
@@ -764,29 +1516,35 @@ class _Shell:
                 cs, ce = c.start_byte - base, c.end_byte - base
                 if cs > pos:
                     parts.append(_unquote_double(src[pos:cs]))
-                parts.append(_unquote_double(c.text) if c.type == "string_content" else self.value(c))
+                if c.type == "string_content":
+                    parts.append(_unquote_double(c.text))
+                elif c.type in {"simple_expansion", "expansion"} and _text(c) in {"$*", "${*}"}:
+                    parts.append("\x01*\x02")  # "$*": the parameters joined by IFS's first character
+                else:
+                    parts.append(self.value(c))
                 pos = max(pos, ce)
             if end > pos:
                 parts.append(_unquote_double(src[pos:end]))
-            return "".join(parts)
+            return Q_OPEN + "".join(parts) + Q_CLOSE
         if t == "simple_expansion":
             name = node.named_children[0] if node.named_children else None
             if name is not None and name.type in {"variable_name", "special_variable_name"}:
-                return "\x01" + _text(name) + "\x02"
-            return UNKNOWN
+                # Unquoted, $* is one word per parameter before splitting, like $@.
+                return FIELD + "\x01" + ("@" if _text(name) == "*" else _text(name)) + "\x02" + FIELD_END
+            return FIELD + UNKNOWN + FIELD_END
         if t == "expansion":
             text = _text(node)
             m = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#])\}", text)
             if m:
-                return "\x01" + m.group(1) + "\x02"
+                return FIELD + "\x01" + ("@" if m.group(1) == "*" else m.group(1)) + "\x02" + FIELD_END
             m = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*|[0-9]+):?[-=]([^}$`]*)\}", text)
             if m:
-                return "\x01" + m.group(1) + "\x02" if self.vars.get(m.group(1)) else m.group(2)
+                return FIELD + ("\x01" + m.group(1) + "\x02" if self.vars.get(m.group(1)) else m.group(2)) + FIELD_END
             for c in node.named_children:
                 self.value(c)  # runs any command substitution inside
-            return UNKNOWN
+            return FIELD + UNKNOWN + FIELD_END
         if t == "command_substitution":
-            return self.substitute(node)
+            return FIELD_CMD + self.substitute(node) + FIELD_END
         if t == "process_substitution":
             self.feeding += 1  # what it prints reaches the command that reads it
             try:
@@ -797,12 +1555,23 @@ class _Shell:
                 self.feeding -= 1
             return UNKNOWN
         if t == "arithmetic_expansion":
-            return UNKNOWN
+            self.substitutions(node)
+            text = _text(node)
+            v = self.arith(text[3:-2] if text.startswith("$((") else text[2:-1])
+            return FIELD + (UNKNOWN if v is None else str(v)) + FIELD_END
         if node.child_count == 0:
             return _text(node)
         if t == "concatenation":
-            return "".join(self.value(c) for c in node.children)
-        return "".join(self.value(c) for c in node.named_children) or _text(node)
+            return "".join(self.value(c, split=True) for c in node.children)
+        return "".join(self.value(c, split=True) for c in node.named_children) or _text(node)
+
+    def substitutions(self, node) -> None:
+        """Run the command substitutions inside a node (in arithmetic, say)."""
+        for c in node.named_children:
+            if c.type in {"command_substitution", "process_substitution"}:
+                self.value(c)
+            else:
+                self.substitutions(c)
 
     def substitute(self, node) -> str:
         """Run a command substitution in a subshell; its value if the audit can tell it. What a
@@ -827,10 +1596,11 @@ class _Shell:
         """The word as a path from each world: (path, primary)."""
         out: dict[Path, bool] = {}
         for text in _choices(self.expand(word)):
+            text, alt = _alt(text)
             for w in self.worlds:
                 p = _resolve(text, w.cwd, bare=bare)
                 if p is not None:
-                    out[p] = out.get(p, False) or w.primary
+                    out[p] = out.get(p, False) or (w.primary and not alt)
         return list(out.items())
 
     def reach(self, path: Path, primary: bool) -> None:
@@ -844,6 +1614,7 @@ class _Shell:
         if CHOICE.search(text):
             found = [self.add(c, bare, chdirs, chdir_bare) for c in _choices(text)]
             return next((f for f in found if f is not None), None)
+        text, alt = _alt(text)
         if UNKNOWN in text:
             # A path with a part the audit cannot work out (`../$(ls ..)/x`) could be any path of
             # that shape: as a pattern, it is reported if it could reach a protected place.
@@ -869,7 +1640,7 @@ class _Shell:
                     continue
                 first = first or p
                 for q in _expand(p):
-                    self.reach(q, w.primary or not relative)
+                    self.reach(q, (w.primary or not relative) and not alt)
         if first is not None and relative and not self.known:
             self.notes.append("a relative path after a cd the audit could not follow")
         return first
@@ -921,6 +1692,8 @@ class _Shell:
             self.negate = saved
 
     def visit(self, node) -> None:
+        if not self.worlds:
+            return  # every place has left by break, continue or return: nothing here runs
         if node.start_byte in self.negate and node.type not in {"program", "list"} and not (
                 node.type == "redirected_statement" and _body(node).type == "list"):
             # A `!` the grammar could not take, before a compound command (see `_parseable`). In
@@ -960,6 +1733,8 @@ class _Shell:
             self.either(whole, split)
 
     def _visit(self, node) -> None:
+        if not self.worlds:
+            return
         t = node.type
         if t == "command":
             self.simple(node)
@@ -985,10 +1760,12 @@ class _Shell:
         elif t == "case_statement":
             self.case(node)
         elif t == "c_style_for_statement":
-            body = node.child_by_field_name("body")
-            self.set_status(MAYBE)
-            if body is not None:
-                self.fork(lambda: self.visit(body), OK)
+            self.c_style_for(node)
+        elif t == "compound_statement" and node.children and _text(node.children[0]) == "((":
+            # `(( expr ))`: true where the expression is not 0.
+            self.substitutions(node)
+            v = self.arith(_text(node)[2:-2])
+            self.set_status(MAYBE if v is None else OK if v else FAILED)
         elif t == "function_definition":
             name = node.child_by_field_name("name")
             body = node.child_by_field_name("body")
@@ -996,7 +1773,7 @@ class _Shell:
                 if name is not None:
                     self.functions[_text(name)] = (body,)
                 with self.child():  # paths in a function that is never called still count
-                    self.visit(body)
+                    self.call(body)
             self.set_status(OK)
         elif t == "variable_assignment":
             self.assign(node)
@@ -1006,23 +1783,17 @@ class _Shell:
                 self.assign(c)
             self.set_status(_assignment_status(node))
         elif t == "declaration_command":
-            for c in node.named_children:
-                if c.type == "variable_assignment":
-                    self.assign(c)
-            self.set_status(_assignment_status(node))
+            self.declare(node)
+        elif t == "unset_command":
+            self.unset([self.expand(self.value(c)) for c in node.named_children])
         elif t == "for_statement":
             self.for_loop(node)
         elif t == "test_command":
-            for c in node.named_children:
-                self.test_words(c)
-            pattern = _text(node).startswith("[[")
-            tokens = self.test_tokens(node)[1:-1]  # without the brackets
-            if not {"&&", "||", "-a", "-o", "(", ")"} & set(tokens):
-                # As `test` reads its arguments: the grammar takes `[ ! a = b ]` as `(! a) = b`.
-                self.set_status(self.test_args(tokens, pattern))
-            else:
-                exprs = node.named_children
-                self.set_status(self.test_eval(exprs[0], pattern) if len(exprs) == 1 else MAYBE)
+            saved, self.memo = self.memo, {}
+            try:
+                self.test_command(node)
+            finally:
+                self.memo = saved
         elif t == "ERROR":
             words = []
             for c in node.named_children:
@@ -1045,16 +1816,41 @@ class _Shell:
                                 "expansion"}:
                     self.value(c)
 
-    def test_status(self, word: str) -> str:
-        """`[ -d x ]` and the like: true if x exists at audit time (it most likely did when the
-        command ran); otherwise unknown, since it may have existed then."""
+    def test_command(self, node) -> None:
+        for c in node.named_children:
+            self.test_words(c)
+        pattern = _text(node).startswith("[[")
+        tokens = self.test_tokens(node, split=not pattern)[1:-1]  # without the brackets
+        if not {"&&", "||", "-a", "-o", "(", ")"} & set(tokens):
+            # As `test` reads its arguments: the grammar takes `[ ! a = b ]` as `(! a) = b`.
+            self.set_status(self.test_args(tokens, pattern))
+        elif not pattern and tokens != self.test_tokens(node)[1:-1]:
+            self.set_status(MAYBE)  # field splitting changed the expression the grammar read
+        else:
+            exprs = node.named_children
+            self.set_status(self.test_eval(exprs[0], pattern) if len(exprs) == 1 else MAYBE)
+
+    def test_status(self, op: str, word: str) -> str:
+        """`[ -e x ]`, `[ -d x ]` and `[ -f x ]`, judged by what x is at audit time (most likely what
+        it was when the command ran) and what the command itself made or removed: true if x is
+        there and of that kind, false if it is there and of another kind, and otherwise unknown,
+        since x may have been there then. Other file tests are unknown."""
         p = self.resolve(word, bare=True)
-        return OK if p is not None and self.exists(p, directory=False) else MAYBE
+        if p is None or op not in {"-e", "-a", "-d", "-f"}:
+            return MAYBE
+        if p in self.made:
+            return FAILED if op == "-f" else OK
+        if self.doubt or p in self.later or any(_under(p, r) for r in self.removed) or not p.exists():
+            return MAYBE
+        if op in {"-e", "-a"}:
+            return OK
+        return OK if (p.is_dir() if op == "-d" else p.is_file()) else FAILED
 
     def test_args(self, ops: list[str], pattern: bool = False) -> str:
         """The status of `test` (or `[`) with these arguments, when the audit can tell: string and
         integer comparisons of known values, -z and -n, and file tests (see `test_status`).
         `pattern`: in `[[ ]]`, the right side of == and = is a glob pattern."""
+        ops = [o.replace(ALT, "") for o in ops]
         if any(UNKNOWN in o or "$" in o for o in ops):
             return MAYBE
         if any(CHOICE.search(o) for o in ops):
@@ -1071,7 +1867,9 @@ class _Shell:
             op, x = ops
             if op in {"-z", "-n"}:
                 return OK if (x == "") == (op == "-z") else FAILED
-            return self.test_status(x) if op in {"-d", "-e", "-f"} else MAYBE
+            if op not in _TEST_UNARY:
+                return FAILED  # `[ = x ]`, `[ a b ]`: an error, status 2, in bash and zsh
+            return self.test_status(op, x)
         if len(ops) == 3:
             x, op, y = ops
             if op in {"=", "=="}:
@@ -1087,14 +1885,20 @@ class _Shell:
                     return MAYBE
         return MAYBE
 
-    def test_tokens(self, node) -> list[str]:
-        """A test expression's operators and operand values, in order."""
+    def test_tokens(self, node, split: bool = False) -> list[str]:
+        """A test expression's operators and operand values, in order. `split`: in `[ ]`, where
+        operands are command words, split operands into fields (an operand the shells the audit may
+        be in split differently is unknown)."""
         out: list[str] = []
         for c in node.children:
             if c.type in {"unary_expression", "binary_expression", "parenthesized_expression"}:
-                out += self.test_tokens(c)
+                out += self.test_tokens(c, split)
             elif not c.is_named or c.type == "test_operator":
                 out.append(_text(c))
+            elif split:
+                marked = self.expand(self.value(c, split=True))
+                ways = [_fields(marked, self.vars.get("IFS"), p) for p in self.splits()]
+                out += ways[0] if all(w == ways[0] for w in ways) else [UNKNOWN]
             else:
                 out.append(self.expand(self.value(c)))
         return out
@@ -1204,28 +2008,54 @@ class _Shell:
         conds = [c for i, c in enumerate(node.children)
                  if node.field_name_for_child(i) == "condition" and c.type in STATEMENTS]
         if (not until and body is not None and stdin is not None and len(conds) == 1 and conds[0].type == "command"
-                and self._command_name(conds[0]) == "read"):
+                and self._command_name(conds[0]) == "read" and not conds[0].children_by_field_name("redirect")):
             # `while read x; do ...; done` on input the audit knows: one pass per line, in order.
-            names = _read_names([self.expand(self.value(c)) for c in conds[0].children_by_field_name("argument")])
-            for line in stdin.splitlines()[:20]:
-                self.bind_read(names, line)
-                self.visit(body)
-            self.bind_read(names, "")
-            self.set_status(OK)
-            return
-        self.set_status(MAYBE)
-        for c in conds:
-            self.visit(c)
-        if body is not None:
-            # The body runs zero or more times; one pass stands for all of them.
-            self.fork(lambda: self.visit(body), FAILED if until else OK)
-        self.set_status(MAYBE)
+            cond = conds[0]
+            words = [self.expand(self.value(c)) for c in cond.children_by_field_name("argument")]
+            prefix = {}
+            for c in cond.named_children:
+                if c.type == "variable_assignment" and c.child_by_field_name("name") is not None:
+                    v = c.child_by_field_name("value")
+                    prefix[_text(c.child_by_field_name("name"))] = self.expand(self.value(v)) if v else ""
+            names = _read_names(words)
 
-    def bind_read(self, names: list[str], line: str | None) -> None:
-        """What `read NAME...` sets from one line (None: a line the audit does not know)."""
-        fields = line.split(None, len(names) - 1) if line is not None else []
+            def bind(line):
+                def setup():
+                    self.bind_read(names, line, prefix.get("IFS", self.vars.get("IFS")))
+                    self.set_status(OK)
+                return setup
+
+            lines = stdin.splitlines()
+            if len(lines) <= 4 * MAX_PASSES:
+                self.each([bind(line) for line in lines], body, end=bind(""))
+                self.set_status(OK)
+                return
+        if body is None:
+            for c in conds:
+                self.visit(c)
+            self.set_status(MAYBE)
+            return
+
+        def test():
+            self.set_status(MAYBE)
+            for c in conds:
+                self.visit(c)
+
+        self.loop(test, lambda: self.visit(body), FAILED if until else OK)
+
+    def bind_read(self, names: list[str], line: str | None, ifs: str | None = None) -> None:
+        """What `read NAME...` sets from one line (None: a line the audit does not know), split at
+        IFS (`ifs`: its value, None where unset)."""
+        ifs = " \t\n" if ifs is None else ifs
+        if line is None or UNKNOWN in ifs or CHOICE.search(ifs) or "$" in ifs:
+            for name in names:
+                self.vars[name] = UNKNOWN
+            return
+        ways = {"posix": [True], "zsh": [False]}.get(self.dialect, [True, False])  # bash's way, zsh's
+        values = [_read_fields(line, ifs, len(names), bash=b) for b in ways]
         for k, name in enumerate(names):
-            self.vars[name] = UNKNOWN if line is None else fields[k] if k < len(fields) else ""
+            alts = list(dict.fromkeys(v[k] for v in values))
+            self.vars[name] = alts[0] if len(alts) == 1 else "\x06" + "\x05".join(alts) + "\x07"
 
     def case(self, node) -> None:
         """With a known value and patterns, run the first item that matches; otherwise run each."""
@@ -1270,32 +2100,162 @@ class _Shell:
                 self.test_words(c)
 
     def for_loop(self, node) -> None:
+        """A `for` loop: over a literal list, the body runs once per item, in order; over a glob, once
+        per match at audit time, or not at all; over a list the audit cannot work out (or a long
+        one), as a loop with an unknown item (see `loop`)."""
         var = node.child_by_field_name("variable")
-        items = [self.expand(self.value(v)) for v in node.children_by_field_name("value")]
-        items = [x for item in items for x in item.split(SPLIT)]
+        name = _text(var) if var is not None else None
+        words = node.children_by_field_name("value")
+        lists = self.word_lists(self.marked_words(words, node))
+        if not words and any(not c.is_named and _text(c) == "in" for c in node.children):
+            lists = [[]]
+        elif not words:
+            lists = [self.vars.get("@", "").split(SPLIT) if self.vars.get("@") else []]  # `for x; do`
+        if len(lists) == 1:
+            self.for_items(name, lists[0], node)
+        else:
+            self.either(*(lambda items=items: self.for_items(name, items, node) for items in lists))
+
+    def for_items(self, name: str | None, items: list[str], node) -> None:
         for item in items:
             self.add(item, bare=False)
         body = node.child_by_field_name("body")
         if body is None:
             return
+
+        def bind(value):
+            def setup():
+                if name is not None:
+                    self.vars[name] = value
+            return setup
+
+        if any(any(c in x for c in "$\x06" + UNKNOWN) for x in items):
+            self.loop(lambda: self.set_status(MAYBE), lambda: (bind(UNKNOWN)(), self.visit(body)), OK)
+            return
+        globbed = any(any(c in x for c in "*?[") for x in items)
         values: list[str] = []
         for item in items:
             p = self.resolve(item, bare=True) if any(c in item for c in "*?[") else None
             values += [str(x) for x in _expand(p)] if p is not None else [item]
-        literal = bool(items) and not any(any(c in x for c in "*?[$\x06" + UNKNOWN) for x in items)
-
-        def passes():
-            for item in values[:20] or [None]:
-                if var is not None and item is not None:
-                    self.vars[_text(var)] = item
-                self.visit(body)
-
-        if literal:
-            passes()  # a literal list: the body runs once per item, in order
-        else:
+        if len(values) > 4 * MAX_PASSES:
+            self.loop(lambda: self.set_status(MAYBE), lambda: (bind(UNKNOWN)(), self.visit(body)), OK)
+        elif globbed:
             self.set_status(MAYBE)
-            self.fork(passes, OK)  # the list may be empty
-        self.set_status(MAYBE)
+            self.fork(lambda: self.each([bind(v) for v in values], body), OK)  # the matches may differ
+        else:
+            self.each([bind(v) for v in values], body)
+
+    def c_style_for(self, node) -> None:
+        """`for (( init; cond; update ))`, as a while loop on the arithmetic (an empty condition is true)."""
+        parts: dict[str, list[str]] = {"initializer": [], "condition": [], "update": []}
+        for i, c in enumerate(node.children):
+            field = node.field_name_for_child(i)
+            if field in parts:
+                parts[field].append(_text(c))
+                self.substitutions(c)
+        text = {k: "".join(v) for k, v in parts.items()}
+        body = node.child_by_field_name("body")
+        if text["initializer"]:
+            self.arith(text["initializer"])
+
+        def test():
+            v = self.arith(text["condition"]) if text["condition"].strip() else 1
+            self.set_status(MAYBE if v is None else OK if v else FAILED)
+
+        def update():
+            if text["update"].strip():
+                self.arith(text["update"])
+
+        self.loop(test, (lambda: self.visit(body)) if body is not None else (lambda: None), OK, update)
+
+    def declare(self, node) -> None:
+        """export, declare, typeset, local and readonly: assignments, with `-x` (and export) exporting,
+        `-n` (export) or `+x` unexporting, `-i` making the variable arithmetic, `-f` naming functions."""
+        keyword = _text(node.children[0]) if node.children else ""
+        flags, names = "", []
+        for c in node.named_children:
+            if c.type == "variable_assignment":
+                names.append(c)
+            elif c.type in {"word", "variable_name", "string", "raw_string", "concatenation", "simple_expansion",
+                            "expansion"}:
+                w = self.expand(self.value(c))
+                if w.startswith(("-", "+")) and len(w) > 1 and not names:
+                    flags += w
+                else:
+                    names.append(w)
+        self.declaration(keyword, flags, names)
+        self.set_status(_assignment_status(node))
+
+    def declaration(self, keyword: str, flags: str, names: list) -> None:
+        """What a declaration does (see `declare`); each of `names` is an assignment node or a word."""
+        unexport = (keyword == "export" and "n" in flags.lstrip("-")) or "+x" in flags
+        export = not unexport and (keyword == "export" or ("x" in flags and "-" in flags))
+        functions = "f" in flags.lstrip("-+")
+        for item in names:
+            if isinstance(item, str):
+                m = ASSIGN.match(item)
+                name, value = (m.group(1), m.group(2)) if m else (item, None)
+            else:
+                n = item.child_by_field_name("name")
+                if n is None:
+                    continue
+                name, value = _text(n), None
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                continue
+            if functions:
+                if export:
+                    self.func_exports.add(name)
+                elif unexport:
+                    self.func_exports.discard(name)
+                continue
+            if "i" in flags.lstrip("-"):
+                self.integers.add(name)
+            if self.locals and (keyword == "local" or keyword in {"declare", "typeset"} and "g" not in flags):
+                self.locals[-1].setdefault(name, self.vars.get(name))
+            if isinstance(item, str):
+                if value is not None:
+                    self.set_var(name, value)
+                elif keyword == "local" and name not in self.vars:
+                    self.vars[name] = ""
+            else:
+                self.assign(item)
+            if export:
+                self.exports[name] = True
+            elif unexport:
+                self.exports[name] = False
+
+    def unset(self, args: list[str]) -> None:
+        """`unset -f` removes functions, `unset -v` variables; with neither, bash removes the variable
+        if there is one and otherwise the function, zsh only the variable."""
+        flags = "".join(a[1:] for a in args if a.startswith("-"))
+        names = [a for a in args if not a.startswith("-")]
+
+        def drop_var(name):
+            self.vars[name] = ""
+            self.exports[name] = False
+
+        def bash_way():
+            for n in names:
+                if n in self.vars and self.vars[n] != "" or n not in self.functions:
+                    drop_var(n)
+                else:
+                    self.functions.pop(n, None)
+
+        def zsh_way():
+            for n in names:
+                drop_var(n)
+
+        if "f" in flags:
+            for n in names:
+                self.functions.pop(n, None)
+                self.func_exports.discard(n)
+        elif "v" in flags or not any(n in self.functions for n in names) or self.dialect == "zsh":
+            zsh_way()
+        elif self.dialect == "posix":
+            bash_way()
+        else:
+            self.either(bash_way, zsh_way)
+        self.set_status(OK)
 
     def assign(self, node) -> None:
         name = node.child_by_field_name("name")
@@ -1303,7 +2263,20 @@ class _Shell:
         if name is None:
             return
         value = self.expand(self.value(val)).replace(SPLIT, " ") if val is not None else ""
-        self.vars[_text(name)] = value
+        append = any(not c.is_named and _text(c) == "+=" for c in node.children)
+        self.set_var(_text(name), value, append)
+
+    def set_var(self, name: str, value: str, append: bool = False) -> None:
+        """Assign a variable, as arithmetic if it is an integer (`declare -i`), exporting it under
+        `set -a`. A value that looks like a path counts as one."""
+        if name in self.integers:
+            v = self.arith(f"{name}+({value})" if append else value or "0")
+            value = UNKNOWN if v is None else str(v)
+        elif append:
+            value = self.vars.get(name, "") + value
+        self.vars[name] = value
+        if self.allexport:
+            self.exports[name] = True
         self.add(value, bare=False)
 
     def pipeline(self, stages: list, data: str | None = None, tail: list | None = None) -> None:
@@ -1421,10 +2394,12 @@ class _Shell:
             for stmt in [body, *after]:
                 self.visit(stmt)
 
-    def redirect(self, redirects: list, stdin: str | None) -> tuple[str | None, list]:
+    def redirect(self, redirects: list, stdin: str | None, outs: list | None = None,
+                 ifs: str | None | bool = False) -> tuple[str | None, list]:
         """Note the files that redirections name; return what reaches standard input (a
         here-document or here-string, when there is one) and any statements a here-document
-        carries after it (the rest of a pipeline, say)."""
+        carries after it (the rest of a pipeline, say). Files standard output goes to are added to
+        `outs`, as (target, appended)."""
         after: list = []
         for r in redirects:
             if r.type == "file_redirect":
@@ -1439,6 +2414,9 @@ class _Shell:
                 if op.endswith("&") and (target.isdigit() or target == "-"):
                     continue  # duplicates a file descriptor
                 self.add(target, bare=True)
+                fd = next((_text(c) for c in r.named_children if c.type == "file_descriptor"), "")
+                if outs is not None and op in {">", ">>", ">|", "&>", "&>>"} and fd in {"", "1"}:
+                    outs.append((target, op.endswith(">>")))
             elif r.type == "heredoc_redirect":
                 start = next((c for c in r.named_children if c.type == "heredoc_start"), None)
                 body = next((c for c in r.named_children if c.type == "heredoc_body"), None)
@@ -1450,16 +2428,33 @@ class _Shell:
                 stdin = _text(body) if body is not None else ""
                 for c in r.named_children:
                     if c.type == "file_redirect":
-                        self.redirect([c], None)
+                        self.redirect([c], None, outs)
                     elif c.type in STATEMENTS:
                         after.append(c)
             elif r.type == "herestring_redirect":
-                parts = [c for c in r.named_children]
-                stdin = " ".join(self.expand(self.value(c)) for c in parts)
+                stdin = self.herestring(list(r.named_children), ifs)
         return stdin, after
 
+    def herestring(self, parts: list, ifs: str | None | bool = False) -> str:
+        """What a here-string feeds standard input (without its final newline). bash 3.2, the
+        /bin/bash of macOS, splits the word's unquoted parts at IFS, literal text included, and
+        joins the fields with spaces (`IFS=: cat <<< a:b` prints `a b`, and a command's own `IFS=`
+        counts); zsh, like later versions of bash, feeds the word as it is, with "$@" joined by
+        IFS's first character. Where the shell is not known and the two differ, the input is
+        unknown. `ifs`: IFS as the command's own assignments set it (False: they do not)."""
+        ifs = self.vars.get("IFS") if ifs is False else ifs
+        marked = [self.expand(self.value(c, split=True)) for c in parts]
+        join = " " if ifs is None else ifs[:1]
+        plain = " ".join(_unmark(m).replace(SPLIT, join) for m in marked)
+        if self.dialect == "zsh":
+            return plain
+        split = " ".join(" ".join(_fields(m, ifs, True, literal=True)) for m in marked)
+        return split if self.dialect == "posix" or split == plain else UNKNOWN
+
     def simple(self, node, redirects: list | None = None, stdin: str | None = None) -> None:
-        assigns, words, redirs = [], [], list(redirects or [])
+        if not self.worlds:
+            return
+        assigns, words, args, redirs = [], [], [], list(redirects or [])
         for c in node.named_children:
             if c.type == "variable_assignment":
                 assigns.append(c)
@@ -1467,30 +2462,94 @@ class _Shell:
                 redirs.append(c)
             elif c.type == "command_name":
                 inner = c.named_children[0] if c.named_children else c
-                words.append(self.value(inner) if inner is not c else _text(c))
+                words.append(self.value(inner, split=True) if inner is not c else _text(c))
             elif c.type != "comment":
-                words.append(self.value(c))
-        # Words expand before the command's own assignments take effect, as in the shell; "$@"
-        # becomes one word per parameter.
-        words = [x for w in words for x in self.expand(w).split(SPLIT)]
-        stdin, after = self.redirect(redirs, stdin)
+                args.append(c)
+        words += self.marked_words(args, node)
+        # Words expand, and split into fields, before the command's own assignments take effect,
+        # as in the shell. Where the shells split them differently, the command runs each way.
+        lists = self.word_lists(words)
+        outs: list[tuple[str, bool]] = []
+        stdin, after = self.redirect(redirs, stdin, outs, ifs=self.prefix_ifs(assigns))
+        if len(lists) == 1:
+            self.run_simple(node, assigns, lists[0], stdin, outs, after)
+        else:
+            self.either(*(lambda ws=ws: self.run_simple(node, assigns, ws, stdin, outs, after) for ws in lists))
+
+    def marked_words(self, nodes: list, parent) -> list[str]:
+        """The marked values of a command's argument nodes. The grammar drops a backslash-escaped
+        blank after an expansion or a quoted string (`$y\\ x` comes as `$y` and `x`): such
+        neighbours are one word, with the blank quoted."""
+        out: list[str] = []
+        src, base, prev = parent.text, parent.start_byte, None
+        for n in nodes:
+            value = self.value(n, split=True)
+            gap = src[prev.end_byte - base:n.start_byte - base] if prev is not None else b""
+            if gap in (b"\\ ", b"\\\t"):
+                out[-1] += Q_OPEN + gap[1:].decode() + Q_CLOSE + value
+            else:
+                out.append(value)
+            prev = n
+        return out
+
+    def splits(self) -> list[bool]:
+        """Whether unquoted parameter expansions split into fields: in sh and bash, not in zsh, and
+        either, where the shell is not known."""
+        return {"posix": [True], "zsh": [False]}.get(self.dialect, [True, False])
+
+    def word_lists(self, words: list[str]) -> list[list[str]]:
+        """The words marked words become after expansion and field splitting (see `_fields`), in
+        each shell the audit may be in: one list, or two where the shells differ."""
+        out: list[list[str]] = []
+        for params in self.splits():
+            fields = [f for w in words for f in _fields(self.expand(w), self.vars.get("IFS"), params)]
+            if fields not in out:
+                out.append(fields)
+        return out
+
+    def prefix_ifs(self, assigns: list) -> str | None | bool:
+        """IFS as a command's own assignments set it (`IFS=: cmd`), which bash 3.2 uses to split a
+        here-string: its value, UNKNOWN where it is not a plain word, or False where they do not
+        set it."""
+        for a in reversed(assigns):
+            name, val = a.child_by_field_name("name"), a.child_by_field_name("value")
+            if name is not None and _text(name) == "IFS":
+                if val is None:
+                    return ""
+                plain = val.type in {"word", "raw_string"} or (
+                    val.type == "string" and all(c.type == "string_content" for c in val.named_children))
+                return self.value(val) if plain else UNKNOWN
+        return False
+
+    def run_simple(self, node, assigns: list, words: list[str], stdin: str | None, outs: list, after: list) -> None:
         if not words:
             for a in assigns:
                 self.assign(a)
             self.set_status(_assignment_status(node))
         else:
-            saved = {}
+            # Assignments before a command hold for it alone, exported to it.
+            saved, exports = {}, {}
             for a in assigns:
                 name = a.child_by_field_name("name")
                 if name is not None:
                     saved[_text(name)] = self.vars.get(_text(name))
+                    exports[_text(name)] = self.exports.get(_text(name))
                 self.assign(a)
+                if name is not None:
+                    self.exports[_text(name)] = True
             self.command(words, stdin)
             for name, old in saved.items():
                 if old is None:
                     self.vars.pop(name, None)
                 else:
                     self.vars[name] = old
+            for name, old in exports.items():
+                if old is None:
+                    self.exports.pop(name, None)
+                else:
+                    self.exports[name] = old
+        for target, append in outs:
+            self.wrote(target, self.output if words else "", append)
         for stmt in after:
             if stmt.type == "pipeline":
                 # `cat <<EOF | python3`: the rest of the pipeline reads what this command printed.
@@ -1515,26 +2574,38 @@ class _Shell:
         p = _resolve(target, cwd, bare=True)
         return [*dict.fromkeys(out + ([p] if p is not None else [cwd]))]
 
-    def chdir(self, target: str | None) -> None:
-        """cd in every world. A target missing at audit time forks the world: the cd may have
-        worked (it was there then) or failed, leaving the shell where it was (not primary)."""
-        if target is not None and ("$" in target or UNKNOWN in target):
+    def chdir(self, target: str | None, push: bool = False) -> None:
+        """cd in every world (with no target, to $HOME; where HOME is unset, the cd fails). A target
+        missing at audit time forks the world: the cd may have worked (it was there then) or failed,
+        leaving the shell where it was (not primary). A target that is a file fails. `push`: pushd, which adds the directory it
+        leaves to the stack only where it moves."""
+        if target is None:
+            target = self.home()
+            if target is None:
+                self.set_status(FAILED)
+                return
+        if "$" in target or UNKNOWN in target:
             self.known = False
             self.notes.append(f"cd to {target.replace(UNKNOWN, '<unknown>')}, which the audit cannot expand")
             self.set_status(MAYBE)
             return
         out = []
         for w in self.worlds:
+            stack = (*w.stack, w.cwd) if push else w.stack
             # A target with several possible values goes to each of them.
-            for t in [None] if target is None else _choices(target):
-                cands = [HOME] if t is None else self.cd_candidates(t, w.cwd)
+            for choice in _choices(target):
+                t, alt = _alt(choice)
+                primary = w.primary and not alt
+                cands = self.cd_candidates(t, w.cwd)
                 for c in cands:
-                    self.reach(c, w.primary)
+                    self.reach(c, primary)
                 there = [c for c in cands if self.exists(c)]
                 if there:
-                    out.append(_World(there[0], w.cwd, w.stack, OK, w.primary))
+                    out.append(_World(there[0], w.cwd, stack, OK, primary))
+                elif all(self.not_directory(c) for c in cands):
+                    out.append(w._replace(status=FAILED))  # a file, not a directory: the cd fails
                 else:
-                    out.append(_World(cands[-1], w.cwd, w.stack, OK, w.primary))
+                    out.append(_World(cands[-1], w.cwd, stack, OK, primary))
                     out.append(w._replace(status=FAILED, primary=False))
         self.set_worlds(out)
 
@@ -1558,6 +2629,8 @@ class _Shell:
         verb_word, args = words[0], words[1:]
         if "/" in verb_word and not verb_word.startswith(SYSTEM_BIN):
             self.add(verb_word, bare=True)  # running a file by path reads it
+            if self.with_script(verb_word, lambda text: self.run_script(verb_word, text, None, args)):
+                return
         verb = os.path.basename(verb_word)
         if verb not in SILENT:
             self.output = None
@@ -1577,23 +2650,23 @@ class _Shell:
                 self.calls -= 1
             return
         if verb in self.functions and self.calls < 4 and self.inlined < 256:
-            # A function runs in the calling shell, with its own positional parameters.
+            # A function runs in the calling shell, with its own positional parameters and locals.
             for a in args:
                 self.add(a, bare=False)
             saved = {k: self.vars.get(k) for k in POSITIONAL}
             self.bind(args)
             self.calls += 1
             self.inlined += 1
+            self.locals.append({})
             try:
-                self.visit(self.functions[verb][0])
+                self.call(self.functions[verb][0])
             finally:
                 self.calls -= 1
-                for k, old in saved.items():
+                for k, old in [*self.locals.pop().items(), *saved.items()]:
                     if old is None:
                         self.vars.pop(k, None)
                     else:
                         self.vars[k] = old
-            self.set_status(MAYBE)
             return
         if verb in SUCCEEDS or (verb == "mkdir" and any(re.fullmatch(r"-[a-zA-Z]*p[a-zA-Z]*", a) for a in args)):
             self.set_status(OK)
@@ -1609,6 +2682,46 @@ class _Shell:
         if verb == "exit":
             self.set_status(EXITED)
             return
+        if verb in {"break", "continue"}:
+            n = int(args[0]) if args and args[0].isdigit() and int(args[0]) > 0 else 1
+            self.jump(verb, n)
+            return
+        if verb == "return":
+            status = None  # the status of the last command
+            if args:
+                status = (OK if int(args[0]) % 256 == 0 else FAILED) if re.fullmatch(r"-?\d+", args[0]) else MAYBE
+            self.jump("return", status=status)
+            return
+        if verb == "let":
+            v = None
+            for a in args:
+                v = self.arith(a)
+            self.set_status(FAILED if not args else MAYBE if v is None else OK if v else FAILED)
+            return
+        if verb == "unset":
+            self.unset(args)
+            return
+        if verb == "unalias":
+            if "-a" in args:
+                self.aliases = {}
+            for a in args:
+                self.aliases.pop(a, None)
+            self.set_status(OK)
+            return
+        if verb == "shift":
+            params = self.vars["@"].split(SPLIT) if self.vars.get("@") else []
+            n = int(args[0]) if args and args[0].isdigit() else 1 if not args else None
+            if n is None:
+                self.set_status(MAYBE)
+            elif n > len(params):
+                self.set_status(FAILED)
+            else:
+                self.bind(params[n:])
+                self.set_status(OK)
+            return
+        if verb == "set":
+            self.set_builtin(args)
+            return
         if verb in {"test", "["}:
             for a in args:
                 if a not in {"]", "!"} and not re.fullmatch(r"-[a-zA-Z]+", a):
@@ -1617,7 +2730,7 @@ class _Shell:
             return
         if verb == "read":
             lines = stdin.splitlines() if stdin is not None else None
-            self.bind_read(_read_names(args), None if lines is None else lines[0] if lines else "")
+            self.bind_read(_read_names(args), None if lines is None else lines[0] if lines else "", self.vars.get("IFS"))
             self.set_status(MAYBE if lines is None else OK if lines else FAILED)
             return
         if verb == "alias":
@@ -1628,11 +2741,9 @@ class _Shell:
             self.set_status(OK)
             return
         if verb in {"export", "declare", "typeset", "local", "readonly"}:
-            for a in args:
-                if ASSIGN.match(a):
-                    name, value = ASSIGN.match(a).groups()
-                    self.vars[name] = value
-                    self.add(value, bare=False)
+            flags = "".join(a for a in args if a.startswith(("-", "+")) and len(a) > 1 and not ASSIGN.match(a))
+            self.declaration(verb, flags, [a for a in args if not (a.startswith(("-", "+")) and len(a) > 1)])
+            self.set_status(OK)
             return
         if verb in SHELLS:
             self.shell_command(verb, args, stdin)
@@ -1641,7 +2752,28 @@ class _Shell:
             self.run(" ".join(args))
             return
         if verb in {"source", "."}:
-            if args:
+            if args and self.calls < 4 and self.inlined < 256:
+                self.add(args[0], bare=True)
+
+                def source(text):
+                    # A sourced file runs in this shell; `return` in it returns from the source.
+                    saved = {k: self.vars.get(k) for k in POSITIONAL} if args[1:] else {}
+                    if args[1:]:
+                        self.bind(args[1:])
+                    self.calls += 1
+                    self.inlined += 1
+                    try:
+                        self.call(text)
+                    finally:
+                        self.calls -= 1
+                        for k, old in saved.items():
+                            if old is None:
+                                self.vars.pop(k, None)
+                            else:
+                                self.vars[k] = old
+
+                self.with_script(args[0], source)
+            elif args:
                 self.add(args[0], bare=True)
             return
         if verb in WRAPPERS:
@@ -1661,11 +2793,26 @@ class _Shell:
                         for q in _expand(p):
                             self.removed.add(q)
                             self.made = {m for m in self.made if not _under(m, q)}
-        if verb in {"cd", "pushd", "chdir"}:
-            operands = [a for a in args if not (a.startswith("-") and a != "-")]
-            if verb == "pushd":
-                self.worlds = [w._replace(stack=(*w.stack, w.cwd)) for w in self.worlds]
-            if operands and operands[0] == "-":
+        if verb in {"cd", "chdir"}:
+            j = 0
+            while j < len(args) and re.fullmatch(r"-[LPe@]+", args[j]):
+                j += 1
+            if args[j:j + 1] == ["--"]:
+                j += 1
+            operands = args[j:]
+            target = operands[0] if operands else None
+            if target is not None and re.fullmatch(r"[+-]\d+", target):
+                # zsh takes `cd +N` and `cd -N` from the directory stack; bash, as a directory
+                # (+N) or an option it does not have (-N).
+                def stack():
+                    self.set_worlds([self.stack_cd(w, int(target[1:]), target[0]) for w in self.worlds])
+
+                def literal():
+                    self.chdir(target) if target[0] == "+" else self.set_status(FAILED)
+
+                {"zsh": stack, "posix": literal}.get(self.dialect, lambda: self.either(stack, literal))()
+                return
+            if target == "-":
                 if any(w.oldpwd is None for w in self.worlds):
                     # Back to where the shell was before this command (bash 3.2 has no $OLDPWD then).
                     self.chdir("$OLDPWD")
@@ -1674,12 +2821,21 @@ class _Shell:
                 for w in self.worlds:
                     self.reach(w.cwd, w.primary)
             else:
-                self.chdir(operands[0] if operands else None)
+                self.chdir(target)
+            return
+        if verb == "pushd":
+            self.pushd(args)
             return
         if verb == "popd":
-            self.set_worlds([_World(w.stack[-1], w.cwd, w.stack[:-1], OK, w.primary) if w.stack
-                             else w._replace(status=FAILED) for w in self.worlds])
+            self.popd(args)
             return
+        if verb == "dirs":
+            if "-c" in args:
+                self.worlds = [w._replace(stack=()) for w in self.worlds]
+            self.set_status(OK)
+            return
+        if verb == "apply_patch" and stdin:
+            self.patch(stdin)
         places = {w.cwd for w in self.worlds}
         if verb == "pwd":
             self.output = str(self.cwd) if self.known and len(places) == 1 else None
@@ -1700,6 +2856,9 @@ class _Shell:
             self.output = " ".join(args[1:])
         elif verb == "tee" or (verb == "cat" and not operands):
             self.output = stdin  # tee passes its input through, whatever files it also writes
+        if verb == "tee":
+            for a in operands:
+                self.wrote(a, stdin, append=any(re.fullmatch(r"-[a-z]*a[a-z]*", x) for x in args))
 
         bare = self.cwd != self.workdir
         skip: set[int] = set()
@@ -1752,8 +2911,11 @@ class _Shell:
                     chdirs.append(val)
 
         syntax = CODE_SYNTAX.get(verb) or (CODE_SYNTAX["python"] if re.match(r"python\d", verb) else None)
+        scripts: list[str] = []
         if syntax is not None:
-            skip |= self.code_args(syntax, args, code)
+            skip |= self.code_args(verb, syntax, args, code, scripts)
+        for word in scripts:
+            code += [t for t in self.scripts(word) if t is not None]  # a script or program file it runs
         for j, a in enumerate(args):
             if j in skip:
                 continue
@@ -1769,64 +2931,373 @@ class _Shell:
         if syntax is not None and stdin:
             self.scan_code(stdin)  # code (or data the code reads) on standard input
 
-    def code_args(self, syntax: dict, args: list[str], code: list[str]) -> set[int]:
-        """Read an interpreter's arguments: append its code to `code`, record files it reads, and
-        return the indices handled here (code, and option values that are neither code nor paths)."""
+    def set_builtin(self, args: list[str]) -> None:
+        """`set`: `--` (or a first operand) sets the positional parameters; `-a`/`+a` and
+        `-o allexport` turn exporting every assignment on and off."""
+        j, positional = 0, None
+        while j < len(args):
+            a = args[j]
+            if a in {"--", "-"}:
+                positional = args[j + 1:]
+                break
+            if a in {"-o", "+o"}:
+                if args[j + 1:j + 2] == ["allexport"]:
+                    self.allexport = a == "-o"
+                j += 2
+                continue
+            if a.startswith(("-", "+")) and len(a) > 1:
+                if "a" in a[1:]:
+                    self.allexport = a[0] == "-"
+                j += 1
+                continue
+            positional = args[j:]
+            break
+        if positional is not None:
+            self.bind(positional)
+        self.set_status(OK)
+
+    @staticmethod
+    def _dirs(w: _World) -> list[Path]:
+        """A world's directory stack as `dirs` prints it: the current directory first."""
+        return [w.cwd, *reversed(w.stack)]
+
+    @staticmethod
+    def _world(w: _World, dirs: list[Path], moved: bool) -> _World:
+        return _World(dirs[0], w.cwd if moved else w.oldpwd, tuple(reversed(dirs[1:])), OK, w.primary)
+
+    def stack_cd(self, w: _World, n: int, sign: str) -> _World:
+        """zsh `cd +N` / `cd -N`: to the Nth stack entry (counting from the left or the right),
+        which leaves the stack; the current directory is dropped."""
+        dirs = self._dirs(w)
+        k = n if sign == "+" else len(dirs) - 1 - n
+        if not 0 <= k < len(dirs):
+            return w._replace(status=FAILED)
+        self.reach(dirs[k], w.primary)
+        return self._world(w, [dirs[k], *(d for i, d in enumerate(dirs) if i not in {0, k})], k != 0)
+
+    def pushd(self, args: list[str]) -> None:
+        """pushd DIR (a pushd that fails leaves the stack as it was), pushd +N / -N (rotate the
+        stack to its Nth entry), pushd with no operand (swap the top two), and bash's `pushd -n DIR`
+        (add DIR without going there; zsh takes `-n` as a string to replace, and fails)."""
+        no_cd = any(re.fullmatch(r"-[qsLP]*n[qsLP]*", a) for a in args)
+        operands = [a for a in args if not re.fullmatch(r"-[nqsLP]+", a)]
+        target = operands[0] if operands else None
+        if target is not None and re.fullmatch(r"[+-]\d+", target):
+            out = []
+            for w in self.worlds:
+                dirs = self._dirs(w)
+                k = int(target[1:]) if target[0] == "+" else len(dirs) - 1 - int(target[1:])
+                if not 0 <= k < len(dirs):
+                    out.append(w._replace(status=FAILED))
+                    continue
+                self.reach(dirs[k], w.primary)
+                out.append(self._world(w, dirs[k:] + dirs[:k], k != 0))
+            self.set_worlds(out)
+            return
+        if target is None:
+            out, lone = [], []
+            for w in self.worlds:
+                dirs = self._dirs(w)
+                if len(dirs) < 2:
+                    lone.append(w)
+                else:
+                    self.reach(dirs[1], w.primary)
+                    out.append(self._world(w, [dirs[1], dirs[0], *dirs[2:]], True))
+            if lone and self.dialect != "posix":
+                # zsh: with nothing to swap, pushd goes to $HOME as `pushd ~` would.
+                self.set_worlds(lone)
+                self.chdir(None, push=True)
+                out += self.worlds
+            if lone and self.dialect != "zsh":
+                out += [w._replace(status=FAILED) for w in lone]
+            self.set_worlds(out)
+            return
+        if target == "-" and not no_cd:
+            # pushd -: to OLDPWD, as `cd -` goes.
+            if any(w.oldpwd is None for w in self.worlds):
+                self.chdir("$OLDPWD", push=True)
+                return
+            self.set_worlds([_World(w.oldpwd, w.cwd, (*w.stack, w.cwd), OK, w.primary) for w in self.worlds])
+            for w in self.worlds:
+                self.reach(w.cwd, w.primary)
+            return
+        if no_cd:
+            def bash():
+                out = []
+                for w in self.worlds:
+                    p = self.resolve(target, bare=True)
+                    if p is None:
+                        out.append(w._replace(status=FAILED))
+                        continue
+                    self.reach(p, w.primary)
+                    dirs = self._dirs(w)
+                    out.append(self._world(w, [dirs[0], p, *dirs[1:]], False))
+                self.set_worlds(out)
+
+            {"zsh": lambda: self.set_status(FAILED), "posix": bash}.get(
+                self.dialect, lambda: self.either(bash, lambda: self.set_status(FAILED)))()
+            return
+        self.chdir(target, push=True)
+
+    def popd(self, args: list[str]) -> None:
+        """popd (to the next stack entry, which it takes off), popd +N / -N (take the Nth entry off;
+        the 0th is the current directory, so the shell moves) and bash's `popd -n` (take the next
+        entry off without moving). With too few entries it fails and nothing changes."""
+        no_cd = any(re.fullmatch(r"-q*nq*", a) for a in args)
+        operands = [a for a in args if not re.fullmatch(r"-[nq]+", a)]
+        target = operands[0] if operands else None
+        if no_cd and self.dialect != "posix":
+            self.set_status(MAYBE)  # zsh's popd -n: left alone
+            if self.dialect == "zsh":
+                return
+        out = []
+        for w in self.worlds:
+            dirs = self._dirs(w)
+            if target is None:
+                k = 1 if no_cd else 0
+            elif re.fullmatch(r"[+-]\d+", target):
+                k = int(target[1:]) if target[0] == "+" else len(dirs) - 1 - int(target[1:])
+            else:
+                out.append(w._replace(status=FAILED))
+                continue
+            if len(dirs) < 2 and k == 0 and target is not None:
+                # `popd +0` with an empty stack: zsh leaves it alone, bash fails.
+                out.append(w._replace(status={"zsh": OK, "posix": FAILED}.get(self.dialect, MAYBE)))
+                continue
+            if len(dirs) < 2 or not 0 <= k < len(dirs):
+                out.append(w._replace(status=FAILED))
+                continue
+            if k == 0:
+                self.reach(dirs[1], w.primary)
+                out.append(self._world(w, dirs[1:], True))
+            else:
+                out.append(self._world(w, dirs[:k] + dirs[k + 1:], False))
+        self.set_worlds(out + ([w for w in self.worlds] if no_cd and self.dialect is None else []))
+
+    def scripts(self, word: str) -> list[str | None]:
+        """Each text a file the command runs (a script, a sourced file, an awk or sed program) may
+        have had, as far as the audit has it (None: none, or no such file): written earlier in the
+        transcript or in this command (`files`), or else read now from disk, if it lies in the work
+        directory or a temporary directory. A file on disk that this command writes only later may
+        not have been there yet."""
+        text, _ = _alt(self.expand(word))
+        if UNKNOWN in text or CHOICE.search(text) or "$" in text:
+            return []
+        p = _resolve(text, self.cwd, bare=True)
+        if p is None:
+            return []
+        out: list[str | None] = []
+        for alt in self.files.get(p, (None,)):
+            if alt is not None:
+                out.append(alt)
+                continue
+            out.append(self.disk(p))
+            if out[-1] is not None and p in self.wrote_later:
+                out.append(None)
+        return list(dict.fromkeys(out))
+
+    def disk(self, p: Path) -> str | None:
+        if not (_under(p, self.workdir) or any(_under(p, t) for t in TEMP_DIRS)) or PROTECTED_TEXT.search(str(p)):
+            return None
+        try:
+            if p.is_file() and p.stat().st_size <= 256_000:
+                return p.read_text(errors="replace")
+        except OSError:
+            pass
+        return None
+
+    def with_script(self, word: str, run) -> bool:
+        """`run(text)` for each text the file may have had (see `scripts`), keeping what any leaves;
+        False if the audit has none."""
+        alts = self.scripts(word)
+        if not any(a is not None for a in alts):
+            return False
+        runs = [(lambda a=a: run(a) if a is not None else None) for a in alts]
+        runs[0]() if len(runs) == 1 else self.either(*runs)
+        return True
+
+    def run_script(self, word: str, content: str, verb: str | None, args: list[str]) -> None:
+        """Run a script: shell code in a new shell process (the shell its `#!` line names; with none,
+        the calling shell runs it as sh), other code scanned for paths (see `scan_code`)."""
+        first = content.split("\n", 1)[0]
+        if verb is None and first.startswith("#!"):
+            parts = first[2:].split()
+            prog = os.path.basename(parts[0]) if parts else ""
+            if prog == "env":
+                rest = [x for x in parts[1:] if not x.startswith("-")]
+                prog = os.path.basename(rest[0]) if rest else ""
+            if prog not in SHELLS:
+                self.scan_code(content)
+                return
+            verb = prog
+        if self.calls >= 4 or self.inlined >= 256:
+            return
+        self.calls += 1
+        self.inlined += 1
+        try:
+            with self.process(verb or "sh"):
+                self.bind(args, zero=word)
+                self.run(content)
+        finally:
+            self.calls -= 1
+        self.set_status(MAYBE)
+
+    def wrote(self, word: str, content: str | None, append: bool = False) -> None:
+        """Note what a command wrote to a file (None: something the audit does not know)."""
+        text, _ = _alt(self.expand(word))
+        if UNKNOWN in text or CHOICE.search(text) or "$" in text or text in {"/dev/null", "/dev/stdout", "/dev/stderr"}:
+            return
+        p = _resolve(text, self.cwd, bare=True)
+        if p is None:
+            return
+        self.wrote_ever.add(p)
+        if content is not None and content and not content.endswith("\n"):
+            content += "\n"
+        if content is None:
+            self.files[p] = (None,)
+        elif append:
+            # Appended to a text the audit does not have: what is on disk at audit time.
+            self.files[p] = tuple(None if a is None else a + content for a in self.files.get(p, (None,)))
+        else:
+            self.files[p] = (content,)
+
+    def patch(self, text: str) -> None:
+        """What `apply_patch` writes: an added file's lines, and the lines an update adds (its
+        whole text is not in the patch)."""
+        path, lines, adding = None, [], False
+
+        def flush():
+            if path is not None:
+                added = "".join(x + "\n" for x in lines)
+                self.wrote_ever.add(path)
+                # An update's whole text is on disk at audit time; the added lines alone are a part.
+                self.files[path] = (added,) if adding else (added, None)
+
+        for line in text.splitlines():
+            m = re.match(r"\*\*\* (Add|Update|Delete) File: (.+)$", line)
+            if m:
+                flush()
+                p = _resolve(m.group(2).strip(), self.cwd, bare=True)
+                path, lines, adding = (p if m.group(1) != "Delete" else None), [], m.group(1) == "Add"
+                if m.group(1) == "Delete" and p is not None:
+                    self.files[p] = ("",)
+                if p is not None:
+                    self.reach(p, True)
+            elif path is not None and line.startswith("+"):
+                lines.append(line[1:])
+        flush()
+
+    def code_args(self, verb: str, syntax: dict, args: list[str], code: list[str], scripts: list[str]) -> set[int]:
+        """Read an interpreter's arguments: append its code to `code` and the files it runs as code (a
+        script, `awk -f`) to `scripts`, record files it reads, and return the indices handled here
+        (code, and option values that are neither code nor paths). See CODE_SYNTAX for clusters and
+        attached values. awk's `-v name=value` values are data, unless its code reads files or runs
+        commands (AWK_READS); jq's operands after `--args` or `--jsonargs` are values."""
         handled: set[int] = set()
-        letters = {o[1] for o in syntax.get("code", ()) if len(o) == 2}
-        given = False
+        codes, values, files = syntax.get("code", ()), syntax.get("values", {}), syntax.get("files", {})
+        attached = syntax.get("attached", ())
+        next_only = syntax.get("next_only", False)
+        given = module = False
+        data: list[tuple[int, str]] = []
+        operands: list[tuple[int, bool]] = []  # (index, a value after jq's --args)
+        as_values = False
+
+        def option(opt: str, att: str | None, j: int) -> int:
+            """Handle an option at args[j] with its attached value, if any; return the next index."""
+            nonlocal given, module
+            if opt in codes:
+                if att is not None:
+                    code.append(att)
+                elif j + 1 < len(args):
+                    code.append(args[j + 1])
+                    handled.add(j + 1)
+                    j += 1
+                given = True
+            elif opt in files or opt in values:
+                n = files.get(opt) or values.get(opt)
+                vals = ([att] if att is not None else []) + args[j + 1:j + 1 + n - (att is not None)]
+                handled.update(range(j + 1, j + 1 + n - (att is not None)))
+                j += n - (att is not None)
+                if opt in files and len(vals) == n:
+                    self.add(vals[-1], bare=True)
+                    if opt in PROGRAM_FILES:
+                        scripts.append(vals[-1])
+                        given = True
+                if opt in {"-v", "--assign"} and vals:
+                    data.append((j, vals[0]))
+                module = module or opt == "-m"
+            handled.add(j)
+            return j + 1
+
         j = 0
         while j < len(args):
             a = args[j]
             if a == "--":
-                j += 1
+                handled.add(j)
+                operands += [(k, as_values) for k in range(j + 1, len(args))]
                 break
             if not a.startswith("-") or a == "-":
-                break
-            name, eq, val = a.partition("=")
-            if a in syntax.get("code", ()) or (len(a) > 2 and not a.startswith("--") and a[-1] in letters
-                                                and a not in syntax.get("values", {})):
-                if j + 1 < len(args):
-                    code.append(args[j + 1])
-                    handled |= {j, j + 1}
-                    given = True
-                j += 2
-                continue
-            if eq and name in syntax.get("code", ()):
-                code.append(val)
-                handled.add(j)
-                given = True
+                if not syntax.get("anywhere"):
+                    operands += [(k, as_values) for k in range(j, len(args))]
+                    break
+                operands.append((j, as_values))
                 j += 1
                 continue
-            if a in syntax.get("files", {}):
-                n = syntax["files"][a]
-                for k in range(j + 1, min(j + 1 + n, len(args))):
-                    handled.add(k)
-                if j + n < len(args):
-                    self.add(args[j + n], bare=True)
-                handled.add(j)
-                given = given or a in {"-f", "--file", "--from-file"}
-                j += 1 + n
-                continue
-            if a in syntax.get("values", {}):
-                n = syntax["values"][a]
-                handled |= set(range(j, min(j + 1 + n, len(args))))
-                j += 1 + n
+            if a.startswith("--"):
+                name, eq, val = a.partition("=")
+                if verb == "jq" and name in {"--args", "--jsonargs"}:
+                    as_values = True
+                    handled.add(j)
+                    j += 1
+                    continue
+                j = option(name, val if eq else None, j)
                 continue
             if a in syntax.get("empty_value", ()) and j + 1 < len(args) and args[j + 1] == "":
                 handled |= {j, j + 1}  # BSD `sed -i ''`
                 j += 2
                 continue
-            j += 1
-        if syntax.get("first") and not given and j < len(args):
-            code.append(args[j])
+            k, nxt = 1, j + 1
+            while k < len(a):
+                opt, rest = "-" + a[k], a[k + 1:] or None
+                if opt in attached:
+                    break
+                if opt in syntax.get("digits", ()):
+                    k += 1
+                    while k < len(a) and a[k].isalnum() and (a[k].isdigit() or a[k] in "xX"):
+                        k += 1
+                    continue
+                if opt in codes or opt in files or opt in values:
+                    if next_only and rest is not None:
+                        # node: `-pe CODE` — the code is the next argument; the cluster goes on.
+                        handled.add(j)
+                        k += 1
+                        if opt in codes and all("-" + c in codes for c in rest):
+                            continue
+                        rest = None
+                    nxt = option(opt, rest, j)
+                    break
+                k += 1
             handled.add(j)
+            j = max(nxt, j + 1)
+        if syntax.get("first") and not given and operands:
+            k, _ = operands.pop(0)
+            code.append(args[k])
+            handled.add(k)
+        elif not syntax.get("first") and not given and not module and operands and verb not in {"osascript"}:
+            scripts.append(args[operands[0][0]])  # the script file the interpreter runs
+        for k, value in operands:
+            if value:
+                handled.add(k)  # jq --args: a string, not a file
+        if verb in {"awk", "gawk", "mawk", "nawk"} and (any(AWK_READS.search(c) for c in code) or scripts):
+            for _, v in data:
+                self.add(v.partition("=")[2], bare=False)
         return handled
 
     def shell_command(self, verb: str, args: list[str], stdin: str | None) -> None:
         """sh, bash and the like: `-c CODE [NAME [ARGS]]`, `-s [ARGS]` or no script (code on standard
-        input), or a script file. The arguments are positional parameters, and paths too. The code
-        runs as that shell runs code (see DIALECTS)."""
+        input), or a script file (run when the audit has its text; see `script`). The arguments are
+        positional parameters, and paths too. The code runs in a new shell process (see `process`),
+        as that shell runs code (see DIALECTS)."""
         j, flags = 0, ""
         while j < len(args) and args[j].startswith(("-", "+")) and args[j] not in {"-", "--"}:
             if args[j] in {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}:
@@ -1842,8 +3313,7 @@ class _Shell:
             code, rest = operands[0], operands[1:]
             for a in rest:
                 self.add(a, bare=False)
-            with self.child():
-                self.dialect, self.lastpipe = DIALECTS.get(verb), False
+            with self.process(verb):
                 self.bind(rest[1:], zero=rest[0] if rest else None)
                 self.run(code)
             return
@@ -1851,28 +3321,47 @@ class _Shell:
             for a in operands:
                 self.add(a, bare=False)
             if stdin:
-                with self.child():
-                    self.dialect, self.lastpipe = DIALECTS.get(verb), False
+                with self.process(verb):
                     self.bind(operands)
                     self.run(stdin)  # shell code on standard input
             return
         self.add(operands[0], bare=True)  # a script file
         for a in operands[1:]:
             self.add(a, bare=False)
+        self.with_script(operands[0], lambda text: self.run_script(operands[0], text, verb, operands[1:]))
 
     def wrapper(self, verb: str, args: list[str], stdin: str | None) -> None:
-        """A command that runs another: skip its own options (with their values) to the command.
-        `env -C dir`, `env -S string`, `sudo -D dir` and env's NAME=VALUE are followed."""
+        """A command that runs another: skip its own options (with their values, attached or not) to
+        the command. `env -C dir`, `env -S string`, `env -i`, `env -u NAME`, `sudo -D dir` and env's
+        NAME=VALUE are followed."""
         rest = list(args)
         values = WRAPPER_VALUES.get(verb, set())
         chdir_opts = WRAPPER_CHDIR.get(verb, set())
-        chdir, split, env = None, None, {}
+        chdir, split, env, unset, clear = None, None, {}, [], False
         while rest:
             a = rest[0]
             name, eq, val = a.partition("=")
             if a == "--":
                 rest = rest[1:]
                 break
+            if verb == "env" and a in {"-", "-i", "--ignore-environment"}:
+                clear = True
+                rest = rest[1:]
+                continue
+            if re.fullmatch(r"-[A-Za-z]{2,}.*", a) or (len(a) > 2 and a[:2] in values and not a.startswith("--")):
+                # A cluster of short options (`-i0`), or one with its value attached (`-C..`, `-n10`,
+                # `-S'cmd'`): split it into the option and its value.
+                k = 1
+                while k < len(a) and "-" + a[k] not in values:
+                    if verb == "env" and a[k] == "i":
+                        clear = True
+                    k += 1
+                if k < len(a):
+                    opt, att = "-" + a[k], a[k + 1:]
+                    rest = [opt, att, *rest[1:]] if att else [opt, *rest[1:]]
+                else:
+                    rest = rest[1:]
+                continue
             if eq and name.startswith("--"):
                 if name in chdir_opts:
                     chdir = val
@@ -1887,6 +3376,8 @@ class _Shell:
                     chdir = rest[1]
                 elif verb == "env" and a in {"-S", "--split-string"}:
                     split = rest[1]
+                elif verb == "env" and a in {"-u", "--unset"}:
+                    unset.append(rest[1])
                 elif a in WRAPPER_FILES.get(verb, ()):
                     self.add(rest[1], bare=True)
                 rest = rest[2:]
@@ -1914,10 +3405,18 @@ class _Shell:
                 items = stdin.split()
             for item in items:
                 self.add(item, bare=True)  # xargs passes these to the command as arguments
-        if verb in {"env", "sudo"} and (chdir is not None or env):
-            # The command runs in its own process: the directory change does not outlast it.
+        if verb in {"env", "sudo"} and (chdir is not None or env or unset or clear):
+            # The command runs in its own process, with env's environment (`-i`: only the
+            # assignments): the directory change does not outlast it.
             with self.child():
-                self.vars.update(env)
+                if clear:
+                    self.vars, self.exports, self.inherit, self.func_exports = {}, {}, False, set()
+                for name in unset:
+                    self.vars[name] = ""
+                    self.exports[name] = False
+                for name, value in env.items():
+                    self.vars[name] = value
+                    self.exports[name] = True
                 if chdir is not None:
                     self.chdir(chdir)
                 if rest:
@@ -1927,15 +3426,22 @@ class _Shell:
             self.command(rest, None if verb == "xargs" else stdin)
 
 
-def _shell(command: str, workdir: Path) -> _Shell:
+def _shell(command: str, workdir: Path, files: dict | None = None) -> _Shell:
     """Read the command twice: the first pass, taking every cd as one that may have failed, finds
-    the directories the command makes wherever it may be (see `_Shell.later`)."""
+    the directories the command makes wherever it may be (see `_Shell.later`). `files`: what earlier
+    calls wrote, by path (see `_Shell.files`), updated with what this command writes."""
+    files = {} if files is None else files
     first = _Shell(workdir)
     first.doubt = True
+    first.files = dict(files)
     first.run(command)
     shell = _Shell(workdir)
     shell.later = first.made_ever
+    shell.wrote_later = first.wrote_ever
+    shell.files = dict(files)
     shell.run(command)
+    files.clear()
+    files.update(shell.files)
     return shell
 
 
@@ -1964,13 +3470,18 @@ def _tool_calls(line: dict):
     elif kind == "mcp_tool_call":
         yield f"mcp:{item.get('server', '?')}/{item.get('tool', '?')}", item.get("arguments") or {}
     elif kind == "web_search":
-        yield "web_search", {"query": item.get("query", "")}
+        # The query, and the page it opened (an open_page action has a URL and may have no query).
+        action = item.get("action") if isinstance(item.get("action"), dict) else {}
+        yield "web_search", {"query": item.get("query", ""),
+                             **({"url": str(action["url"])} if action.get("url") else {})}
     elif kind == "collab_tool_call":
         yield "collab", item
 
 
-def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path]) -> tuple[str, str]:
-    """('web' | 'violation' | 'suspect' | 'local' | 'other', reason) for one tool call."""
+def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: dict | None = None) -> tuple[str, str]:
+    """('web' | 'violation' | 'suspect' | 'local' | 'other', reason) for one tool call. `files`: what
+    earlier calls in the transcript wrote, by path, so that a script written by one call and run by
+    a later one is read as it was written; updated with what this call writes."""
     text = json.dumps(inp) if not isinstance(inp, str) else inp
     outside_urls = URL.sub("", text)
     if tool.startswith("mcp:") or tool.startswith("mcp__"):
@@ -1983,7 +3494,7 @@ def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path]) -> tuple[
         return "web", ""
     paths, searches, notes, weak, alt, alt_searches, unknown = [], [], [], [], [], [], []
     if tool in {"shell", "Bash"}:
-        shell = _shell(inp.get("command", ""), workdir)
+        shell = _shell(inp.get("command", ""), workdir, files)
         paths, searches, notes, weak = shell.paths, shell.searches, shell.notes, shell.code_paths
         # Paths and searches from where the shell would be had a cd to a missing directory failed.
         alt, alt_searches = shell.alt_paths, shell.alt_searches
@@ -1992,6 +3503,15 @@ def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path]) -> tuple[
         p = _resolve(str(inp.get("file_path") or inp.get("path") or inp.get("notebook_path") or ""), workdir,
                      bare=True)
         paths = [p] if p else []
+        if p is not None and files is not None:
+            if tool == "Write" and isinstance(inp.get("content"), str):
+                files[p] = (inp["content"],)
+            elif tool == "Edit" and p in files and isinstance(inp.get("old_string"), str):
+                new = str(inp.get("new_string") or "")
+                files[p] = tuple(None if a is None else a.replace(inp["old_string"], new, -1 if inp.get("replace_all") else 1)
+                                 for a in files[p])
+            elif tool in {"Edit", "NotebookEdit"}:
+                files.pop(p, None)  # changed in a way the audit does not follow: read from disk
     elif tool in {"Grep", "Glob"}:
         base = _resolve(str(inp.get("path") or "."), workdir, bare=True) or workdir
         paths = [base]
@@ -2056,6 +3576,7 @@ def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path]) -> tuple[
 def audit_transcript(path: Path, workdir: str) -> dict:
     work = Path(workdir) if workdir else Path("/nonexistent-workdir")
     roots = protected_roots()
+    files: dict[Path, tuple] = {}  # what the run's calls wrote so far, by path (see `_Shell.files`)
     events = calls = web = 0
     lists: dict[str, list] = {"violations": [], "suspect": [], "local_calls": []}
     urls: list[str] = []
@@ -2069,7 +3590,7 @@ def audit_transcript(path: Path, workdir: str) -> dict:
         events += 1
         for tool, inp in _tool_calls(line):
             calls += 1
-            verdict, why = check_call(tool, inp, work, roots)
+            verdict, why = check_call(tool, inp, work, roots, files)
             text = json.dumps(inp)
             if verdict == "web":
                 web += 1

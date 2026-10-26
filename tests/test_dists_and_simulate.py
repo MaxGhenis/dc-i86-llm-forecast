@@ -2,7 +2,7 @@ import math
 
 import numpy as np
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from i86 import dists
@@ -342,7 +342,7 @@ def test_every_forecaster_with_any_chance_of_the_condition_counts_equally(graph,
     assert e["N|given"] is None and e["cutoff_fail|given"] is None
 
 
-def test_restricted_draws_satisfy_the_condition_and_weights_are_probabilities(graph):
+def test_restricted_draws_satisfy_the_condition_and_carry_its_probability(graph):
     from i86.simulate import condition_restriction
 
     fc = _standing_forecaster(graph, STATUS, {"certified": 0.5, "not_certified": 0.5})
@@ -352,16 +352,16 @@ def test_restricted_draws_satisfy_the_condition_and_weights_are_probabilities(gr
     assert condition_restriction(graph, cond, False) is None
     assert condition_restriction(graph, graph.nodes["lawsuit_filed"].exists_if, True) == {}
     d = simulate(graph, fc, 5000, [3], share_band=(0.5, graph.share_ceiling), restrict=r)
-    # ban_status depends only on the share, so the share is drawn exactly given standing and every
-    # draw carries the same weight: the probability of standing with the share in the band.
+    # ban_status depends only on the share, so the share is drawn exactly given standing: every
+    # draw has weight 1, and `_mass` is the probability of standing with the share in the band.
     assert np.all(d["ban_standing"])
-    assert np.all(d["_weight"] == d["_weight"][0])
+    assert np.all(d["_weight"] == 1.0) and np.all(d["_mass"] == d["_mass"][0])
     grid = np.linspace(0.5, graph.share_ceiling, 200_001)[1:]
     cdf = np.asarray(fc.values["yes_share"]["all"], dtype=float)
     dens = np.gradient(dists.share_cdf_at(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling, grid), grid)
     standing = np.interp(np.clip(grid, 0.505, 0.72), [0.505, 0.60, 0.72],
                          [STATUS[c]["certified"] + STATUS[c]["not_certified"] for c in ["yes_50.5", "yes_60.0", "yes_72.0"]])
-    assert d["_weight"][0] == pytest.approx(np.trapezoid(dens * standing, grid), rel=1e-3)
+    assert d["_mass"][0] == pytest.approx(np.trapezoid(dens * standing, grid), rel=1e-3)
     base = simulate(graph, fc, 5000, [3], share_band=(0.5, graph.share_ceiling))
     assert np.all(base["_weight"] == 1.0)
     # Shared random numbers for the other nodes: they draw their uniforms in the same order.
@@ -436,3 +436,35 @@ def test_tilted_and_defensive_estimates_agree(graph):
     b = describe(graph, "fattened_narrowed", mixed["fattened_narrowed"], mixed["_weight"])
     assert a["ess_min"] == pytest.approx(40_000)
     assert a["p"] == pytest.approx(b["p"], abs=0.02)
+
+
+@settings(max_examples=200, deadline=None)
+@given(st.lists(st.floats(0.0, 1.0), min_size=8, max_size=8), st.integers(-300, 0),
+       st.lists(st.floats(0.0, 1.0, exclude_max=True), min_size=1, max_size=20))
+def test_tilted_draws_depend_only_on_the_tilt_shape(ends, exponent, us):
+    # Invariant: scaling the tilt by any positive constant leaves the draws unchanged (the
+    # sampler's arithmetic runs on the tilt scaled by its largest value), so a condition with
+    # probability 1e-300 is drawn exactly as one with probability 1.
+    grid = [0.30, 0.35, 0.40, 0.45, 0.47, 0.48, 0.49, 0.50, 0.51, 0.52, 0.53, 0.55, 0.60, 0.65, 0.70,
+            0.75, 0.80, 0.85, 0.90]
+    cdf = np.linspace(0.02, 0.98, len(grid))
+    breaks = [0.5, 0.505, 0.6, 0.72]
+    knots = [0.5, 0.505, 0.55, 0.6, 0.65, 0.72, 0.8, 0.97]
+
+    def tilt(scale):
+        return lambda x: scale * np.interp(x, knots, ends)
+
+    if not any(ends):
+        return
+    small = 10.0 ** exponent
+    # Below about 2e-308 floats are subnormal, with too few digits to hold the tilt's shape.
+    assume(min(e for e in ends if e > 0) * small > 1e-290)
+    u = np.asarray(us)
+    try:
+        v1, z1 = dists.sample_share_tilted(grid, cdf, 0.15, 0.97, 0.5, 0.97, u, tilt(1.0), breaks + knots)
+    except ValueError:
+        return  # the shape gives the band no probability, at any scale
+    v2, z2 = dists.sample_share_tilted(grid, cdf, 0.15, 0.97, 0.5, 0.97, u, tilt(small), breaks + knots)
+    assert np.allclose(v1, v2, rtol=0, atol=1e-9)
+    assert z2 == pytest.approx(z1 * small, rel=1e-9)
+    assert np.all((v2 >= 0.5) & (v2 <= 0.97))  # u = 0 gives the open end; simulate clips it

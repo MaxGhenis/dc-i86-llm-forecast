@@ -105,9 +105,16 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks):
     jump at them). The band splits at the CDF's knots and those points into segments where the
     density is constant and the tilt linear, from s_a at the left end to s_b at the right, so a
     segment's mass is its share mass times (s_a + s_b) / 2 and, within it, the draw's position t in
-    [0, 1] inverts t (s_a + (s_b - s_a) t / 2) / ((s_a + s_b) / 2) = u. Weighting each draw by Z then
-    gives exact weighted means under the tilted distribution, with every draw counting equally.
-    Raises ValueError if Z is 0.
+    [0, 1] inverts t (s_a + (s_b - s_a) t / 2) / ((s_a + s_b) / 2) = u. Every draw then counts
+    equally under the tilted distribution.
+
+    The draws depend only on the tilt's shape, so the arithmetic runs on the tilt and the masses
+    scaled by their largest values, and each segment's inversion on its ends scaled by the larger:
+    a probability as small as 1e-300 would otherwise underflow when squared or multiplied. (Below
+    about 2e-308 floats are subnormal and too coarse to hold the tilt's shape.) Z, the
+    product of the scales and the scaled sum, may itself underflow to 0 for a condition far below
+    1e-300; the draws are exact all the same. Raises ValueError only if the tilt gives the band no
+    probability at all.
     """
     xs, fs = share_knots(grid, cdf, floor, ceiling)
     inner = np.concatenate([xs, np.asarray(breaks, dtype=float)])
@@ -121,10 +128,12 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks):
     slope = (f2 - f1) * 3
     sa = np.clip(f1 - slope / 3, 0.0, None)
     sb = np.clip(f2 + slope / 3, 0.0, None)
-    target = np.clip(mass, 0.0, None) * (sa + sb) / 2
-    z = float(target.sum())
-    if not z > 0:
+    mass = np.clip(mass, 0.0, None)
+    top, big = max(float(sa.max(initial=0.0)), float(sb.max(initial=0.0))), float(mass.max(initial=0.0))
+    target = (mass / big) * (sa / top + sb / top) / 2 if top > 0 and big > 0 else np.zeros(len(mass))
+    if not target.sum() > 0:
         raise ValueError(f"no probability on Yes shares in ({lo}, {hi}] where the condition can hold")
+    z = big * top * float(target.sum())
     keep = target > 0
     a, b, sa, sb, target = a[keep], b[keep], sa[keep], sb[keep], target[keep]
     q = target / target.sum()
@@ -133,7 +142,8 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks):
     u = np.asarray(u, dtype=float)
     seg = np.minimum(np.searchsorted(cq, u, side="right"), len(q) - 1)
     r = np.clip((u - (cq[seg] - q[seg])) / q[seg], 0.0, 1.0)
-    s0, s1 = sa[seg], sb[seg]
+    end = np.maximum(sa[seg], sb[seg])  # positive: a kept segment has positive tilt somewhere
+    s0, s1 = sa[seg] / end, sb[seg] / end
     den = s0 + np.sqrt(s0 * s0 + r * (s1 * s1 - s0 * s0))
     t = np.where(den > 0, r * (s0 + s1) / np.where(den > 0, den, 1.0), 0.0)
     return a[seg] + np.clip(t, 0.0, 1.0) * (b[seg] - a[seg]), z

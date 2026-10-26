@@ -22,9 +22,10 @@ however unlikely the forecaster thinks the condition is.
 When the restricted node depends on nothing but the Yes share (no states, and an `exists_if`, if any,
 on `passes` alone), as `ban_status` does, the chance that a draw meets the restriction is a
 piecewise-linear function of the share, and the share is drawn exactly from the forecaster's
-distribution tilted by it (dists.sample_share_tilted). Every draw then has the same weight, the
-condition's probability within the band: weighted means are exact, each draw counts fully, and a
-forecaster who gives the condition any probability is never dropped, whatever the sample size.
+distribution tilted by it (dists.sample_share_tilted). Every draw then has weight 1 (the
+condition's probability within the band, Z, is kept as `_mass`): means are exact, each draw counts
+fully, and a forecaster who gives the condition any probability is never dropped, whatever the
+sample size or however small the probability.
 Otherwise the share is drawn defensively (`defensive`, see dists.sample_share_band), so a condition
 that holds only at shares the forecaster thinks unlikely still gets draws; the share's weight
 multiplies into `_weight`.
@@ -196,19 +197,21 @@ def simulate(graph: Graph, fc: Forecasts, n: int, seed, fixed_share: float | Non
     if fixed_share is not None:
         v = np.full(n, float(fixed_share))
     elif tilt is not None:
-        # The share given the restriction, drawn exactly; each draw's weight is the restriction's
-        # probability within the band.
+        # The share given the restriction, drawn exactly, so every draw counts equally. The
+        # restriction's probability within the band (which can underflow to 0 for a condition far
+        # below 1e-300) is kept apart, never as a weight.
         lo, hi = share_band
         try:
             v, z = dists.sample_share_tilted(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling,
                                              lo, hi, u_share, tilt[1], tilt[2])
+            feasible = True
         except ValueError:
             # The restriction cannot hold in the band: every draw gets weight 0.
             v, _ = dists.sample_share_band(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling,
                                            lo, hi, u_share)
-            z = 0.0
+            z, feasible = 0.0, False
         v = np.clip(v, np.nextafter(lo, 1.0) if lo >= 0.5 else lo, hi)
-        weight = np.full(n, z)
+        weight = np.full(n, 1.0 if feasible else 0.0)
     elif share_band is not None:
         # The forecaster's Yes-share distribution truncated to (lo, hi].
         lo, hi = share_band
@@ -272,6 +275,8 @@ def simulate(graph: Graph, fc: Forecasts, n: int, seed, fixed_share: float | Non
         else:
             raise ValueError(node.kind)
     draws["_weight"] = weight
+    if tilt is not None:
+        draws["_mass"] = np.full(n, z)
     return draws
 
 
