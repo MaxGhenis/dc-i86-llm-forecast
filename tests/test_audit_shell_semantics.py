@@ -333,6 +333,21 @@ def test_array_expansions_match_real_shells(review_area, values, expression, ifs
 
 
 @settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=FIXTURE_OK)
+@given(st.lists(st.sampled_from(["", "MOCK", "a b", "a:b", " "]), max_size=4),
+       st.sampled_from(["${a[*]}", "${a[@]}", "$a", "$*", "$@", "x${a[*]}y"]),
+       st.sampled_from([None, ":", ": ", " :", "\t:", "::", "x", "", " "]), st.booleans())
+def test_unquoted_lists_join_then_split_like_real_shells(review_area, values, expression, ifs, wordsplit):
+    """Where parameters are split, an unquoted list is joined at IFS's first character and then
+    split, so empty elements can become empty fields (IFS=: and ('' MOCK) give two)."""
+    setup = ("setopt shwordsplit 2>/dev/null; " if wordsplit else "") + (
+        "" if ifs is None else f"IFS={shlex.quote(ifs)}; ")
+    listing = " ".join(map(shlex.quote, values))
+    program = setup + f"a=({listing}); set -- {listing}; set -- {expression}"
+    for shell, dialect in ((BASH, "posix"), (ZSH, "zsh")):
+        _assert_expanded_parameters(review_area, program, shell, dialect)
+
+
+@settings(max_examples=EXAMPLES, deadline=None, suppress_health_check=FIXTURE_OK)
 @given(st.sampled_from([None, "", "MOCK", "scratch"]), st.sampled_from(["=", ":="]),
        st.sampled_from(["MOCK", "scratch", "a b", ""]), st.booleans())
 def test_assigning_expansions_preserve_assigned_values(review_area, initial, operator, default, subshell):

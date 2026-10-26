@@ -342,9 +342,10 @@ ALT = "\x04"
 # Marks inside a word's value until it is split into fields (see `_fields`): quoted text
 # (\x11...\x12), an unquoted parameter or arithmetic expansion (\x0e...\x0f) and an unquoted
 # command substitution (\x10...\x0f). `_Shell.value` leaves them out unless asked for them.
+# LIST, just inside an unquoted expansion's mark, says it is $@, $* or an array's [@] or [*].
 Q_OPEN, Q_CLOSE, FIELD, FIELD_CMD, FIELD_END = "\x11", "\x12", "\x0e", "\x10", "\x0f"
-ARRAY_OPEN, ARRAY_CLOSE, UNSET, TILDE = "\x13", "\x14", "\x15", "\x16"
-_UNMARK = str.maketrans("", "", Q_OPEN + Q_CLOSE + FIELD + FIELD_CMD + FIELD_END)
+ARRAY_OPEN, ARRAY_CLOSE, UNSET, TILDE, LIST = "\x13", "\x14", "\x15", "\x16", "\x17"
+_UNMARK = str.maketrans("", "", Q_OPEN + Q_CLOSE + FIELD + FIELD_CMD + FIELD_END + LIST)
 # Directories where a script a command runs may be read at audit time, besides the work directory.
 TEMP_DIRS = (Path("/tmp"), Path("/private/tmp"), Path("/var/folders"), Path("/private/var/folders"))
 # A command's exit status as far as the audit can tell, in each place the shell could be.
@@ -552,13 +553,17 @@ def _fields(word: str, ifs: str | None, params: bool, literal: bool = False,
     here-strings). A word made only of unquoted expansions that leave nothing becomes no field;
     quoted text makes one, but in bash an empty quoted part counts only in a word with nothing
     else in it. zsh (`bash=False`) also makes an empty last field after a final IFS character
-    other than white space. $@'s separators always end a field. Where IFS, or a part
+    other than white space. Where parameters are split, an unquoted $@, $* or array is joined at
+IFS's first character and split with the rest (with IFS empty its separators end a field and empty
+elements drop); bash's lists also start with no empty field when they begin with IFS white space
+and another IFS character. $@'s separators otherwise always end a field. Where IFS, or a part
     that would be split, is not known, the word stays one field (unknown, where IFS is)."""
     bash = params if bash is None else bash
     ifs = " \t\n" if ifs in (None, UNSET) else ifs
     white = {c for c in ifs if c in " \t\n"}
     chars: list[tuple[str | None, bool, bool]] = []  # (character or None for quoting, split, expanded)
     mode = None
+    listing = first_listed = seen = False  # first_listed: the word's first character is from a LIST expansion
     for c in word:
         if c == Q_OPEN:
             mode = Q_OPEN
@@ -566,8 +571,12 @@ def _fields(word: str, ifs: str | None, params: bool, literal: bool = False,
         elif c in (FIELD, FIELD_CMD):
             mode = c
         elif c in (Q_CLOSE, FIELD_END):
-            mode = None
+            mode, listing = None, False
+        elif c == LIST:
+            listing = True
         else:
+            if not seen:
+                first_listed, seen = listing and mode == FIELD, True
             split = mode == FIELD_CMD or (mode == FIELD and params) or (mode is None and literal)
             chars.append((c, split, mode in (FIELD, FIELD_CMD)))
     live = "".join(c for c, split, _ in chars if split and c)
@@ -582,6 +591,23 @@ def _fields(word: str, ifs: str | None, params: bool, literal: bool = False,
         # In bash, a quoted empty part ('' or "") keeps the word only if nothing else is in it:
         # `''$y` with y=' ' is no word at all.
         chars = [x for x in chars if x[0] is not None]
+    if params and ifs:
+        # Where parameters are split (bash, sh, zsh under SH_WORD_SPLIT), an unquoted $@, $* or
+        # array is joined at IFS's first character and the result split, so with IFS=: the empty
+        # element of ('' MOCK) is an empty field. With IFS empty the elements stay apart and empty
+        # ones drop, as below.
+        chars = [(ifs[0], s, e) if c == SPLIT and s else (c, s, e) for c, s, e in chars]
+        if bash and first_listed and chars and chars[0][1] and chars[0][0] in white:
+            # bash 3.2's lists, unlike its scalars, start with no empty field when they begin
+            # with IFS white space and another IFS character: IFS=': ' a=(' ' M) gives M alone.
+            j = 0
+            while j < len(chars) and chars[j][1] and chars[j][0] in white:
+                j += 1
+            if j < len(chars) and chars[j][1] and chars[j][0] in ifs:
+                j += 1
+                while j < len(chars) and chars[j][1] and chars[j][0] in white:
+                    j += 1
+                chars = chars[j:]
     out: list[str] = []
     cur: list[str] = []
     started = hard = False  # hard: the last delimiter had an IFS character other than white space
@@ -1810,7 +1836,8 @@ class _Shell:
             name = node.named_children[0] if node.named_children else None
             if name is not None and name.type in {"variable_name", "special_variable_name"}:
                 # Unquoted, $* is one word per parameter before splitting, like $@.
-                return FIELD + "\x01" + ("@" if _text(name) == "*" else _text(name)) + "\x02" + FIELD_END
+                listed = LIST if _text(name) in {"@", "*"} else ""
+                return FIELD + listed + "\x01" + ("@" if _text(name) == "*" else _text(name)) + "\x02" + FIELD_END
             return FIELD + UNKNOWN + FIELD_END
         if t == "expansion":
             text = _text(node)
@@ -1833,10 +1860,11 @@ class _Shell:
                         value = UNKNOWN
                     return FIELD + value + FIELD_END
                 # Unquoted * splits into elements as @ does; quoted * is joined above.
-                return FIELD + "\x01" + name + "[@]\x02" + FIELD_END
+                return FIELD + LIST + "\x01" + name + "[@]\x02" + FIELD_END
             m = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#])\}", text)
             if m:
-                return FIELD + "\x01" + ("@" if m.group(1) == "*" else m.group(1)) + "\x02" + FIELD_END
+                listed = LIST if m.group(1) in {"@", "*"} else ""
+                return FIELD + listed + "\x01" + ("@" if m.group(1) == "*" else m.group(1)) + "\x02" + FIELD_END
             m = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*|[0-9]+)(:?[\-=+?])(.*)\}", text, re.S)
             if m:
                 name, op = m[1], m[2]
