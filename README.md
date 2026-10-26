@@ -50,14 +50,16 @@ each forecaster's own conditional distribution equally. Pooling the raw draws of
 would let the forecasters who expect it to pass dominate the "passes" column. Questions defined only
 under a condition (the ban standing, say) report both the conditional probability and the joint one.
 The conditional comes from a further simulation. When the condition turns on one node (the ban's
-status, say), that node is drawn only from the values that satisfy it, each draw weighted by the
-forecaster's probability of those values at its Yes share; when it turns on more than one, the draws
-where it holds are kept. Either way the Yes share is drawn from a defensive mixture: half from the
-forecaster's own distribution and half spread evenly over the stretches of share it gives any
-probability, each draw weighted to undo the mixture. So a condition that holds only at shares the
-forecaster thinks unlikely still gets draws, and a forecaster that gives the condition 1 in 10,000
-still counts as much as one that gives it 9 in 10; only one that gives it zero is left out, and the
-report says so.
+status), that node is drawn only from the values that satisfy it. The ban's status depends on nothing
+but the Yes share, so the chance that a draw meets the condition is linear in the share between the
+forecast cells, and the share is drawn exactly from the forecaster's distribution tilted by that
+chance. Every draw then counts fully and carries the same weight, the condition's probability, and a
+forecaster that gives the condition 1 in 10,000 counts as much as one that gives it 9 in 10; only one
+that gives it zero is left out, and the report says so. For a condition this cannot handle (one on a
+node that also depends on other nodes, or on more than one node; the current map has none), each draw
+is weighted by its probability of the condition, or the draws where it holds are kept, and the Yes
+share comes from a defensive mixture: half from the forecaster's own distribution and half spread
+evenly over the stretches of share it gives any probability, each draw weighted to undo the mixture.
 Each node is reported:
 - if the measure fails and if it passes (their gap also carries what the result says about voters, so
   it is not an effect);
@@ -118,8 +120,9 @@ repository, and the prompt tells them not to read local files. No answer enters 
 every run has finished: the `claude` and `manual` backends write to a staging directory, and
 `collect` copies answers in only when no run of any backend is still going. `prepare`, `abandon` and
 `collect` take one lock on the staging area, and `collect` checks the list of runs again under it
-before copying anything, so a run dispatched while it works holds it back. A run marked abandoned
-stays abandoned even if its process later reports back.
+before copying anything, so a run dispatched while it works holds it back. The lock also holds
+between threads of one process. A run marked abandoned stays abandoned even if its process later
+reports back or an answer is staged for it; what arrives is kept as the run's `backend_state`.
 
 Each forecaster reports, before researching, anything in its context other than the brief that
 mentions the measure (`forecaster.prior_context`). `simulate` excludes a run whose report mentions
@@ -127,30 +130,46 @@ these questions, other than a bare "none"; after reading it, `--accept-prior <la
 
 `i86 audit` reads each run's own transcript and parses every shell command with tree-sitter's bash
 grammar: quoting, pipes, here-documents, subshells, command substitutions, redirections (`cat <file`),
-`cd`, `pushd` and `popd` with their options, simple variables, nested `sh -c` and `eval`, wrappers
-such as `xargs` and `env`, shell code piped into a shell, and paths inside interpreter code, whether
-it is an argument (`python -c`) or arrives on standard input. A `cd` inside a subshell, a command
-substitution or a pipeline stage does not move the commands after it. Running a file by path counts
-as reading it, and so does a `file://` URL. The audit resolves every local path against the tracked
-directory, expands globs, and reads each search tool's options as that tool does, so it does not
-mistake a search pattern for a path. Scratch directories are often gone by the time the audit runs,
-so after a `cd` to a missing directory it also resolves relative paths from where the shell would be
-had that `cd` failed (not inside an `&&` chain, which stops at a failed `cd`). These exclude the run:
-- a path in, or text naming, the repository, the staging area, another run's work directory, an
-  agent's home or job store, or the author's notes;
+loops, functions and the rest, with the grammar's misreading of `!` before a compound command
+repaired. It tracks the working directory as the set of places the shell could be, each with the
+last command's exit status. `&&`, `||`, `if`, loops and `case` run their parts only where the status
+allows (the audit knows `true`, `false`, `cd`, tests of known values and files present, literal
+`case` values; after anything else, either way may have run). A `cd`, `pushd` or `popd` moves every
+place, following `CDPATH`, functions, aliases, `eval`, `env -C` and the like, and positional
+parameters for `sh -c` and shell code on standard input; one inside a subshell, a command
+substitution, a pipeline stage or a background job does not move the commands after it. zsh is the
+exception twice over: it runs a pipeline's last stage in the current shell (`x | cd d`, a `while read`
+loop at the end of a pipeline), and of `cd a && make &` it runs only `make` in the background. The
+audit follows the shell a command names (`zsh -c`, `bash -c`) and otherwise keeps both outcomes. Scratch
+directories are often gone by the time the audit runs, so a `cd` to a missing directory (or one the
+command makes only later) leaves the shell either there or where it was, and the second place is an
+alternative. Variables, `read` from a known input, and variables, functions and aliases that
+branches may each have set differently (or not at all) are followed in each version. The audit resolves every local path from every place, expands globs, takes a command's own
+directory option (`git -C`, `tar -C`) as a further base, and reads each search tool's and
+interpreter's options as that tool does, so it mistakes neither a search pattern nor a `python -c`
+or awk program for a path, while still scanning that code for paths and for a literal `os.chdir`.
+Running a file by path counts as reading it, and so does a `file://` URL. These exclude the run:
+- a path resolved from a main place in, or text naming, the repository, the staging area, another
+  run's work directory, an agent's home or job store, or the author's notes;
 - a search rooted at the home directory or above, or `locate` or `mdfind`;
-- a content search, or a name search whose results feed another command, rooted above any of those;
+- a content search, or a name search whose results reach another command (through `xargs`, a shell,
+  a read loop, a command substitution, `find -exec` or `fd -x`), rooted above any of those;
 - any MCP tool.
 
 Calls that warrant reading without excluding the run are listed as suspect: a name-only search above a
 protected place, a listing of the home directory, a relative path after a `cd` the audit cannot follow
-(an unexpandable target, or a `cd` at the end of a pipeline), a relative path that would reach a
-protected place had a `cd` to a missing directory failed, a command the parser cannot fully read, a
-path outside the work directory next to a term from these questions, a web call that opens this
-repository (it holds no answers until every run has finished), and sub-agent calls. The summary counts them per run. A run with no parseable
+(an unexpandable target, more possible places than it tracks), a path
+or search from an alternative place, or with a part the audit cannot work out, that would reach a
+protected place, a command the parser cannot fully read, a path outside the work directory next to a
+term from these questions, a web call that opens this repository (it holds no answers until every run
+has finished), and sub-agent calls. The summary counts them per run. A run with no parseable
 transcript fails the audit, and `simulate` pools only runs that pass. `--allow-unaudited` admits manual
-runs, which have no transcript. The audit catches accidental and casual reads, not a forecaster set on
-hiding them.
+runs, which have no transcript. Whether a directory exists is judged at audit time, apart from what the
+same command makes or removes. A generated-program test (`tests/test_audit_shell_differential.py`)
+runs each program under bash and zsh and checks that every program that reads a MOCK answer is
+reported, that the audit's possible places include where the shell ended, and that where the audit
+has one place it is that one. The audit catches
+accidental and casual reads, not a forecaster set on hiding them.
 
 ## Files
 
@@ -163,9 +182,10 @@ hiding them.
 - `src/i86/`: graph loading, response checks, samplers, simulator, pooling, report, runners and audit.
 - `tests/`: property-based tests of the samplers and simulator invariants; differential tests of the
   decisive-ballot formula against its closed form and of the weighted conditionals against plain
-  filtering; audit cases, including every bypass found in review; and the staging and pooling rules.
-  `test_review_r3_*.py` are the third independent review's probes, kept as regression tests. Test
-  responses are labelled MOCK.
+  filtering; audit cases, including every bypass found in review, and the audit against bash and zsh
+  on generated programs; and the staging and pooling rules. `test_review_r3_*.py` to
+  `test_review_r5_*.py` are the independent reviews' probes, kept as regression tests. Test responses
+  are labelled MOCK.
 
 ## What the numbers are
 

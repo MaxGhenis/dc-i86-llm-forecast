@@ -20,12 +20,15 @@ runs contributed.
 
 For a question defined only under a condition (the ban still standing, say), `<cond>` holds the joint
 probability P(condition and event) and `<cond>|given` the conditional P(event | condition). The
-conditional comes from a further simulation restricted to worlds where the condition holds, weighted
-by each draw's probability of it, with the Yes share drawn from a defensive mixture that reaches every
-share the forecaster gives any probability (see simulate.py). A forecaster that thinks the condition
-unlikely still contributes a full set of draws. One that gives it no probability is left out; so is one
-whose draws all miss it, which takes a condition that also hinges on something rare besides the Yes
-share. The summaries' run counts show either.
+conditional comes from a further simulation restricted to worlds where the condition holds. When it
+turns on one node that depends only on the Yes share (the ban's status), the share is drawn exactly
+from the forecaster's distribution tilted by the chance of the condition, and every draw carries the
+same weight. Otherwise each draw is weighted by its probability of the condition, with the Yes share
+drawn from a defensive mixture that reaches every share the forecaster gives any probability (see
+simulate.py). A forecaster that thinks the condition unlikely still contributes a full set of draws.
+One that gives it no probability is left out; so, in the fallback only, is one whose draws all miss
+it, which takes a condition that also hinges on something rare besides the Yes share. The summaries'
+run counts show either.
 
 Y against N is not an effect: it also carries what the result says about public opinion. Every number
 here is a model forecast, not an observation.
@@ -100,6 +103,7 @@ def describe_parts(graph: Graph, key: str, parts: list[np.ndarray], weights: lis
             if not keep.any():
                 continue
             x, w = x[keep], w[keep]
+            w = w / w.max()  # tiny weights (a condition of probability 1e-200) would underflow when squared
         pairs.append((x, w))
     if not pairs:
         return None

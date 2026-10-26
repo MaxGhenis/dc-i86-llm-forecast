@@ -13,7 +13,9 @@ still going. A run that will never finish (a killed process, a manual run given 
 After collection, `dispatch` refuses new runs unless they are marked `--late`, and the report flags
 late runs, which could have found the others' answers. Dispatch, abandon and collect hold a lock
 file beside the staging directory while they check and change runs, so no run can start between
-collect's check and its copy.
+collect's check and its copy. The lock is reentrant within one thread; other threads and other
+processes wait for it. Whatever a run's backend reports after it is abandoned (a Claude process
+that returns, a manual answer saved late) is recorded as `backend_state`, never as its state.
 
 Backends:
 - `subfleet`: Max Ghenis's supervised lanes (`subfleet run --task research`).
@@ -30,6 +32,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,30 +46,33 @@ STAGE = Path.home() / ".cache" / "dc-i86-llm-forecast-staging"
 FINISHED = {"succeeded", "failed", "cancelled", "canceled", "lost", "killed", "expired", "abandoned"}
 
 
-_lock_depth = 0
+# The file lock serializes processes; the mutex serializes threads within one, and is what makes
+# the lock reentrant for the thread that holds it.
+_mutex = threading.RLock()
+_held = threading.local()
 
 
 @contextmanager
 def bookkeeping_lock():
-    """Hold the runs' lock file (reentrant within a process)."""
-    global _lock_depth
-    if _lock_depth:
-        _lock_depth += 1
-        try:
-            yield
-        finally:
-            _lock_depth -= 1
-        return
-    path = STAGE.with_name(STAGE.name + ".lock")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        _lock_depth = 1
-        try:
-            yield
-        finally:
-            _lock_depth = 0
-            fcntl.flock(f, fcntl.LOCK_UN)
+    """Hold the runs' lock file. Reentrant within a thread; other threads and processes wait."""
+    with _mutex:
+        if getattr(_held, "depth", 0):
+            _held.depth += 1
+            try:
+                yield
+            finally:
+                _held.depth -= 1
+            return
+        path = STAGE.with_name(STAGE.name + ".lock")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            _held.depth = 1
+            try:
+                yield
+            finally:
+                _held.depth = 0
+                fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def run_dirs() -> list[Path]:
@@ -209,9 +215,16 @@ def dispatch_claude(label: str, prompt_path: Path, prompt_sha: str, model: str, 
     final, served = parse_stream(proc.stdout)
     if final:
         (stage / "response.md").write_text(final)
-    meta.update(finished_at=now(), rc=proc.returncode, model_served=served, state="succeeded" if final else "failed",
-                transcript=str(stage / "transcript.jsonl"), stderr=proc.stderr[-2000:])
-    write_meta(run_dir, meta)
+    with bookkeeping_lock():
+        meta = read_meta(run_dir)  # fresh: the run may have been abandoned while it ran
+        outcome = "succeeded" if final else "failed"
+        if meta.get("state") == "abandoned":
+            meta["backend_state"] = outcome  # abandonment is final
+        else:
+            meta["state"] = outcome
+        meta.update(finished_at=now(), rc=proc.returncode, model_served=served,
+                    transcript=str(stage / "transcript.jsonl"), stderr=proc.stderr[-2000:])
+        write_meta(run_dir, meta)
     return meta
 
 
@@ -253,6 +266,13 @@ def seal(run_dir: Path) -> bool:
     meta = read_meta(run_dir)
     if (run_dir / "response.md").exists():
         return True
+    if meta.get("state") == "abandoned":
+        # Abandonment is final, whatever arrived since; a manual answer saved anyway is noted.
+        if (meta.get("backend") == "manual" and staged_response(run_dir.name).exists()
+                and meta.get("backend_state") != "staged"):
+            meta["backend_state"] = "staged"
+            write_meta(run_dir, meta)
+        return False
     if meta.get("backend") == "manual" and staged_response(run_dir.name).exists():
         meta["state"] = "succeeded"
     if meta.get("state") != "succeeded":

@@ -17,9 +17,17 @@ defined only under that condition. The restricted node is drawn from the forecas
 to the allowed values and renormalized, and each draw carries the weight `_weight`: the probability
 the forecaster gave those values at that draw. Weighted means over the draws are then the
 forecaster's conditional distribution given the condition (self-normalized importance sampling),
-however unlikely the forecaster thinks the condition is. Such simulations also draw the Yes share
-defensively (`defensive`, see dists.sample_share_band), so a condition that holds only at shares the
-forecaster thinks unlikely still gets draws; the share's weight multiplies into `_weight`.
+however unlikely the forecaster thinks the condition is.
+
+When the restricted node depends on nothing but the Yes share (no states, and an `exists_if`, if any,
+on `passes` alone), as `ban_status` does, the chance that a draw meets the restriction is a
+piecewise-linear function of the share, and the share is drawn exactly from the forecaster's
+distribution tilted by it (dists.sample_share_tilted). Every draw then has the same weight, the
+condition's probability within the band: weighted means are exact, each draw counts fully, and a
+forecaster who gives the condition any probability is never dropped, whatever the sample size.
+Otherwise the share is drawn defensively (`defensive`, see dists.sample_share_band), so a condition
+that holds only at shares the forecaster thinks unlikely still gets draws; the share's weight
+multiplies into `_weight`.
 """
 
 from __future__ import annotations
@@ -123,6 +131,39 @@ def node_params(graph: Graph, node: Node, fc: Forecasts, v: np.ndarray, state_id
     return out
 
 
+def _allowed_mass(node: Node, params: np.ndarray, exists: np.ndarray, allowed) -> np.ndarray:
+    """Per draw, the forecaster's probability that a binary or categorical node takes one of
+    `allowed` (None in `allowed` stands for 'does not exist')."""
+    if node.kind == "binary":
+        p_true = np.where(exists, params[:, 0], 0.0)
+        return (p_true if True in allowed else 0.0) + ((1 - p_true) if False in allowed else 0.0)
+    keep = np.array([o in allowed for o in node.options], dtype=float)
+    return np.where(exists, (params * keep[None, :]).sum(axis=1), 1.0 if None in allowed else 0.0)
+
+
+def exact_tilt(graph: Graph, fc: Forecasts, restrict: dict | None):
+    """(node id, tilt, breaks) when a restriction can be met by drawing the share exactly: one
+    binary or categorical node with no states whose `exists_if`, if any, mentions only `passes`.
+    `tilt(v)` is the chance the node takes an allowed value at share v, linear between `breaks`."""
+    if not restrict or len(restrict) != 1:
+        return None
+    (nid, allowed), = restrict.items()
+    node = graph.nodes[nid]
+    if node.kind not in {"binary", "categorical"} or node.states or node.continuous:
+        return None
+    if node.exists_if is not None and set(node.exists_if.names) - {"passes"}:
+        return None
+
+    def tilt(v):
+        v = np.asarray(v, dtype=float)
+        draws = {"yes_share": v, "passes": v > 0.5}
+        exists = node.exists_if.evaluate_vec(draws) if node.exists_if is not None else np.ones(len(v), bool)
+        return _allowed_mass(node, node_params(graph, node, fc, v, None), exists, allowed)
+
+    breaks = sorted({0.5, *graph.cells, *graph.near_cells})
+    return nid, tilt, breaks
+
+
 def band_mass(graph: Graph, fc: Forecasts, band: tuple[float, float]) -> float:
     """The forecaster's probability that the Yes share lies in (lo, hi]."""
     cdf = np.asarray(fc.values["yes_share"]["all"], dtype=float)
@@ -140,18 +181,34 @@ def simulate(graph: Graph, fc: Forecasts, n: int, seed, fixed_share: float | Non
 
     The Yes share is drawn from the forecaster's CDF, fixed (`fixed_share`), or drawn from the CDF
     truncated to a band (`share_band`, (lo, hi]; a band whose lower end is 0.5 or more excludes it).
-    `restrict` maps a binary or categorical node to the values it may take, and `defensive` draws the
-    share from a defensive mixture (see the module notes).
+    `restrict` maps a binary or categorical node to the values it may take; the share is then drawn
+    exactly from its tilted distribution where `exact_tilt` allows, and otherwise, with `defensive`,
+    from a defensive mixture (see the module notes).
     """
     rng = np.random.default_rng(seed)
     share_node = graph.nodes["yes_share"]
     cdf = np.asarray(fc.values["yes_share"]["all"], dtype=float)
     u_share = rng.random(n)
     weight = np.ones(n)
-    if fixed_share is None and share_band is None and defensive:
+    tilt = exact_tilt(graph, fc, restrict) if fixed_share is None else None
+    if fixed_share is None and share_band is None and (defensive or tilt is not None):
         share_band = (graph.share_floor, graph.share_ceiling)
     if fixed_share is not None:
         v = np.full(n, float(fixed_share))
+    elif tilt is not None:
+        # The share given the restriction, drawn exactly; each draw's weight is the restriction's
+        # probability within the band.
+        lo, hi = share_band
+        try:
+            v, z = dists.sample_share_tilted(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling,
+                                             lo, hi, u_share, tilt[1], tilt[2])
+        except ValueError:
+            # The restriction cannot hold in the band: every draw gets weight 0.
+            v, _ = dists.sample_share_band(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling,
+                                           lo, hi, u_share)
+            z = 0.0
+        v = np.clip(v, np.nextafter(lo, 1.0) if lo >= 0.5 else lo, hi)
+        weight = np.full(n, z)
     elif share_band is not None:
         # The forecaster's Yes-share distribution truncated to (lo, hi].
         lo, hi = share_band
@@ -178,27 +235,27 @@ def simulate(graph: Graph, fc: Forecasts, n: int, seed, fixed_share: float | Non
             state_idx = np.argmax(conds, axis=1)
         params = node_params(graph, node, fc, v, state_idx, v_cont)
         allowed = restrict.get(nid)
+        if allowed is not None and node.kind in {"binary", "categorical"}:
+            mass = _allowed_mass(node, params, exists, allowed)
+            # Under an exact tilt the share already carries this probability; a draw where it is 0
+            # (only possible at a segment's end) cannot meet the restriction.
+            weight = np.where(mass > 0, weight, 0.0) if tilt is not None and tilt[0] == nid else weight * mass
         if allowed is not None and node.kind == "binary":
-            p_true = np.where(exists, params[:, 0], 0.0)
-            mass = (p_true if True in allowed else 0.0) + ((1 - p_true) if False in allowed else 0.0)
             if allowed == {True}:
                 draws[nid] = exists.copy()
             elif allowed == {False}:
                 draws[nid] = np.zeros(n, bool)
             else:
                 draws[nid] = (u < params[:, 0]) & exists
-            weight = weight * mass
         elif allowed is not None and node.kind == "categorical":
             options = list(node.options)
             keep = np.array([o in allowed for o in options], dtype=float)
             p_opts = params * keep[None, :]
             mass_opts = p_opts.sum(axis=1)
-            mass = np.where(exists, mass_opts, 1.0 if None in allowed else 0.0)
             ok = mass_opts > 0
             probs = np.where(ok[:, None], p_opts / np.where(ok, mass_opts, 1.0)[:, None], params)
             idx = dists.sample_pmf(probs, u)
             draws[nid] = np.where(exists, np.array(options)[idx], "")
-            weight = weight * mass
         elif allowed is not None:
             raise ValueError(f"cannot restrict {node.kind} node {nid}")
         elif node.kind == "binary":

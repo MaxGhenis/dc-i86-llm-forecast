@@ -352,8 +352,87 @@ def test_restricted_draws_satisfy_the_condition_and_weights_are_probabilities(gr
     assert condition_restriction(graph, cond, False) is None
     assert condition_restriction(graph, graph.nodes["lawsuit_filed"].exists_if, True) == {}
     d = simulate(graph, fc, 5000, [3], share_band=(0.5, graph.share_ceiling), restrict=r)
-    assert np.all(d["ban_standing"]) and np.all((d["_weight"] >= 0.4 - 1e-12) & (d["_weight"] <= 0.9 + 1e-12))
+    # ban_status depends only on the share, so the share is drawn exactly given standing and every
+    # draw carries the same weight: the probability of standing with the share in the band.
+    assert np.all(d["ban_standing"])
+    assert np.all(d["_weight"] == d["_weight"][0])
+    grid = np.linspace(0.5, graph.share_ceiling, 200_001)[1:]
+    cdf = np.asarray(fc.values["yes_share"]["all"], dtype=float)
+    dens = np.gradient(dists.share_cdf_at(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling, grid), grid)
+    standing = np.interp(np.clip(grid, 0.505, 0.72), [0.505, 0.60, 0.72],
+                         [STATUS[c]["certified"] + STATUS[c]["not_certified"] for c in ["yes_50.5", "yes_60.0", "yes_72.0"]])
+    assert d["_weight"][0] == pytest.approx(np.trapezoid(dens * standing, grid), rel=1e-3)
     base = simulate(graph, fc, 5000, [3], share_band=(0.5, graph.share_ceiling))
     assert np.all(base["_weight"] == 1.0)
-    # Shared random numbers: the Yes share is the same draw for draw.
-    assert np.array_equal(base["yes_share"], d["yes_share"])
+    # Shared random numbers for the other nodes: they draw their uniforms in the same order.
+    assert np.array_equal(base["turnout"], d["turnout"])
+
+
+# Exact tilted share sampling (dists.sample_share_tilted). Invariants: Z is the integral of density
+# times tilt over the band; draws lie in the band; their distribution is density times tilt over Z,
+# so their mean matches a fine-grid integral; with Z > 0 no draw is wasted.
+
+_GRID = [0.30, 0.35, 0.40, 0.45, 0.47, 0.48, 0.49, 0.50, 0.51, 0.52, 0.53, 0.55, 0.60, 0.65, 0.70, 0.75,
+         0.80, 0.85, 0.90]
+
+
+def _numeric(cdf, lo, hi, tilt):
+    # Every knot of the CDF and the tilt is a grid point, so the midpoint rule is exact for Z.
+    knots = np.array([0.15, *_GRID, 0.97, 0.5, 0.505, 0.60, 0.72])
+    x = np.unique(np.concatenate([np.linspace(lo, hi, 400_001), knots[(knots > lo) & (knots < hi)]]))
+    f = dists.share_cdf_at(_GRID, cdf, 0.15, 0.97, x)
+    mid, dm = (x[1:] + x[:-1]) / 2, np.diff(f)
+    t = tilt(mid)
+    return float(np.sum(dm * t)), float(np.sum(dm * t * mid))
+
+
+@settings(max_examples=40, deadline=None)
+@given(steps=st.lists(st.floats(0.0, 1.0), min_size=19, max_size=19),
+       knots=st.lists(st.floats(0.0, 1.0), min_size=3, max_size=3),
+       band=st.sampled_from([(0.5, 0.97), (0.5, 0.53), (0.15, 0.97), (0.47, 0.5)]))
+def test_tilted_share_matches_numeric_integrals(steps, knots, band):
+    cdf = np.cumsum(np.asarray(steps) + 1e-3)
+    cdf = cdf / (cdf[-1] * 1.05)  # some mass above the last grid point
+    cells = [0.505, 0.60, 0.72]
+
+    def tilt(v):
+        v = np.asarray(v, dtype=float)
+        return np.where(v > 0.5, np.interp(np.clip(v, cells[0], cells[-1]), cells, knots), 0.25)
+
+    z_num, m_num = _numeric(cdf, *band, tilt)
+    u = (np.arange(200_000) + 0.5) / 200_000  # stratified uniforms: low-noise check of the mean
+    if z_num <= 1e-12:
+        return
+    v, z = dists.sample_share_tilted(_GRID, cdf, 0.15, 0.97, *band, u, tilt, [0.5, *cells])
+    assert z == pytest.approx(z_num, rel=1e-9, abs=1e-15)
+    assert np.all((v >= band[0]) & (v <= band[1]))
+    assert float(np.mean(v)) == pytest.approx(m_num / z_num, abs=2e-5)
+
+
+def test_tilted_share_raises_when_the_condition_cannot_hold():
+    cdf = np.linspace(0.05, 0.95, 19)
+    with pytest.raises(ValueError):
+        dists.sample_share_tilted(_GRID, cdf, 0.15, 0.97, 0.5, 0.97, np.array([0.5]),
+                                  lambda v: np.zeros(len(v)), [0.5])
+
+
+def test_tilted_and_defensive_estimates_agree(graph):
+    # Differential: the exact sampler and the defensive mixture estimate the same conditional.
+    from i86.simulate import condition_restriction
+    from i86.summarize import describe
+
+    fc = _standing_forecaster(graph, STATUS, {"certified": 0.2, "not_certified": 0.7})
+    r = condition_restriction(graph, graph.nodes["fattened_narrowed"].exists_if, True)
+    band = (0.5, graph.share_ceiling)
+    exact = simulate(graph, fc, 40_000, [5], share_band=band, restrict=r)
+    import i86.simulate as sim
+    saved = sim.exact_tilt
+    try:
+        sim.exact_tilt = lambda *a, **k: None
+        mixed = simulate(graph, fc, 40_000, [6], share_band=band, restrict=r, defensive=True)
+    finally:
+        sim.exact_tilt = saved
+    a = describe(graph, "fattened_narrowed", exact["fattened_narrowed"], exact["_weight"])
+    b = describe(graph, "fattened_narrowed", mixed["fattened_narrowed"], mixed["_weight"])
+    assert a["ess_min"] == pytest.approx(40_000)
+    assert a["p"] == pytest.approx(b["p"], abs=0.02)
