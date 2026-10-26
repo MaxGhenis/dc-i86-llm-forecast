@@ -328,10 +328,14 @@ def dispatch_claude(label: str, prompt_path: Path, prompt_sha: str, model: str, 
 
 
 def refresh_subfleet(run_dir: Path) -> dict:
-    """Refresh one subfleet run's state, model and transcript path; write no answer."""
-    job_id = read_meta(run_dir).get("job_id")
-    if not job_id:
-        return read_meta(run_dir)
+    """Refresh one subfleet run's state, model and transcript path; write no answer.
+
+    A collected run is final: its metadata is returned untouched, so a later collect cannot point
+    its transcript back at the job store."""
+    meta = read_meta(run_dir)
+    job_id = meta.get("job_id")
+    if not job_id or (run_dir / "response.md").exists():
+        return meta
     proc = subprocess.run(["subfleet", "runs", "show", job_id, "--json"], capture_output=True, text=True)
     if proc.returncode != 0:
         return record(run_dir, collect_error=proc.stderr[-1000:])

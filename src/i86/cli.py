@@ -151,7 +151,8 @@ def cmd_audit(args) -> int:
         meta = runners.read_meta(d)
         if not (d / "response.md").exists() or meta.get("backend") == "manual":
             continue
-        path = meta.get("transcript")
+        # The committed copy is what prereg hashes; the metadata path is only a fallback.
+        path = d / "transcript.jsonl" if (d / "transcript.jsonl").exists() else meta.get("transcript")
         if not path or not Path(path).exists():
             result = {"events": 0, "passed": False, "violations": [], "web_calls": 0, "local_calls": [],
                       "suspect": [], "error": f"no transcript at {path!r}"}

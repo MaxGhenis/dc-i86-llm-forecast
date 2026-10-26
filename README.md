@@ -127,7 +127,8 @@ Subfleet reports a run lost when processes the agent started outlive it; if the 
 cleanly with one successful final message, `recover` records that attempt and the SHA-256 of its whole
 transcript, and `collect` takes the answer only if the transcript is unchanged. The report flags
 recovered runs. `collect` reads each transcript once and copies exactly what it read, with its hash in
-`meta.json`. A run marked abandoned stays abandoned even if its process later
+`meta.json`. Once a run is collected, later collects leave its `meta.json` alone, and `audit` reads the
+committed copy of its transcript. A run marked abandoned stays abandoned even if its process later
 reports back or an answer is staged for it; what arrives is kept as the run's `backend_state`.
 
 Each forecaster reports, before researching, anything in its context other than the brief that
