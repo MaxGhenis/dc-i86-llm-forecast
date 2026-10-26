@@ -192,7 +192,7 @@ accidental and casual reads, not a forecaster set on hiding them.
   decisive-ballot formula against its closed form and of the weighted conditionals against plain
   filtering; audit cases, including every bypass found in review, and the audit against bash and zsh
   on generated programs; and the staging and pooling rules. `test_review_r3_*.py` to
-  `test_review_r5_*.py` are the independent reviews' probes, kept as regression tests. Test responses
+  `test_review_r6_*.py` are the independent reviews' probes, kept as regression tests. Test responses
   are labelled MOCK.
 
 ## What the numbers are
