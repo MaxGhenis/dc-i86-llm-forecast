@@ -11,12 +11,13 @@ the latest.
 |---|---|---|---|
 | `2026-10-26-collected/` | 07:35Z | hashes of the first eight runs, committed before their answers | 973210, 973213 |
 | `2026-10-26-pooled/` | 08:01Z | all eleven runs, their audits and the pooled outputs | 973213, 973237 |
-| `2026-10-26-revised/` | 14:40Z | the same files after the changes below | pending (`ots upgrade`) |
+| `2026-10-26-revised/` | 14:40Z | the same files after the changes below | 973255 |
 
 To check a manifest, run `shasum -a 256 -c prereg/<folder>/SHA256SUMS` from the repository root; it
 lists any file whose bytes have changed. `ots verify prereg/<folder>/SHA256SUMS.ots` checks the proof
 against a Bitcoin node. Without one, the digest the proof computes can be compared with the block's
-merkle root from a block explorer; commit 007eb25 did this for the first two stamps.
+merkle root from a block explorer. Commit 007eb25 did this for the first two stamps, and the commit
+that added block 973255 to the table did it for the third.
 
 ## Changes after each stamp
 
