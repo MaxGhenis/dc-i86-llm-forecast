@@ -1,0 +1,29 @@
+{
+ "events": 110,
+ "tool_calls": 18,
+ "web_calls": 18,
+ "urls": [
+  "https://dc.citycast.fm/food-drink/i86-jose-andres-dc-foie-gras",
+  "https://denverite.com/2025/12/30/foie-gras-ban-activists-voters/",
+  "https://hoodline.com/2026/08/foie-gras-ban-storms-d-c-ballot-as-city-faces-unfunded-314k-bill/",
+  "https://www.axios.com/local/washington-dc/2026/10/21/dc-foie-gras-ban-ballot-initiative-fight",
+  "https://www.france24.com/en/live-news/20260928-in-washington-s-political-cauldron-a-fight-over-foie-gras",
+  "https://www.nbcwashington.com/news/local/dc-voters-to-decide-whether-a-controversial-luxury-food-should-be-banned/4171352/",
+  "search: \"foie gras\" ban Axios DC \"legal threats\" outside spending Initiative 86 opposition committee",
+  "search: Colorado State University study foie gras restaurants US cities Washington DC number of restaurants",
+  "search: DC Initiative 82 2022 results votes yes no total certified",
+  "search: DC Initiative 86 foie gras poll",
+  "search: Denver 2024 Ordinance 308 fur ban 309 slaughterhouse results percent",
+  "search: Denver Initiated Ordinance 311 foie gras 2026",
+  "search: Initiative 86 foie gras opposition campaign pate chicken liver lawsuit DC restaurant association",
+  "search: Michelin Guide Washington DC 2025 starred restaurants number",
+  "search: New York City foie gras ban court status 2025 2026 Portland foie gras ban",
+  "search: Pro-Animal Future 2027 2028 ballot measure plans after Denver DC foie gras",
+  "search: Pro-Animal Future ballot measures 2026 2028 statewide",
+  "search: Pro-Animal Future statewide ballot initiative 2028 factory farm"
+ ],
+ "violations": [],
+ "suspect": [],
+ "local_calls": [],
+ "passed": true
+}

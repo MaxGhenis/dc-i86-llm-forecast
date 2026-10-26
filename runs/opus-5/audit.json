@@ -1,0 +1,31 @@
+{
+ "events": 117,
+ "tool_calls": 20,
+ "web_calls": 20,
+ "urls": [
+  "https://51st.news/dc-foie-gras-ballot-initiative-tax-code/",
+  "https://dc.citycast.fm/food-drink/i86-jose-andres-dc-foie-gras",
+  "https://denverite.com/2026/09/25/vg-2026-initiated-ordinance-311-force-feeding-birds-ban-voter-guide/",
+  "https://www.axios.com/local/washington-dc/2026/10/21/dc-foie-gras-ban-ballot-initiative-fight",
+  "https://www.notus.org/metro/foie-gras-ban-washington-dc",
+  "search: \"foie gras\" DC ban opposition campaign restaurants \"Initiative 86\" council",
+  "search: Congress Republicans DC foie gras ban rider disapproval",
+  "search: DC 2022 general election Initiative 82 total votes yes no certified",
+  "search: DC Initiative 86 foie gras poll",
+  "search: DC foie gras ban outside spending legal threats pate chicken liver definition",
+  "search: Denver 2024 Initiated Ordinance 309 slaughterhouse ban result percent 308 fur",
+  "search: Denver Initiated Ordinance 311 foie gras 2026",
+  "search: Denver foie gras ordinance 311 opposition Colorado restaurant association poll",
+  "search: Hudson Valley Foie Gras ducks per year La Belle Farm US foie gras production number of ducks",
+  "search: Mendelson Council repeal foie gras initiative 86 Washington Post editorial",
+  "search: Michelin Guide Washington DC 2026 starred restaurants list number",
+  "search: Pro-Animal Future 2026 ballot measures Denver DC",
+  "search: Pro-Animal Future Aidan Kankyoku next ballot measures 2028 statewide plans",
+  "search: farm bill 2026 Prop 12 preemption provision status Senate",
+  "search: how many DC restaurants serve foie gras Pro-Animal DC list Colorado State University study"
+ ],
+ "violations": [],
+ "suspect": [],
+ "local_calls": [],
+ "passed": true
+}

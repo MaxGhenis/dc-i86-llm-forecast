@@ -1,0 +1,806 @@
+{
+ "forecaster": {
+  "model": "GPT-6 (Codex)",
+  "prior_context": "none",
+  "notes": "Information cutoff: 2026-10-25. No local files were read. Exact October 2026 citywide menu baselines were unavailable: the foie-gras baseline is an older published estimate, and the pate baseline is a verified minimum from an incomplete menu check. The bird baseline covers two major producers rather than the entire United States. These limitations are reflected in the forecast uncertainty."
+ },
+ "research_summary": "Reviewed public polling methods, campaign reporting, historical election results, the supplied legislation and fiscal statement, relevant court decisions, current restaurant menus, FRED, DC revenue data, Michelin listings, organizational financial disclosures, and animal-law trackers. Passage appears likely, but implementation faces distinct political, legal and funding risks. Forecasts allow substantial menu effects, negligible aggregate restaurant effects, and modest political spillovers.",
+ "nodes": {
+  "yes_share": {
+   "forecasts": {
+    "all": {
+     "le_30": 0.002,
+     "le_35": 0.006,
+     "le_40": 0.018,
+     "le_45": 0.045,
+     "le_47": 0.064,
+     "le_48": 0.075,
+     "le_49": 0.087,
+     "le_50": 0.1,
+     "le_51": 0.115,
+     "le_52": 0.132,
+     "le_53": 0.152,
+     "le_55": 0.198,
+     "le_60": 0.36,
+     "le_65": 0.54,
+     "le_70": 0.73,
+     "le_75": 0.88,
+     "le_80": 0.963,
+     "le_85": 0.992,
+     "le_90": 0.999
+    }
+   },
+   "reasoning": "Recent DC initiatives won large majorities, and this measure targets an uncommon luxury product. The favorable sponsor poll supports passage, but its 2023 fieldwork, panel sampling and sponsorship warrant a substantial discount; late opposition and uncertain campaign effects leave a meaningful downside tail. [Poll methods](https://proanimal.org/78-of-dc-voters-want-to-end-the-sale-of-force-fed-foie-gras/).",
+   "sources": [
+    "https://proanimal.org/78-of-dc-voters-want-to-end-the-sale-of-force-fed-foie-gras/",
+    "https://ballotpedia.org/List_of_District_of_Columbia_ballot_measures",
+    "https://www.axios.com/local/washington-dc/2026/10/21/dc-foie-gras-ban-ballot-initiative-fight",
+    "https://www.axios.com/local/washington-dc/2026/10/23/jose-andres-dc-foie-gras-ban-chef-protest"
+   ]
+  },
+  "turnout": {
+   "forecasts": {
+    "all": {
+     "p05": 170000,
+     "p25": 190000,
+     "p50": 208000,
+     "p75": 226000,
+     "p95": 255000
+    }
+   },
+   "reasoning": "The closest midterm comparison is Initiative 82, which received 179786 valid votes; presidential-year Initiative 83 received 291293. I expect stronger midterm engagement than in 2022, with ballot-question rolloff limiting valid votes. [Historical results](https://ballotpedia.org/List_of_District_of_Columbia_ballot_measures).",
+   "sources": [
+    "https://ballotpedia.org/List_of_District_of_Columbia_ballot_measures",
+    "https://electionresults.dcboe.org/election_results/2022-General-Election",
+    "https://electionresults.dcboe.org/election_results/2024-General-Election"
+   ]
+  },
+  "denver_io311_passes": {
+   "forecasts": {
+    "yes_42.0": {
+     "p": 0.4
+    },
+    "yes_49.5": {
+     "p": 0.54
+    },
+    "yes_50.5": {
+     "p": 0.56
+    },
+    "yes_60.0": {
+     "p": 0.74
+    },
+    "yes_72.0": {
+     "p": 0.89
+    }
+   },
+   "reasoning": "CSU surveys indicate favorable attitudes, although informed survey answers can substantially overstate contested ballot support. Denver's previous animal-measure defeats and divided endorsements temper optimism; DC margins provide evidence about shared public sentiment and campaign effectiveness, with no causal discontinuity at passage. [CSU research](https://sites.warnercnr.colostate.edu/animalhumanpolicy/ahpc-studies-document-the-prevalence-of-foie-gras-on-menus-and-denver-voters-support-of-a-foie-gras-ban/).",
+   "sources": [
+    "https://sites.warnercnr.colostate.edu/animalhumanpolicy/ahpc-studies-document-the-prevalence-of-foie-gras-on-menus-and-denver-voters-support-of-a-foie-gras-ban/",
+    "https://proanimal.org/new-csu-study-finds-87-percent-of-americans-support-ban-on-force-fed-foie-gras/",
+    "https://proanimalcolorado.org/endorsements/",
+    "https://www.progressivevotersguide.com/colorado/2026/general/city/denver",
+    "https://denverdsa.org/voter-guide/2026-november-ballot-measures/",
+    "https://ballotpedia.org/Local_animal_treatment_laws_ballot_measures"
+   ]
+  },
+  "ban_status": {
+   "forecasts": {
+    "yes_50.5": {
+     "repealed": 0.17,
+     "congress": 0.08,
+     "court": 0.13,
+     "not_certified": 0.2,
+     "certified": 0.42
+    },
+    "yes_60.0": {
+     "repealed": 0.1,
+     "congress": 0.08,
+     "court": 0.12,
+     "not_certified": 0.16,
+     "certified": 0.54
+    },
+    "yes_72.0": {
+     "repealed": 0.05,
+     "congress": 0.08,
+     "court": 0.11,
+     "not_certified": 0.1,
+     "certified": 0.66
+    }
+   },
+   "reasoning": "DC's history of overriding initiatives and withholding implementation funding makes passage an incomplete guarantee, although the supplied fiscal cost is small. Existing California and Supreme Court precedents reduce conventional legal vulnerability; broader drafting and congressional authority preserve blocking risks. Larger victories chiefly reduce repeal and noncertification. [Council precedent](https://dccouncil.gov/council-pauses-tipped-wage-increase-approves-in-school-cell-phone-ban-vacant-property-reform/).",
+   "sources": [
+    "https://proanimaldc.org/prohibit-force-feeding-of-birds-act/",
+    "https://dcboe.org/getmedia/8ed77952-835c-4a11-9fa2-2ad447d82643/Final-FIS-Initiative-Prohibiting-the-Force-Feeding-of-Birds-Act-of-2026.pdf",
+    "https://dccouncil.gov/council-pauses-tipped-wage-increase-approves-in-school-cell-phone-ban-vacant-property-reform/",
+    "https://news.ballotpedia.org/2025/07/30/washington-d-c-council-amends-initiative-82-to-cap-tipped-wage-at-75-of-full-minimum-wage-by-2034/",
+    "https://www.supremecourt.gov/opinions/22pdf/21-468_d1pf.pdf",
+    "https://law.justia.com/cases/federal/appellate-courts/ca9/20-55882/20-55882-2022-05-06.html"
+   ]
+  },
+  "lawsuit_filed": {
+   "forecasts": {
+    "yes_50.5|blocked": {
+     "p": 1
+    },
+    "yes_50.5|not_blocked": {
+     "p": 0.69
+    },
+    "yes_60.0|blocked": {
+     "p": 1
+    },
+    "yes_60.0|not_blocked": {
+     "p": 0.72
+    },
+    "yes_72.0|blocked": {
+     "p": 1
+    },
+    "yes_72.0|not_blocked": {
+     "p": 0.75
+    }
+   },
+   "reasoning": "A chef is raising a prospective legal-defense fund, and producers have repeatedly litigated comparable bans. A complete court block requires litigation; among other outcomes, stronger electoral support leaves a more durable enforcement target and fewer cases rendered unnecessary by repeal. [Reported legal preparations](https://www.axios.com/local/washington-dc/2026/10/23/jose-andres-dc-foie-gras-ban-chef-protest).",
+   "sources": [
+    "https://www.axios.com/local/washington-dc/2026/10/23/jose-andres-dc-foie-gras-ban-chef-protest",
+    "https://law.justia.com/cases/federal/appellate-courts/ca9/20-55882/20-55882-2022-05-06.html"
+   ]
+  },
+  "fattened_narrowed": {
+   "forecasts": {
+    "yes_50.5|certified": {
+     "p": 0.58
+    },
+    "yes_50.5|not_certified": {
+     "p": 0.3
+    }
+   },
+   "reasoning": "The supplied definition is broader than the force-feeding focus of the summary and legislative intent, creating pressure for clarification. Funding makes formal rulemaking or an amendment more likely, but informal interpretation could resolve concerns without satisfying this question. [Legislative text](https://proanimaldc.org/prohibit-force-feeding-of-birds-act/).",
+   "sources": [
+    "https://proanimaldc.org/prohibit-force-feeding-of-birds-act/",
+    "https://dcboe.org/getmedia/8ed77952-835c-4a11-9fa2-2ad447d82643/Final-FIS-Initiative-Prohibiting-the-Force-Feeding-of-Birds-Act-of-2026.pdf"
+   ]
+  },
+  "pate_treated_banned": {
+   "forecasts": {
+    "yes_50.5|narrowed_certified": {
+     "p": 0.04
+    },
+    "yes_50.5|narrowed_not_certified": {
+     "p": 0.01
+    },
+    "yes_50.5|not_narrowed_certified": {
+     "p": 0.24
+    },
+    "yes_50.5|not_narrowed_not_certified": {
+     "p": 0.08
+    }
+   },
+   "reasoning": "Literal breadth creates some risk of a determination covering ordinary poultry liver, but the stated purpose favors a restrained interpretation. Certification increases administrative activity; formally narrowed cases retain a small probability because a determination could precede narrowing. [Legislative text](https://proanimaldc.org/prohibit-force-feeding-of-birds-act/).",
+   "sources": [
+    "https://proanimaldc.org/prohibit-force-feeding-of-birds-act/",
+    "https://dcboe.org/getmedia/8ed77952-835c-4a11-9fa2-2ad447d82643/Final-FIS-Initiative-Prohibiting-the-Force-Feeding-of-Birds-Act-of-2026.pdf"
+   ]
+  },
+  "foie_gras_menus": {
+   "baseline": {
+    "value": 48,
+    "as_of": "2025-12",
+    "source": "https://proanimaldc.org/faq/ \u2014 approximate restaurant count for December 2025; latest explicit DC count found, not the requested October 2026 census."
+   },
+   "forecasts": {
+    "yes_49.5|failed": {
+     "p05": 30,
+     "p25": 40,
+     "p50": 50,
+     "p75": 62,
+     "p95": 82
+    },
+    "yes_50.5|removed": {
+     "p05": 22,
+     "p25": 35,
+     "p50": 45,
+     "p75": 58,
+     "p95": 78
+    },
+    "yes_50.5|not_certified": {
+     "p05": 2,
+     "p25": 12,
+     "p50": 28,
+     "p75": 43,
+     "p95": 65
+    },
+    "yes_50.5|certified": {
+     "p05": 0,
+     "p25": 0,
+     "p50": 1,
+     "p75": 3,
+     "p95": 9
+    }
+   },
+   "reasoning": "The published count anchors an uncertain baseline, with seasonality, restaurant turnover and retail coverage widening the range. Removal leaves some campaign-induced menu changes; noncertification allows both substantial voluntary compliance and continued sales, while certification should produce widespread compliance. [Published baseline](https://proanimaldc.org/faq/).",
+   "sources": [
+    "https://proanimaldc.org/faq/",
+    "https://sites.warnercnr.colostate.edu/animalhumanpolicy/ahpc-studies-document-the-prevalence-of-foie-gras-on-menus-and-denver-voters-support-of-a-foie-gras-ban/",
+    "https://proanimaldc.org/prohibit-force-feeding-of-birds-act/"
+   ]
+  },
+  "liver_pate_menus": {
+   "baseline": {
+    "value": 8,
+    "as_of": "2026-10-25",
+    "source": "Incomplete current-menu check confirmed eight establishments: Amelie, Dauphine's, Morris, Cafe Riggs, Vin Sur Vingt, Perry's, and Bistro Du Jour's Capitol Hill and Wharf locations. This is a lower bound, not a complete citywide baseline; supporting menu URLs are listed in sources."
+   },
+   "forecasts": {
+    "yes_49.5|failed": {
+     "p05": 22,
+     "p25": 35,
+     "p50": 50,
+     "p75": 73,
+     "p95": 115
+    },
+    "yes_50.5|removed": {
+     "p05": 20,
+     "p25": 33,
+     "p50": 48,
+     "p75": 71,
+     "p95": 112
+    },
+    "yes_50.5|standing_pate_allowed": {
+     "p05": 23,
+     "p25": 37,
+     "p50": 54,
+     "p75": 79,
+     "p95": 124
+    },
+    "yes_50.5|standing_pate_banned": {
+     "p05": 4,
+     "p25": 10,
+     "p50": 23,
+     "p75": 42,
+     "p95": 82
+    }
+   },
+   "reasoning": "The verified minimum substantially understates the likely citywide total, so these forecasts have unusually wide measurement uncertainty. Substitution from foie gras can support ordinary liver dishes when allowed; a qualifying enforcement determination discourages poultry-liver menus, while mammalian liver remains available and one determination need not imply universal enforcement. [Current menu example](https://www.bistro-dujour.com/wp-content/uploads/sites/11/2026/07/Bistro-Wharf_All-Day-Final-7.7.26.pdf).",
+   "sources": [
+    "https://ameliewinebar.com/dc/menus/dinner",
+    "https://www.dauphinesdc.com/menus/",
+    "https://www.morrisbardc.com/menu/food-menu/",
+    "https://www.riggsdc.com/eat-drink/cafe-riggs-menus/",
+    "https://media-cdn.getbento.com/accounts/ad7ac5d6a757485b222dc1d5ec1aa933/media/sCMEn7KUQ2a8SZrtb2XA_DC%20-%20Food%20Dinner.pdf",
+    "https://order.toasttab.com/online/perrys-1811-columbia-road-northwest/item-chicken-liver-mousse_72a28d74-3ddf-44ac-a509-47aee3e13fe3",
+    "https://www.bistro-dujour.com/wp-content/uploads/sites/11/2026/03/Bistro-Cap-Hill_Dinner-Final.pdf",
+    "https://www.bistro-dujour.com/wp-content/uploads/sites/11/2026/07/Bistro-Wharf_All-Day-Final-7.7.26.pdf",
+    "https://proanimaldc.org/prohibit-force-feeding-of-birds-act/"
+   ]
+  },
+  "us_ducks_force_fed_2030": {
+   "baseline": {
+    "value": 442000,
+    "as_of": "2025-06-24",
+    "source": "https://proanimal.org/7-facts-the-foie-gras-industry-doesnt-want-you-to-know/ \u2014 published annual slaughter figures for the two major producers combined; incomplete US industry anchor, not a national census."
+   },
+   "forecasts": {
+    "yes_49.5|failed": {
+     "p05": 150000,
+     "p25": 330000,
+     "p50": 480000,
+     "p75": 680000,
+     "p95": 1050000
+    },
+    "yes_50.5|not_certified_or_removed": {
+     "p05": 148000,
+     "p25": 328000,
+     "p50": 478000,
+     "p75": 678000,
+     "p95": 1048000
+    },
+    "yes_50.5|certified": {
+     "p05": 145000,
+     "p25": 325000,
+     "p50": 475000,
+     "p75": 675000,
+     "p95": 1045000
+    }
+   },
+   "reasoning": "Published producer estimates disagree substantially and omit smaller operations, making the national anchor uncertain. Disease, producer survival, imports and demand dominate the distribution; DC represents a small market, with substitution and sales elsewhere limiting its production effect. [Producer figures](https://proanimal.org/7-facts-the-foie-gras-industry-doesnt-want-you-to-know/).",
+   "sources": [
+    "https://proanimal.org/7-facts-the-foie-gras-industry-doesnt-want-you-to-know/",
+    "https://www.timesunion.com/tablehopping/article/foie-gras-new-york-city-ban-ruling-hudson-valley-19532070.php",
+    "https://proanimaldc.org/faq/"
+   ]
+  },
+  "dc_restaurant_employment_2029": {
+   "baseline": {
+    "value": 51.5,
+    "as_of": "2026-09",
+    "source": "https://fred.stlouisfed.org/series/SMU11000007072200001 \u2014 September observation supplied in the brief; web retrieval returned an older cached observation."
+   },
+   "forecasts": {
+    "yes_49.5|failed": {
+     "p05": 42,
+     "p25": 48,
+     "p50": 52,
+     "p75": 56,
+     "p95": 63
+    },
+    "yes_50.5|not_certified_or_removed": {
+     "p05": 42,
+     "p25": 48,
+     "p50": 52,
+     "p75": 56,
+     "p95": 63
+    },
+    "yes_50.5|certified": {
+     "p05": 42,
+     "p25": 48,
+     "p50": 52,
+     "p75": 56,
+     "p95": 63
+    }
+   },
+   "reasoning": "I center employment near its supplied current level, with broad uncertainty about federal employment, tourism, restaurant costs and the business cycle. The affected product is too small a part of restaurant activity to move these rounded quantiles materially. [Employment series](https://fred.stlouisfed.org/series/SMU11000007072200001).",
+   "sources": [
+    "https://fred.stlouisfed.org/series/SMU11000007072200001",
+    "https://ora-cfo.dc.gov/node/1824291",
+    "https://sites.warnercnr.colostate.edu/animalhumanpolicy/ahpc-study-finds-strong-public-support-for-and-limited-impacts-to-restaurants-from-foie-gras-bans/"
+   ]
+  },
+  "dc_restaurant_sales_tax_fy2029": {
+   "baseline": {
+    "value": 567.871,
+    "as_of": "FY2025; source revised 2026-04-23",
+    "source": "https://ora-cfo.dc.gov/node/1824291"
+   },
+   "forecasts": {
+    "yes_49.5|failed": {
+     "p05": 450,
+     "p25": 570,
+     "p50": 640,
+     "p75": 715,
+     "p95": 870
+    },
+    "yes_50.5|not_certified_or_removed": {
+     "p05": 450,
+     "p25": 570,
+     "p50": 640,
+     "p75": 715,
+     "p95": 870
+    },
+    "yes_50.5|certified": {
+     "p05": 450,
+     "p25": 570,
+     "p50": 640,
+     "p75": 715,
+     "p95": 870
+    }
+   },
+   "reasoning": "ORA reports a weak real restaurant recovery, while nominal collections benefit from menu-price inflation. Modest nominal growth is the central case, with substantial macroeconomic uncertainty; substitution among dishes makes the initiative's effect negligible at this precision. [ORA analysis and baseline table](https://ora-cfo.dc.gov/node/1824291).",
+   "sources": [
+    "https://ora-cfo.dc.gov/node/1824291",
+    "https://sites.warnercnr.colostate.edu/animalhumanpolicy/ahpc-study-finds-strong-public-support-for-and-limited-impacts-to-restaurants-from-foie-gras-bans/"
+   ]
+  },
+  "dc_michelin_starred_2029": {
+   "baseline": {
+    "value": 20,
+    "as_of": "2026-10-25",
+    "source": "https://guide.michelin.com/en/us/district-of-columbia/restaurants/all-starred \u2014 DC-address listing, excluding Virginia restaurants."
+   },
+   "forecasts": {
+    "yes_49.5|failed": {
+     "p05": 11,
+     "p25": 16,
+     "p50": 20,
+     "p75": 24,
+     "p95": 30
+    },
+    "yes_50.5|not_certified_or_removed": {
+     "p05": 11,
+     "p25": 16,
+     "p50": 20,
+     "p75": 24,
+     "p95": 30
+    },
+    "yes_50.5|certified": {
+     "p05": 11,
+     "p25": 16,
+     "p50": 20,
+     "p75": 24,
+     "p95": 30
+    }
+   },
+   "reasoning": "The current DC-address listing anchors a roughly stable central forecast, with openings, closures and guide decisions creating considerable uncertainty. Restaurants can adapt tasting menus, so the foie-gras restriction should have little influence on the citywide star count. [Michelin listing](https://guide.michelin.com/en/us/district-of-columbia/restaurants/all-starred).",
+   "sources": [
+    "https://guide.michelin.com/en/us/district-of-columbia/restaurants/all-starred"
+   ]
+  },
+  "dc_animal_initiative_filed": {
+   "forecasts": {
+    "yes_42.0": {
+     "p": 0.12
+    },
+    "yes_49.5": {
+     "p": 0.18
+    },
+    "yes_50.5": {
+     "p": 0.25
+    },
+    "yes_60.0": {
+     "p": 0.37
+    },
+    "yes_72.0": {
+     "p": 0.49
+    }
+   },
+   "reasoning": "The campaign demonstrates organizing capacity, but a different qualifying initiative still requires a suitable target and resources. A victory improves fundraising and confidence, while a landslide also signals broader local receptiveness; Council lobbying remains an attractive alternative. [PAF capacity and plans](https://proanimal.org/wp-content/uploads/paf-2025-financial-transparency-briefing.pdf).",
+   "sources": [
+    "https://proanimal.org/wp-content/uploads/paf-2025-financial-transparency-briefing.pdf",
+    "https://www.dcvfa.com/blog/fur-free-dc",
+    "https://dcboe.org/ballot-measures/current-measures"
+   ]
+  },
+  "dc_another_animal_law": {
+   "forecasts": {
+    "yes_42.0|filed": {
+     "p": 0.56
+    },
+    "yes_42.0|not_filed": {
+     "p": 0.25
+    },
+    "yes_49.5|filed": {
+     "p": 0.62
+    },
+    "yes_49.5|not_filed": {
+     "p": 0.29
+    },
+    "yes_50.5|filed": {
+     "p": 0.67
+    },
+    "yes_50.5|not_filed": {
+     "p": 0.33
+    },
+    "yes_60.0|filed": {
+     "p": 0.75
+    },
+    "yes_60.0|not_filed": {
+     "p": 0.4
+    },
+    "yes_72.0|filed": {
+     "p": 0.82
+    },
+    "yes_72.0|not_filed": {
+     "p": 0.48
+    }
+   },
+   "reasoning": "An existing fur-sales campaign provides a plausible legislative route even without another initiative, although repeated stalled efforts counsel caution. Filing a qualifying initiative signals sustained organization and creates an additional route to enactment; stronger I-86 support improves the political environment. [Existing fur campaign](https://www.dcvfa.com/blog/fur-free-dc).",
+   "sources": [
+    "https://www.dcvfa.com/blog/fur-free-dc",
+    "https://lims.dccouncil.gov/Legislation/B25-0122",
+    "https://dccouncil.gov/wp-content/uploads/2024/09/10.9-JPS-PUB-HRNG-B25-245-Gun-Liability-and-B25-122-Fur-Hearing-Notice.pdf",
+    "https://www.ourhenhouse.org/ep795/"
+   ]
+  },
+  "dc_council_farmed_animal_bills": {
+   "forecasts": {
+    "yes_42.0": {
+     "p05": 0,
+     "p25": 0,
+     "p50": 0,
+     "p75": 1,
+     "p95": 3
+    },
+    "yes_49.5": {
+     "p05": 0,
+     "p25": 0,
+     "p50": 1,
+     "p75": 2,
+     "p95": 4
+    },
+    "yes_50.5": {
+     "p05": 0,
+     "p25": 0,
+     "p50": 1,
+     "p75": 2,
+     "p95": 4
+    },
+    "yes_60.0": {
+     "p05": 0,
+     "p25": 0,
+     "p50": 1,
+     "p75": 3,
+     "p95": 5
+    },
+    "yes_72.0": {
+     "p05": 0,
+     "p25": 1,
+     "p50": 2,
+     "p75": 3,
+     "p95": 6
+    }
+   },
+   "reasoning": "The exclusions remove the most obvious follow-up subjects, particularly I-86 amendments and fur, leaving a low introduction base rate. Stronger support can encourage sales-standard proposals and repeated introductions, but the bare-pass effect is small relative to the uncertainty. [Local advocacy agenda](https://www.dcvfa.com/about).",
+   "sources": [
+    "https://www.dcvfa.com/about",
+    "https://www.dcvfa.com/blog/fur-free-dc",
+    "https://proanimal.org/wp-content/uploads/paf-2025-financial-transparency-briefing.pdf"
+   ]
+  },
+  "paf_measures_2027_2028": {
+   "forecasts": {
+    "yes_42.0|denver_pass": {
+     "0": 0.15,
+     "1": 0.32,
+     "2": 0.28,
+     "3": 0.15,
+     "4": 0.07,
+     "5+": 0.03
+    },
+    "yes_42.0|denver_fail": {
+     "0": 0.27,
+     "1": 0.35,
+     "2": 0.22,
+     "3": 0.1,
+     "4": 0.04,
+     "5+": 0.02
+    },
+    "yes_49.5|denver_pass": {
+     "0": 0.12,
+     "1": 0.29,
+     "2": 0.29,
+     "3": 0.17,
+     "4": 0.08,
+     "5+": 0.05
+    },
+    "yes_49.5|denver_fail": {
+     "0": 0.23,
+     "1": 0.34,
+     "2": 0.24,
+     "3": 0.11,
+     "4": 0.05,
+     "5+": 0.03
+    },
+    "yes_50.5|denver_pass": {
+     "0": 0.09,
+     "1": 0.25,
+     "2": 0.3,
+     "3": 0.2,
+     "4": 0.1,
+     "5+": 0.06
+    },
+    "yes_50.5|denver_fail": {
+     "0": 0.18,
+     "1": 0.32,
+     "2": 0.26,
+     "3": 0.14,
+     "4": 0.06,
+     "5+": 0.04
+    },
+    "yes_60.0|denver_pass": {
+     "0": 0.06,
+     "1": 0.19,
+     "2": 0.29,
+     "3": 0.23,
+     "4": 0.14,
+     "5+": 0.09
+    },
+    "yes_60.0|denver_fail": {
+     "0": 0.12,
+     "1": 0.28,
+     "2": 0.28,
+     "3": 0.17,
+     "4": 0.09,
+     "5+": 0.06
+    },
+    "yes_72.0|denver_pass": {
+     "0": 0.04,
+     "1": 0.15,
+     "2": 0.27,
+     "3": 0.25,
+     "4": 0.16,
+     "5+": 0.13
+    },
+    "yes_72.0|denver_fail": {
+     "0": 0.08,
+     "1": 0.23,
+     "2": 0.28,
+     "3": 0.21,
+     "4": 0.12,
+     "5+": 0.08
+    }
+   },
+   "reasoning": "PAF qualified two 2026 measures despite its 2024 defeats, demonstrating persistence, while its financial disclosures show meaningful limits on expansion. Electoral wins should improve funding and recruitment; both defeats still leave a substantial chance of further ballots, with lobbying absorbing some activity. [Financial briefing](https://proanimal.org/wp-content/uploads/paf-2025-financial-transparency-briefing.pdf).",
+   "sources": [
+    "https://proanimal.org/wp-content/uploads/paf-2025-financial-transparency-briefing.pdf",
+    "https://paxfauna.org/introducing-pro-animal-futures-10-year-plan/",
+    "https://ballotpedia.org/Local_animal_treatment_laws_ballot_measures",
+    "https://proanimal.org/"
+   ]
+  },
+  "paf_statewide_2028": {
+   "forecasts": {
+    "yes_42.0|denver_pass": {
+     "p": 0.13
+    },
+    "yes_42.0|denver_fail": {
+     "p": 0.07
+    },
+    "yes_49.5|denver_pass": {
+     "p": 0.16
+    },
+    "yes_49.5|denver_fail": {
+     "p": 0.09
+    },
+    "yes_50.5|denver_pass": {
+     "p": 0.2
+    },
+    "yes_50.5|denver_fail": {
+     "p": 0.12
+    },
+    "yes_60.0|denver_pass": {
+     "p": 0.27
+    },
+    "yes_60.0|denver_fail": {
+     "p": 0.18
+    },
+    "yes_72.0|denver_pass": {
+     "p": 0.34
+    },
+    "yes_72.0|denver_fail": {
+     "p": 0.24
+    }
+   },
+   "reasoning": "PAF identifies Oregon and Arizona as possible 2028 campaigns, establishing a concrete planning pathway. Statewide qualification requires a much larger operation, and the specified species exclude simply repeating the foie-gras strategy; victories improve resources but leave qualification far from assured. [Published plans](https://proanimal.org/wp-content/uploads/paf-2025-financial-transparency-briefing.pdf).",
+   "sources": [
+    "https://proanimal.org/wp-content/uploads/paf-2025-financial-transparency-briefing.pdf",
+    "https://paxfauna.org/introducing-pro-animal-futures-10-year-plan/"
+   ]
+  },
+  "us_new_coverage_2027_2032": {
+   "forecasts": {
+    "yes_42.0|statewide": {
+     "p05": 0.2,
+     "p25": 7,
+     "p50": 24,
+     "p75": 55,
+     "p95": 120
+    },
+    "yes_42.0|no_statewide": {
+     "p05": 0,
+     "p25": 3,
+     "p50": 16,
+     "p75": 40,
+     "p95": 100
+    },
+    "yes_49.5|statewide": {
+     "p05": 0.3,
+     "p25": 8,
+     "p50": 27,
+     "p75": 60,
+     "p95": 130
+    },
+    "yes_49.5|no_statewide": {
+     "p05": 0.1,
+     "p25": 4,
+     "p50": 18,
+     "p75": 45,
+     "p95": 110
+    },
+    "yes_50.5|statewide": {
+     "p05": 0.3,
+     "p25": 9,
+     "p50": 28,
+     "p75": 61,
+     "p95": 132
+    },
+    "yes_50.5|no_statewide": {
+     "p05": 0.1,
+     "p25": 4,
+     "p50": 19,
+     "p75": 46,
+     "p95": 112
+    },
+    "yes_60.0|statewide": {
+     "p05": 0.5,
+     "p25": 11,
+     "p50": 32,
+     "p75": 67,
+     "p95": 140
+    },
+    "yes_60.0|no_statewide": {
+     "p05": 0.2,
+     "p25": 6,
+     "p50": 22,
+     "p75": 51,
+     "p95": 120
+    },
+    "yes_72.0|statewide": {
+     "p05": 0.7,
+     "p25": 14,
+     "p50": 38,
+     "p75": 76,
+     "p95": 155
+    },
+    "yes_72.0|no_statewide": {
+     "p05": 0.3,
+     "p25": 8,
+     "p50": 26,
+     "p75": 58,
+     "p95": 130
+    }
+   },
+   "reasoning": "Existing state-law activity supplies a substantial independent base rate, while stalled proposals, rollback pressure and federal preemption create a wide range. PAF statewide qualification signals greater capacity but guarantees neither passage nor coverage; DC's result has a modest effect compared with national organizing and which populous states act. [Recent legislative activity](https://www.aspca.org/news/what-lawmakers-did-farm-animals-2025).",
+   "sources": [
+    "https://www.aspca.org/improving-laws-animals/public-policy/farm-animal-confinement-bans",
+    "https://www.aspca.org/news/what-lawmakers-did-farm-animals-2025",
+    "https://awionline.org/resources/enforcement-of-state-farmed-animal-welfare-laws/",
+    "https://proanimal.org/wp-content/uploads/paf-2025-financial-transparency-briefing.pdf",
+    "https://agriculture.house.gov/UploadedFiles/FINAL_2026_Prop12_OnePager.pdf"
+   ]
+  },
+  "other_foie_gras_bans_2030": {
+   "baseline": {
+    "value": 3,
+    "as_of": "2026-10-25",
+    "source": "California, Pittsburgh and Brookline. Pittsburgh: https://ecode360.com/45472700 ; Brookline: https://www.brooklinema.gov/m/newsflash/Archive/Item/2502?arcId=4570 ; tracker: https://www.peta.org/features/foie-gras-bans/ . Portland's prohibition is not yet operative, and NYC remains blocked."
+   },
+   "forecasts": {
+    "yes_49.5": {
+     "p05": 3,
+     "p25": 5,
+     "p50": 6,
+     "p75": 9,
+     "p95": 16
+    },
+    "yes_50.5": {
+     "p05": 3,
+     "p25": 5,
+     "p50": 7,
+     "p75": 10,
+     "p95": 18
+    }
+   },
+   "reasoning": "Portland's enacted but delayed prohibition provides a likely addition, while Denver, NYC litigation and other local proposals create further pathways. DC passage provides a modest organizing precedent; clustered municipal adoption produces a long upper tail. [Portland ordinance](https://www.portland.gov/council/documents/ordinance/passed/192190).",
+   "sources": [
+    "https://www.peta.org/features/foie-gras-bans/",
+    "https://ecode360.com/45472700",
+    "https://www.brooklinema.gov/m/newsflash/Archive/Item/2502?arcId=4570",
+    "https://www.portland.gov/council/documents/ordinance/passed/192190",
+    "https://news.bloomberglaw.com/health-law-and-business/new-york-citys-foie-gras-ban-is-revived-by-state-appeals-court",
+    "https://www.phillyvoice.com/foie-gras-ban-philadelphia-city-council/"
+   ]
+  },
+  "federal_preemption_2030": {
+   "forecasts": {
+    "yes_49.5": {
+     "p": 0.4
+    },
+    "yes_50.5": {
+     "p": 0.4
+    }
+   },
+   "reasoning": "House Farm Bill language supplies a concrete route to preemption, but Senate opposition and competing legislative priorities remain substantial barriers. The horizon allows additional congressional attempts; a bare DC pass has negligible influence on this national contest. [House proposal](https://agriculture.house.gov/UploadedFiles/FINAL_2026_Prop12_OnePager.pdf).",
+   "sources": [
+    "https://www.congress.gov/bill/119th-congress/house-bill/7567",
+    "https://www.congress.gov/bill/119th-congress/house-bill/4673",
+    "https://agriculture.house.gov/UploadedFiles/FINAL_2026_Prop12_OnePager.pdf",
+    "https://www.schiff.senate.gov/news/press-releases/statement-sens-schiff-booker-urge-removal-of-farm-bill-language-that-preempts-state-laws/",
+    "https://secure.aspca.org/action/farm-bill"
+   ]
+  },
+  "dc_bans_other_food_2030": {
+   "forecasts": {
+    "yes_49.5": {
+     "p": 0.18
+    },
+    "yes_50.5": {
+     "p": 0.22
+    }
+   },
+   "reasoning": "Food-additive regulation provides an independent policy trend, but I found no concrete DC proposal meeting the broad all-buyers definition, and many nutrition restrictions would be excluded. I-86 passage modestly strengthens the precedent for product-specific sales prohibitions. [Federal additive-policy context](https://www.hhs.gov/press-room/hhs-fda-food-dyes-food.html).",
+   "sources": [
+    "https://www.hhs.gov/press-room/hhs-fda-food-dyes-food.html",
+    "https://www.cspi.org/page/synthetic-dyes-corporate-commitment-tracker",
+    "https://lims.dccouncil.gov/"
+   ]
+  }
+ }
+}

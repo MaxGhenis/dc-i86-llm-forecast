@@ -1,5 +1,7 @@
 {
+  "attempt_id": "20261025-223010-i86-sol-1/a2",
   "backend": "subfleet",
+  "collected_at": "2026-10-26T07:32:14Z",
   "command": [
     "subfleet",
     "run",
@@ -20,11 +22,18 @@
   "dispatch_rc": 0,
   "dispatch_stdout": "{\"created\": true, \"detached\": true, \"job_id\": \"20261025-223010-i86-sol-1\", \"lane\": null, \"log\": \"/Users/maxghenis/.subfleet/jobs/20261025-223010-i86-sol-1/a1/lane.log\", \"model\": null, \"out\": \"/Users/maxghenis/.subfleet/jobs/20261025-223010-i86-sol-1/a1/deliverable.md\", \"outcome\": \"created\", \"reason\": \"inside a Claude session \\u2014 the job must outlive it\", \"requeried\": false, \"request_id\": \"1fd44178-4f2a-4184-bbba-14fd85c3f0ab\", \"run_id\": \"20261025-223010-i86-sol-1\", \"sandbox\": \"read-only\", \"state\": null, \"wait_inline\": false, \"worktree\": null}\n",
   "dispatched_at": "2026-10-26T05:30:10Z",
+  "finished_at": "2026-10-26T07:19:04Z",
   "job_id": "20261025-223010-i86-sol-1",
   "label": "sol-1",
+  "lane_id": "codex-4",
   "model_pin": null,
+  "model_served": "gpt-6.1-sol",
   "prepared_at": "2026-10-26T05:30:10Z",
+  "prompt_sent_sha256": "2b6cd481ddb6eca123d5ac1f9da4afb1a47ef95fea4eb63bd03d64dbfe272799",
   "prompt_sha256": "2b6cd481ddb6eca123d5ac1f9da4afb1a47ef95fea4eb63bd03d64dbfe272799",
+  "state": "succeeded",
   "tier": "hard",
+  "transcript": "/Users/maxghenis/.subfleet/jobs/20261025-223010-i86-sol-1/a2/stdout",
+  "transcript_original": "/Users/maxghenis/.subfleet/jobs/20261025-223010-i86-sol-1/a2/stdout",
   "workdir": "/Users/maxghenis/.cache/dc-i86-llm-forecast/sol-1"
 }

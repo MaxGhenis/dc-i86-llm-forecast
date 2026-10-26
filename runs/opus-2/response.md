@@ -1,0 +1,557 @@
+I made 22 web searches and page fetches and stayed in read-only plan mode, so I didn't write any files.
+
+```json
+{
+ "forecaster": {
+  "model": "claude-opus-5-5",
+  "prior_context": "none",
+  "notes": "Run in read-only plan mode with web search only; no local files read. I could not retrieve several pages (Axios, City Cast, Denverite, Ballotpedia), so I relied on search snippets for those. I found no public independent poll of DC voters on I-86. The Michelin baseline excludes The Inn at Little Washington, which is in Virginia."
+ },
+ "research_summary": "I-86 qualified with 31,726 valid signatures, the most for any DC initiative. Pro-Animal DC had spent about $336k through Sept 10, with about $224k from Pro-Animal Future and $85k from Dr. Bronner's. Polls are sponsor-linked: a 2023 DC Voters for Animals report found about 80% support, and CSU found 79% in Denver once voters learned about force-feeding. Opposition is late and loosely organized: Butterworth's (Bart Hutchins) is raising money for a legal fight, Jose Andres came out against the ban in late October, and the Restaurant Association of Metropolitan Washington has criticized it. The CSU April 2026 menu study confirmed 17 DC restaurants serving foie gras; activists say nearly 50 list it, many seasonally. Denver IO 311 has no formal opposition campaign; in 2024 Denver rejected PAF's fur ban (about 42% Yes) and slaughterhouse ban (35.4% Yes). Other foie gras sales bans now in force or about to be: California, NYC (in effect from March 2026 after an appellate ruling), Pittsburgh, Brookline, and Portland OR (passed 7-5 in June 2026 with a 180-day phase-in). The CFO puts implementation at $314k over four years; it is unfunded and subject to inclusion in an approved budget. The 2025 Michelin DC guide had 25 starred restaurants including the Inn at Little Washington, or 24 in DC itself. NRA puts DC eating and drinking employment at about 54.6k for 2025; the brief gives 51.5k for September 2026.",
+ "nodes": {
+  "yes_share": {
+   "forecasts": {
+    "all": {
+     "le_30": 0.003,
+     "le_35": 0.007,
+     "le_40": 0.015,
+     "le_45": 0.035,
+     "le_47": 0.05,
+     "le_48": 0.06,
+     "le_49": 0.075,
+     "le_50": 0.09,
+     "le_51": 0.105,
+     "le_52": 0.125,
+     "le_53": 0.145,
+     "le_55": 0.2,
+     "le_60": 0.37,
+     "le_65": 0.6,
+     "le_70": 0.8,
+     "le_75": 0.92,
+     "le_80": 0.975,
+     "le_85": 0.993,
+     "le_90": 0.999
+    }
+   },
+   "reasoning": "DC voters approve progressive initiatives by large margins (I-82 about 74%, I-81 about 76%). Sponsor polls show about 80% support for ending force-fed foie gras, and the Yes side has far more money than a loosely organized opposition. On the other side, Denver voters rejected the fur ban 42-58 even though polls were favorable, and José Andrés plus a 'nanny state' and restaurant-hardship framing could cost several points. My median is about 63% Yes, with a fat left tail.",
+   "sources": ["https://www.idausa.org/campaign/farmed-animal/latest-news/washington-dc-residents-vote-to-ban-foie-gras-on-nov-3/", "https://www.axios.com/local/washington-dc/2026/10/21/dc-foie-gras-ban-ballot-initiative-fight", "https://www.axios.com/local/washington-dc/2026/10/23/jose-andres-dc-foie-gras-ban-chef-protest", "https://washingtondcmagazine.substack.com/p/dc-voters-will-decide-november-3"]
+  },
+  "turnout": {
+   "forecasts": {
+    "all": {
+     "p05": 150000,
+     "p25": 180000,
+     "p50": 198000,
+     "p75": 215000,
+     "p95": 245000
+    }
+   },
+   "reasoning": "The 2022 DC midterm general had about 200k ballots, and I-82 drew roughly 185-190k Yes+No votes. The 2026 midterm has an open mayoral seat and a high-energy national environment, offset by some ballot roll-off on a low-salience food measure.",
+   "sources": ["https://www.popville.com/2026/08/force-fed-foie-gras-prohibition-dc-i86-qualifies-for-nov-ballot/"]
+  },
+  "denver_io311_passes": {
+   "forecasts": {
+    "yes_42.0": {"p": 0.3},
+    "yes_49.5": {"p": 0.43},
+    "yes_50.5": {"p": 0.45},
+    "yes_60.0": {"p": 0.6},
+    "yes_72.0": {"p": 0.78}
+   },
+   "reasoning": "PAF's 2024 Denver fur ban got about 42% and the slaughterhouse ban about 35%. A foie gras ban is a much easier ask, CSU found 79% informed support, and no formal opposition campaign has formed. Overall I put passage at about 0.57. DC's result is a correlated signal of how voters treat food-welfare bans, so the cells rise with DC's Yes share, with only a small step across 50%.",
+   "sources": ["https://hoodline.com/2026/09/denver-voters-to-decide-foie-gras-ban-restaurants-face-5-000-fines/", "https://sites.warnercnr.colostate.edu/animalhumanpolicy/?p=792", "https://www.foodprocessing.com/business-of-food-beverage/legal-issues/news/55240976/denver-colo-sonoma-county-calif-voters-reject-bans-on-slaughterhouses-factory-farms", "https://denverite.com/2024/11/05/denver-ballot-measure-308-results-2024-elections/"]
+  },
+  "ban_status": {
+   "forecasts": {
+    "yes_50.5": {"repealed": 0.15, "congress": 0.08, "court": 0.04, "not_certified": 0.33, "certified": 0.4},
+    "yes_60.0": {"repealed": 0.07, "congress": 0.07, "court": 0.04, "not_certified": 0.33, "certified": 0.49},
+    "yes_72.0": {"repealed": 0.03, "congress": 0.06, "court": 0.03, "not_certified": 0.32, "certified": 0.56}
+   },
+   "reasoning": "The DC Council has repealed or amended initiatives before (I-77 repealed in 2018, I-82 changed in 2025). It is far more willing to do that after a narrow win, though foie gras is low-stakes compared with wages. A congressional rider is plausible given the measure's Capitol Hill and Trump-world opponents, but riders on minor DC issues are uncommon. A court block of the entire sale ban is unlikely because the Supreme Court upheld California's Prop 12 sales standards against a commerce-clause challenge (NPPC v. Ross, 2023). The $101-104k a year cost is small, but DC budgets are tight and unfunded initiatives can wait years for the CFO certification.",
+   "sources": ["https://hoodline.com/2026/08/foie-gras-ban-storms-d-c-ballot-as-city-faces-unfunded-314k-bill/", "https://www.axios.com/local/washington-dc/2026/10/21/dc-foie-gras-ban-ballot-initiative-fight"]
+  },
+  "lawsuit_filed": {
+   "forecasts": {
+    "yes_50.5|blocked": {"p": 0.99},
+    "yes_50.5|not_blocked": {"p": 0.55},
+    "yes_60.0|blocked": {"p": 0.99},
+    "yes_60.0|not_blocked": {"p": 0.5},
+    "yes_72.0|blocked": {"p": 0.99},
+    "yes_72.0|not_blocked": {"p": 0.45}
+   },
+   "reasoning": "Butterworth's is already raising money for legal defense and its chef says he is planning a legal fight. Foie gras producers have sued over the California and NYC bans. The vague 'fattened' definition and the import ban give plausible grounds for a challenge. A court block requires a lawsuit, so the blocked cells are near 1.",
+   "sources": ["https://www.axios.com/local/washington-dc/2026/10/21/dc-foie-gras-ban-ballot-initiative-fight", "https://news.bgov.com/new-york-brief/new-york-citys-foie-gras-ban-is-revived-by-state-appeals-court"]
+  },
+  "fattened_narrowed": {
+   "forecasts": {
+    "yes_50.5|certified": {"p": 0.35},
+    "yes_50.5|not_certified": {"p": 0.2}
+   },
+   "reasoning": "Section 3(3) covers livers of birds 'fattened through any method', which literally reaches ordinary pâté. The sponsors and press describe the measure as aimed only at force-fed products, so a DOEE rule or a Council technical amendment is plausible. DOEE rulemaking is slow, though, and is less likely to happen before funding is certified.",
+   "sources": ["https://wtop.com/dc/2026/08/a-foie-gras-ban-will-be-on-the-dc-ballot-in-november/"]
+  },
+  "pate_treated_banned": {
+   "forecasts": {
+    "yes_50.5|narrowed_certified": {"p": 0.01},
+    "yes_50.5|narrowed_not_certified": {"p": 0.005},
+    "yes_50.5|not_narrowed_certified": {"p": 0.06},
+    "yes_50.5|not_narrowed_not_certified": {"p": 0.03},
+    "yes_50.5|narrowed_not_certified": {"p": 0.005}
+   },
+   "reasoning": "The CFO says DOEE will not inspect back-of-house and will rely on complaints and referrals. The agency has no incentive to treat chicken-liver pâté as fattened liver. That could happen on a stray complaint only if the definition is never narrowed and enforcement is funded.",
+   "sources": ["https://dcboe.org/getmedia/8ed77952-835c-4a11-9fa2-2ad447d82643/Final-FIS-Initiative-Prohibiting-the-Force-Feeding-of-Birds-Act-of-2026.pdf"]
+  },
+  "foie_gras_menus": {
+   "baseline": {"value": 30, "as_of": "2026-10", "source": "Estimate between the CSU AHPC April 2026 menu study (17 confirmed DC restaurants) and the Pro-Animal DC list (nearly 50, many seasonal)"},
+   "forecasts": {
+    "yes_49.5|failed": {"p05": 14, "p25": 22, "p50": 28, "p75": 35, "p95": 48},
+    "yes_50.5|removed": {"p05": 10, "p25": 18, "p50": 24, "p75": 31, "p95": 44},
+    "yes_50.5|not_certified": {"p05": 2, "p25": 6, "p50": 11, "p75": 18, "p95": 30},
+    "yes_50.5|certified": {"p05": 0, "p25": 1, "p50": 3, "p75": 6, "p95": 12}
+   },
+   "reasoning": "Without a ban, counts drift slightly down with the industry and seasonal menus. A ban removed after passage still leaves some chilling effect. If the ban stands but funding is not certified, many restaurants still drop foie gras because of the July 2027 date and the stigma. If it is certified, only a few defiant holdouts like Butterworth's remain.",
+   "sources": ["https://sites.warnercnr.colostate.edu/animalhumanpolicy/?p=792", "https://washingtondcmagazine.substack.com/p/dc-voters-will-decide-november-3"]
+  },
+  "liver_pate_menus": {
+   "baseline": {"value": 150, "as_of": "2026-10", "source": "Own estimate: chicken-liver mousse or pâté is a common bistro and charcuterie item among about 2,700 DC eating places (NRA DC fact sheet); no published count"},
+   "forecasts": {
+    "yes_49.5|failed": {"p05": 80, "p25": 120, "p50": 150, "p75": 185, "p95": 250},
+    "yes_50.5|removed": {"p05": 80, "p25": 118, "p50": 148, "p75": 183, "p95": 248},
+    "yes_50.5|standing_pate_allowed": {"p05": 75, "p25": 112, "p50": 142, "p75": 177, "p95": 240},
+    "yes_50.5|standing_pate_banned": {"p05": 30, "p25": 60, "p50": 85, "p75": 115, "p95": 170}
+   },
+   "reasoning": "Liver pâté is widespread and has nothing to do with force-feeding, so it barely moves unless DOEE actually enforces the ban against it. Even then many restaurants would keep it or relabel it.",
+   "sources": ["https://www.restaurant.org/research-and-media/research/industry-statistics/district-of-columbia-fact-sheet"]
+  },
+  "us_ducks_force_fed_2030": {
+   "baseline": {"value": 350000, "as_of": "2026", "source": "Own estimate from reported Hudson Valley Foie Gras and La Belle Farms volumes (a few hundred thousand ducks a year combined); no official data"},
+   "forecasts": {
+    "yes_49.5|failed": {"p05": 150000, "p25": 250000, "p50": 320000, "p75": 400000, "p95": 550000},
+    "yes_50.5|not_certified_or_removed": {"p05": 145000, "p25": 245000, "p50": 315000, "p75": 395000, "p95": 545000},
+    "yes_50.5|certified": {"p05": 140000, "p25": 240000, "p50": 310000, "p75": 390000, "p95": 540000}
+   },
+   "reasoning": "US production is concentrated in two New York farms. NYC's ban, in force since 2026, removes a large market, so volumes trend down. DC's market is small, about 17-50 menus, so I-86 moves production only marginally.",
+   "sources": ["https://www.peta.org/features/foie-gras-bans/"]
+  },
+  "dc_restaurant_employment_2029": {
+   "baseline": {"value": 51.5, "as_of": "2026-09", "source": "FRED SMU11000007072200001 per brief"},
+   "forecasts": {
+    "yes_49.5|failed": {"p05": 46.5, "p25": 50.0, "p50": 52.0, "p75": 54.0, "p95": 57.0},
+    "yes_50.5|not_certified_or_removed": {"p05": 46.5, "p25": 50.0, "p50": 52.0, "p75": 54.0, "p95": 57.0},
+    "yes_50.5|certified": {"p05": 46.4, "p25": 49.9, "p50": 51.95, "p75": 53.95, "p95": 56.95}
+   },
+   "reasoning": "Employment has been flat to soft since I-82 and the federal workforce cuts. The foie gras ban affects a few dozen menu items, so the cells differ by a negligible amount. The spread reflects macro and federal-employment risk.",
+   "sources": ["https://www.restaurant.org/issues-and-advocacy/dc-restaurant-employment", "https://fred.stlouisfed.org/series/SMU11000007072200001"]
+  },
+  "dc_restaurant_sales_tax_fy2029": {
+   "baseline": {"value": 567.9, "as_of": "FY2025", "source": "DC ORA, 2026-04-14, https://ora-cfo.dc.gov/node/1824291"},
+   "forecasts": {
+    "yes_49.5|failed": {"p05": 560, "p25": 605, "p50": 635, "p75": 665, "p95": 710},
+    "yes_50.5|not_certified_or_removed": {"p05": 560, "p25": 605, "p50": 635, "p75": 665, "p95": 710},
+    "yes_50.5|certified": {"p05": 559, "p25": 604, "p50": 634, "p75": 664, "p95": 709}
+   },
+   "reasoning": "I assume roughly 2.5-3% nominal annual growth from FY2025, held back by a sector that lags hotels and other retail. Foie gras sales are trivially small relative to about $6 billion in taxable restaurant sales.",
+   "sources": ["https://ora-cfo.dc.gov/node/1824291"]
+  },
+  "dc_michelin_starred_2029": {
+   "baseline": {"value": 24, "as_of": "2025-11", "source": "Michelin Guide Washington DC 2025: 25 starred including The Inn at Little Washington (VA); 24 in DC"},
+   "forecasts": {
+    "yes_49.5|failed": {"p05": 18, "p25": 21, "p50": 23, "p75": 25, "p95": 28},
+    "yes_50.5|not_certified_or_removed": {"p05": 18, "p25": 21, "p50": 23, "p75": 25, "p95": 28},
+    "yes_50.5|certified": {"p05": 18, "p25": 21, "p50": 23, "p75": 25, "p95": 28}
+   },
+   "reasoning": "DC's star count has been steady at about 23-25, with no new stars in 2025. Starred kitchens substitute easily for foie gras, as they have in California and NYC, so the ban has no measurable effect.",
+   "sources": ["https://en.wikipedia.org/wiki/List_of_Michelin-starred_restaurants_in_Washington,_D.C.", "https://wtop.com/business-finance/2025/11/michelin-guide-doesnt-include-any-new-stars-for-dc-restaurants/"]
+  },
+  "dc_animal_initiative_filed": {
+   "forecasts": {
+    "yes_42.0": {"p": 0.12},
+    "yes_49.5": {"p": 0.2},
+    "yes_50.5": {"p": 0.3},
+    "yes_60.0": {"p": 0.4},
+    "yes_72.0": {"p": 0.5}
+   },
+   "reasoning": "PAF's model is a series of cheap local initiatives, and a DC win, especially a big one, invites a follow-up in DC for 2028 such as a fur ban or confinement standards. A loss makes PAF more likely to shift its effort to other cities.",
+   "sources": ["https://manifund.org/projects/pro-animal-future"]
+  },
+  "dc_another_animal_law": {
+   "forecasts": {
+    "yes_42.0|filed": {"p": 0.22},
+    "yes_42.0|not_filed": {"p": 0.06},
+    "yes_49.5|filed": {"p": 0.27},
+    "yes_49.5|not_filed": {"p": 0.07},
+    "yes_50.5|filed": {"p": 0.32},
+    "yes_50.5|not_filed": {"p": 0.08},
+    "yes_60.0|filed": {"p": 0.38},
+    "yes_60.0|not_filed": {"p": 0.09},
+    "yes_72.0|filed": {"p": 0.45},
+    "yes_72.0|not_filed": {"p": 0.1}
+   },
+   "reasoning": "A filed initiative still has to qualify, pass and survive the Council. The Council itself has passed a few product-sale bans such as ivory and rhino horn, but a DC fur ban effort stalled. A strong I-86 result raises both paths.",
+   "sources": ["https://washingtonsun.com/metro/foie-gras-ban-washington-dc?redirected=notus_org"]
+  },
+  "dc_council_farmed_animal_bills": {
+   "forecasts": {
+    "yes_42.0": {"p05": 0, "p25": 1, "p50": 1, "p75": 3, "p95": 5},
+    "yes_49.5": {"p05": 0, "p25": 1, "p50": 2, "p75": 3, "p95": 5},
+    "yes_50.5": {"p05": 0, "p25": 1, "p50": 2, "p75": 3, "p95": 6},
+    "yes_60.0": {"p05": 0, "p25": 1, "p50": 2, "p75": 4, "p95": 7},
+    "yes_72.0": {"p05": 0, "p25": 1, "p50": 3, "p75": 4, "p95": 8}
+   },
+   "reasoning": "Farmed-animal bills are rare in DC, perhaps a handful per council period on topics like fur or cage-free eggs. A strong vote encourages members to introduce more.",
+   "sources": []
+  },
+  "paf_measures_2027_2028": {
+   "forecasts": {
+    "yes_42.0|denver_pass": {"0": 0.15, "1": 0.27, "2": 0.27, "3": 0.16, "4": 0.08, "5+": 0.07},
+    "yes_42.0|denver_fail": {"0": 0.3, "1": 0.3, "2": 0.22, "3": 0.1, "4": 0.05, "5+": 0.03},
+    "yes_49.5|denver_pass": {"0": 0.13, "1": 0.25, "2": 0.27, "3": 0.18, "4": 0.09, "5+": 0.08},
+    "yes_49.5|denver_fail": {"0": 0.26, "1": 0.3, "2": 0.23, "3": 0.12, "4": 0.05, "5+": 0.04},
+    "yes_50.5|denver_pass": {"0": 0.1, "1": 0.22, "2": 0.27, "3": 0.2, "4": 0.11, "5+": 0.1},
+    "yes_50.5|denver_fail": {"0": 0.2, "1": 0.28, "2": 0.25, "3": 0.14, "4": 0.07, "5+": 0.06},
+    "yes_60.0|denver_pass": {"0": 0.08, "1": 0.2, "2": 0.26, "3": 0.21, "4": 0.13, "5+": 0.12},
+    "yes_60.0|denver_fail": {"0": 0.17, "1": 0.26, "2": 0.26, "3": 0.16, "4": 0.08, "5+": 0.07},
+    "yes_72.0|denver_pass": {"0": 0.06, "1": 0.17, "2": 0.25, "3": 0.22, "4": 0.15, "5+": 0.15},
+    "yes_72.0|denver_fail": {"0": 0.14, "1": 0.24, "2": 0.26, "3": 0.18, "4": 0.1, "5+": 0.08}
+   },
+   "reasoning": "PAF has put two Denver measures on the 2024 ballot and two measures on the 2026 ballot (DC and Denver). It plans to scale up and aims for statewide measures by 2030, so 1-3 measures in 2027-28 is typical. Wins in DC and Denver increase funding and the number of cities it targets.",
+   "sources": ["https://manifund.org/projects/pro-animal-future", "https://proanimal.org/media-coverage/foie-gras-question-will-be-on-denvers-2026-ballot/"]
+  },
+  "paf_statewide_2028": {
+   "forecasts": {
+    "yes_42.0|denver_pass": {"p": 0.14},
+    "yes_42.0|denver_fail": {"p": 0.08},
+    "yes_49.5|denver_pass": {"p": 0.16},
+    "yes_49.5|denver_fail": {"p": 0.1},
+    "yes_50.5|denver_pass": {"p": 0.2},
+    "yes_50.5|denver_fail": {"p": 0.13},
+    "yes_60.0|denver_pass": {"p": 0.23},
+    "yes_60.0|denver_fail": {"p": 0.15},
+    "yes_72.0|denver_pass": {"p": 0.27},
+    "yes_72.0|denver_fail": {"p": 0.18}
+   },
+   "reasoning": "Qualifying a statewide measure takes far more signatures and money than PAF has used so far. Its stated goal is 2030, so 2028 would be early. Local wins raise the chance it accelerates.",
+   "sources": ["https://manifund.org/projects/pro-animal-future"]
+  },
+  "us_new_coverage_2027_2032": {
+   "forecasts": {
+    "yes_42.0|statewide": {"p05": 0.5, "p25": 3, "p50": 8, "p75": 18, "p95": 50},
+    "yes_42.0|no_statewide": {"p05": 0.2, "p25": 2, "p50": 6, "p75": 14, "p95": 45},
+    "yes_49.5|statewide": {"p05": 0.5, "p25": 3, "p50": 8.5, "p75": 19, "p95": 52},
+    "yes_49.5|no_statewide": {"p05": 0.2, "p25": 2, "p50": 6.5, "p75": 15, "p95": 46},
+    "yes_50.5|statewide": {"p05": 0.6, "p25": 3.5, "p50": 9.5, "p75": 21, "p95": 55},
+    "yes_50.5|no_statewide": {"p05": 0.3, "p25": 2.2, "p50": 7, "p75": 16, "p95": 48},
+    "yes_60.0|statewide": {"p05": 0.7, "p25": 4, "p50": 10.5, "p75": 23, "p95": 58},
+    "yes_60.0|no_statewide": {"p05": 0.3, "p25": 2.5, "p50": 7.5, "p75": 17, "p95": 50},
+    "yes_72.0|statewide": {"p05": 0.8, "p25": 4.5, "p50": 11.5, "p75": 25, "p95": 62},
+    "yes_72.0|no_statewide": {"p05": 0.35, "p25": 2.8, "p50": 8, "p75": 18, "p95": 52},
+    "yes_42.0|no_statewide_dummy_ignore": null
+   },
+   "reasoning": "New coverage comes from occasional state cage-free or crate laws (each adds several million people), local foie gras bans like Portland's, and possibly a PAF statewide measure, which might pass about half the time. Federal preemption risk and the slowdown after 2021 keep the median in single-digit millions.",
+   "sources": ["https://opb.org/article/2026/06/04/portland-approves-foie-gras-ban/"]
+  },
+  "other_foie_gras_bans_2030": {
+   "baseline": {"value": 5, "as_of": "2026-10-25", "source": "PETA foie gras bans tracker and news: California (state), New York City, Pittsburgh, Brookline MA, Portland OR"},
+   "forecasts": {
+    "yes_49.5": {"p05": 4, "p25": 5, "p50": 6, "p75": 8, "p95": 11},
+    "yes_50.5": {"p05": 4, "p25": 5, "p50": 7, "p75": 8, "p95": 12}
+   },
+   "reasoning": "The baseline is 5 and rises if Denver passes, roughly a coin flip, plus about one more city every couple of years (Philadelphia and others are pending). A DC pass slightly raises momentum. Repeal or an injunction could knock one out, as happened with Chicago and with NYC's long litigation.",
+   "sources": ["https://www.peta.org/features/foie-gras-bans/", "https://opb.org/article/2026/06/04/portland-approves-foie-gras-ban/", "https://news.bgov.com/new-york-brief/new-york-citys-foie-gras-ban-is-revived-by-state-appeals-court"]
+  },
+  "federal_preemption_2030": {
+   "forecasts": {
+    "yes_49.5": {"p": 0.25},
+    "yes_50.5": {"p": 0.26}
+   },
+   "reasoning": "House farm bill drafts since 2024 have included Prop 12 preemption (the Save Our Bacon Act). It faces Senate resistance and the farm bill keeps stalling, so I give it about a 25% chance of enactment by 2030. A DC foie gras result barely matters.",
+   "sources": []
+  },
+  "dc_bans_other_food_2030": {
+   "forecasts": {
+    "yes_49.5": {"p": 0.12},
+    "yes_50.5": {"p": 0.13}
+   },
+   "reasoning": "The main path is a ban on food dyes or additives for all buyers, following West Virginia's 2025 law, while many states limit such rules to schools. DC has no such bill moving yet, so I put it at about 12%.",
+   "sources": []
+  }
+ }
+}
+```
+
+Correction: the JSON above has two template errors. It repeats the `narrowed_not_certified` key in `pate_treated_banned` and adds a stray `null` key in `us_new_coverage_2027_2032`. This is the corrected final deliverable:
+
+```json
+{
+ "forecaster": {
+  "model": "claude-opus-5-5",
+  "prior_context": "none",
+  "notes": "Run in read-only plan mode with web search only; no local files read. I could not retrieve several pages (Axios, City Cast, Denverite, Ballotpedia), so I relied on search snippets for those. I found no public independent poll of DC voters on I-86. The Michelin baseline excludes The Inn at Little Washington, which is in Virginia."
+ },
+ "research_summary": "I-86 qualified with 31,726 valid signatures, the most for any DC initiative. Pro-Animal DC had spent about $336k through Sept 10, with about $224k from Pro-Animal Future and $85k from Dr. Bronner's. Polls are sponsor-linked: a 2023 DC Voters for Animals report found about 80% support, and CSU found 79% in Denver once voters learned about force-feeding. Opposition is late and loosely organized: Butterworth's (Bart Hutchins) is raising money for a legal fight, Jose Andres came out against the ban in late October, and the Restaurant Association of Metropolitan Washington has criticized it. The CSU April 2026 menu study confirmed 17 DC restaurants serving foie gras; activists say nearly 50 list it, many seasonally. Denver IO 311 has no formal opposition campaign; in 2024 Denver rejected PAF's fur ban (about 42% Yes) and slaughterhouse ban (35.4% Yes). Other foie gras sales bans now in force or about to be: California, NYC (in effect from March 2026 after an appellate ruling), Pittsburgh, Brookline, and Portland OR (passed 7-5 in June 2026 with a 180-day phase-in). The CFO puts implementation at $314k over four years; it is unfunded and subject to inclusion in an approved budget. The 2025 Michelin DC guide had 25 starred restaurants including the Inn at Little Washington, or 24 in DC itself. NRA puts DC eating and drinking employment at about 54.6k for 2025; the brief gives 51.5k for September 2026.",
+ "nodes": {
+  "yes_share": {
+   "forecasts": {
+    "all": {
+     "le_30": 0.003,
+     "le_35": 0.007,
+     "le_40": 0.015,
+     "le_45": 0.035,
+     "le_47": 0.05,
+     "le_48": 0.06,
+     "le_49": 0.075,
+     "le_50": 0.09,
+     "le_51": 0.105,
+     "le_52": 0.125,
+     "le_53": 0.145,
+     "le_55": 0.2,
+     "le_60": 0.37,
+     "le_65": 0.6,
+     "le_70": 0.8,
+     "le_75": 0.92,
+     "le_80": 0.975,
+     "le_85": 0.993,
+     "le_90": 0.999
+    }
+   },
+   "reasoning": "DC voters approve progressive initiatives by large margins (I-82 about 74%, I-81 about 76%). Sponsor polls show about 80% support for ending force-fed foie gras, and the Yes side has far more money than a loosely organized opposition. On the other side, Denver voters rejected the fur ban 42-58 even though polls were favorable, and José Andrés plus a 'nanny state' and restaurant-hardship framing could cost several points. My median is about 63% Yes, with a fat left tail.",
+   "sources": ["https://www.idausa.org/campaign/farmed-animal/latest-news/washington-dc-residents-vote-to-ban-foie-gras-on-nov-3/", "https://www.axios.com/local/washington-dc/2026/10/21/dc-foie-gras-ban-ballot-initiative-fight", "https://www.axios.com/local/washington-dc/2026/10/23/jose-andres-dc-foie-gras-ban-chef-protest", "https://washingtondcmagazine.substack.com/p/dc-voters-will-decide-november-3"]
+  },
+  "turnout": {
+   "forecasts": {
+    "all": {
+     "p05": 150000,
+     "p25": 180000,
+     "p50": 198000,
+     "p75": 215000,
+     "p95": 245000
+    }
+   },
+   "reasoning": "The 2022 DC midterm general had about 200k ballots, and I-82 drew roughly 185-190k Yes+No votes. The 2026 midterm has an open mayoral seat and a high-energy national environment, offset by some ballot roll-off on a low-salience food measure.",
+   "sources": ["https://www.popville.com/2026/08/force-fed-foie-gras-prohibition-dc-i86-qualifies-for-nov-ballot/"]
+  },
+  "denver_io311_passes": {
+   "forecasts": {
+    "yes_42.0": {"p": 0.3},
+    "yes_49.5": {"p": 0.43},
+    "yes_50.5": {"p": 0.45},
+    "yes_60.0": {"p": 0.6},
+    "yes_72.0": {"p": 0.78}
+   },
+   "reasoning": "PAF's 2024 Denver fur ban got about 42% and the slaughterhouse ban about 35%. A foie gras ban is a much easier ask, CSU found 79% informed support, and no formal opposition campaign has formed. Overall I put passage at about 0.57. DC's result is a correlated signal of how voters treat food-welfare bans, so the cells rise with DC's Yes share, with only a small step across 50%.",
+   "sources": ["https://hoodline.com/2026/09/denver-voters-to-decide-foie-gras-ban-restaurants-face-5-000-fines/", "https://sites.warnercnr.colostate.edu/animalhumanpolicy/?p=792", "https://www.foodprocessing.com/business-of-food-beverage/legal-issues/news/55240976/denver-colo-sonoma-county-calif-voters-reject-bans-on-slaughterhouses-factory-farms", "https://denverite.com/2024/11/05/denver-ballot-measure-308-results-2024-elections/"]
+  },
+  "ban_status": {
+   "forecasts": {
+    "yes_50.5": {"repealed": 0.15, "congress": 0.08, "court": 0.04, "not_certified": 0.33, "certified": 0.4},
+    "yes_60.0": {"repealed": 0.07, "congress": 0.07, "court": 0.04, "not_certified": 0.33, "certified": 0.49},
+    "yes_72.0": {"repealed": 0.03, "congress": 0.06, "court": 0.03, "not_certified": 0.32, "certified": 0.56}
+   },
+   "reasoning": "The DC Council has repealed or amended initiatives before (I-77 repealed in 2018, I-82 changed in 2025). It is far more willing to do that after a narrow win, though foie gras is low-stakes compared with wages. A congressional rider is plausible given the measure's Capitol Hill and Trump-world opponents, but riders on minor DC issues are uncommon. A court block of the entire sale ban is unlikely because the Supreme Court upheld California's Prop 12 sales standards against a commerce-clause challenge (NPPC v. Ross, 2023). The $101-104k a year cost is small, but DC budgets are tight and unfunded initiatives can wait years for the CFO certification.",
+   "sources": ["https://hoodline.com/2026/08/foie-gras-ban-storms-d-c-ballot-as-city-faces-unfunded-314k-bill/", "https://www.axios.com/local/washington-dc/2026/10/21/dc-foie-gras-ban-ballot-initiative-fight"]
+  },
+  "lawsuit_filed": {
+   "forecasts": {
+    "yes_50.5|blocked": {"p": 0.99},
+    "yes_50.5|not_blocked": {"p": 0.55},
+    "yes_60.0|blocked": {"p": 0.99},
+    "yes_60.0|not_blocked": {"p": 0.5},
+    "yes_72.0|blocked": {"p": 0.99},
+    "yes_72.0|not_blocked": {"p": 0.45}
+   },
+   "reasoning": "Butterworth's is already raising money for legal defense and its chef says he is planning a legal fight. Foie gras producers have sued over the California and NYC bans. The vague 'fattened' definition and the import ban give plausible grounds for a challenge. A court block requires a lawsuit, so the blocked cells are near 1.",
+   "sources": ["https://www.axios.com/local/washington-dc/2026/10/21/dc-foie-gras-ban-ballot-initiative-fight", "https://news.bgov.com/new-york-brief/new-york-citys-foie-gras-ban-is-revived-by-state-appeals-court"]
+  },
+  "fattened_narrowed": {
+   "forecasts": {
+    "yes_50.5|certified": {"p": 0.35},
+    "yes_50.5|not_certified": {"p": 0.2}
+   },
+   "reasoning": "Section 3(3) covers livers of birds 'fattened through any method', which literally reaches ordinary pâté. The sponsors and press describe the measure as aimed only at force-fed products, so a DOEE rule or a Council technical amendment is plausible. DOEE rulemaking is slow, though, and is less likely to happen before funding is certified.",
+   "sources": ["https://wtop.com/dc/2026/08/a-foie-gras-ban-will-be-on-the-dc-ballot-in-november/"]
+  },
+  "pate_treated_banned": {
+   "forecasts": {
+    "yes_50.5|narrowed_certified": {"p": 0.01},
+    "yes_50.5|narrowed_not_certified": {"p": 0.005},
+    "yes_50.5|not_narrowed_certified": {"p": 0.06},
+    "yes_50.5|not_narrowed_not_certified": {"p": 0.03}
+   },
+   "reasoning": "The CFO says DOEE will not inspect back-of-house and will rely on complaints and referrals. The agency has no incentive to treat chicken-liver pâté as fattened liver. That could happen on a stray complaint only if the definition is never narrowed and enforcement is funded.",
+   "sources": ["https://dcboe.org/getmedia/8ed77952-835c-4a11-9fa2-2ad447d82643/Final-FIS-Initiative-Prohibiting-the-Force-Feeding-of-Birds-Act-of-2026.pdf"]
+  },
+  "foie_gras_menus": {
+   "baseline": {"value": 30, "as_of": "2026-10", "source": "Estimate between the CSU AHPC April 2026 menu study (17 confirmed DC restaurants) and the Pro-Animal DC list (nearly 50, many seasonal)"},
+   "forecasts": {
+    "yes_49.5|failed": {"p05": 14, "p25": 22, "p50": 28, "p75": 35, "p95": 48},
+    "yes_50.5|removed": {"p05": 10, "p25": 18, "p50": 24, "p75": 31, "p95": 44},
+    "yes_50.5|not_certified": {"p05": 2, "p25": 6, "p50": 11, "p75": 18, "p95": 30},
+    "yes_50.5|certified": {"p05": 0, "p25": 1, "p50": 3, "p75": 6, "p95": 12}
+   },
+   "reasoning": "Without a ban, counts drift slightly down with the industry and seasonal menus. A ban removed after passage still leaves some chilling effect. If the ban stands but funding is not certified, many restaurants still drop foie gras because of the July 2027 date and the stigma. If it is certified, only a few defiant holdouts like Butterworth's remain.",
+   "sources": ["https://sites.warnercnr.colostate.edu/animalhumanpolicy/?p=792", "https://washingtondcmagazine.substack.com/p/dc-voters-will-decide-november-3"]
+  },
+  "liver_pate_menus": {
+   "baseline": {"value": 150, "as_of": "2026-10", "source": "Own estimate: chicken-liver mousse or pâté is a common bistro and charcuterie item among about 2,700 DC eating places (NRA DC fact sheet); no published count"},
+   "forecasts": {
+    "yes_49.5|failed": {"p05": 80, "p25": 120, "p50": 150, "p75": 185, "p95": 250},
+    "yes_50.5|removed": {"p05": 80, "p25": 118, "p50": 148, "p75": 183, "p95": 248},
+    "yes_50.5|standing_pate_allowed": {"p05": 75, "p25": 112, "p50": 142, "p75": 177, "p95": 240},
+    "yes_50.5|standing_pate_banned": {"p05": 30, "p25": 60, "p50": 85, "p75": 115, "p95": 170}
+   },
+   "reasoning": "Liver pâté is widespread and has nothing to do with force-feeding, so it barely moves unless DOEE actually enforces the ban against it. Even then many restaurants would keep it or relabel it.",
+   "sources": ["https://www.restaurant.org/research-and-media/research/industry-statistics/district-of-columbia-fact-sheet"]
+  },
+  "us_ducks_force_fed_2030": {
+   "baseline": {"value": 350000, "as_of": "2026", "source": "Own estimate from reported Hudson Valley Foie Gras and La Belle Farms volumes (a few hundred thousand ducks a year combined); no official data"},
+   "forecasts": {
+    "yes_49.5|failed": {"p05": 150000, "p25": 250000, "p50": 320000, "p75": 400000, "p95": 550000},
+    "yes_50.5|not_certified_or_removed": {"p05": 145000, "p25": 245000, "p50": 315000, "p75": 395000, "p95": 545000},
+    "yes_50.5|certified": {"p05": 140000, "p25": 240000, "p50": 310000, "p75": 390000, "p95": 540000}
+   },
+   "reasoning": "US production is concentrated in two New York farms. NYC's ban, in force since 2026, removes a large market, so volumes trend down. DC's market is small, about 17-50 menus, so I-86 moves production only marginally.",
+   "sources": ["https://www.peta.org/features/foie-gras-bans/"]
+  },
+  "dc_restaurant_employment_2029": {
+   "baseline": {"value": 51.5, "as_of": "2026-09", "source": "FRED SMU11000007072200001 per brief"},
+   "forecasts": {
+    "yes_49.5|failed": {"p05": 46.5, "p25": 50.0, "p50": 52.0, "p75": 54.0, "p95": 57.0},
+    "yes_50.5|not_certified_or_removed": {"p05": 46.5, "p25": 50.0, "p50": 52.0, "p75": 54.0, "p95": 57.0},
+    "yes_50.5|certified": {"p05": 46.4, "p25": 49.9, "p50": 51.95, "p75": 53.95, "p95": 56.95}
+   },
+   "reasoning": "Employment has been flat to soft since I-82 and the federal workforce cuts. The foie gras ban affects a few dozen menu items, so the cells differ by a negligible amount. The spread reflects macro and federal-employment risk.",
+   "sources": ["https://www.restaurant.org/issues-and-advocacy/dc-restaurant-employment", "https://fred.stlouisfed.org/series/SMU11000007072200001"]
+  },
+  "dc_restaurant_sales_tax_fy2029": {
+   "baseline": {"value": 567.9, "as_of": "FY2025", "source": "DC ORA, 2026-04-14, https://ora-cfo.dc.gov/node/1824291"},
+   "forecasts": {
+    "yes_49.5|failed": {"p05": 560, "p25": 605, "p50": 635, "p75": 665, "p95": 710},
+    "yes_50.5|not_certified_or_removed": {"p05": 560, "p25": 605, "p50": 635, "p75": 665, "p95": 710},
+    "yes_50.5|certified": {"p05": 559, "p25": 604, "p50": 634, "p75": 664, "p95": 709}
+   },
+   "reasoning": "I assume roughly 2.5-3% nominal annual growth from FY2025, held back by a sector that lags hotels and other retail. Foie gras sales are trivially small relative to about $6 billion in taxable restaurant sales.",
+   "sources": ["https://ora-cfo.dc.gov/node/1824291"]
+  },
+  "dc_michelin_starred_2029": {
+   "baseline": {"value": 24, "as_of": "2025-11", "source": "Michelin Guide Washington DC 2025: 25 starred including The Inn at Little Washington (VA); 24 in DC"},
+   "forecasts": {
+    "yes_49.5|failed": {"p05": 18, "p25": 21, "p50": 23, "p75": 25, "p95": 28},
+    "yes_50.5|not_certified_or_removed": {"p05": 18, "p25": 21, "p50": 23, "p75": 25, "p95": 28},
+    "yes_50.5|certified": {"p05": 18, "p25": 21, "p50": 23, "p75": 25, "p95": 28}
+   },
+   "reasoning": "DC's star count has been steady at about 23-25, with no new stars in 2025. Starred kitchens substitute easily for foie gras, as they have in California and NYC, so the ban has no measurable effect.",
+   "sources": ["https://en.wikipedia.org/wiki/List_of_Michelin-starred_restaurants_in_Washington,_D.C.", "https://wtop.com/business-finance/2025/11/michelin-guide-doesnt-include-any-new-stars-for-dc-restaurants/"]
+  },
+  "dc_animal_initiative_filed": {
+   "forecasts": {
+    "yes_42.0": {"p": 0.12},
+    "yes_49.5": {"p": 0.2},
+    "yes_50.5": {"p": 0.3},
+    "yes_60.0": {"p": 0.4},
+    "yes_72.0": {"p": 0.5}
+   },
+   "reasoning": "PAF's model is a series of cheap local initiatives, and a DC win, especially a big one, invites a follow-up in DC for 2028 such as a fur ban or confinement standards. A loss makes PAF more likely to shift its effort to other cities.",
+   "sources": ["https://manifund.org/projects/pro-animal-future"]
+  },
+  "dc_another_animal_law": {
+   "forecasts": {
+    "yes_42.0|filed": {"p": 0.22},
+    "yes_42.0|not_filed": {"p": 0.06},
+    "yes_49.5|filed": {"p": 0.27},
+    "yes_49.5|not_filed": {"p": 0.07},
+    "yes_50.5|filed": {"p": 0.32},
+    "yes_50.5|not_filed": {"p": 0.08},
+    "yes_60.0|filed": {"p": 0.38},
+    "yes_60.0|not_filed": {"p": 0.09},
+    "yes_72.0|filed": {"p": 0.45},
+    "yes_72.0|not_filed": {"p": 0.1}
+   },
+   "reasoning": "A filed initiative still has to qualify, pass and survive the Council. The Council itself has passed a few product-sale bans such as ivory and rhino horn, but a DC fur ban effort stalled. A strong I-86 result raises both paths.",
+   "sources": ["https://washingtonsun.com/metro/foie-gras-ban-washington-dc?redirected=notus_org"]
+  },
+  "dc_council_farmed_animal_bills": {
+   "forecasts": {
+    "yes_42.0": {"p05": 0, "p25": 1, "p50": 1, "p75": 3, "p95": 5},
+    "yes_49.5": {"p05": 0, "p25": 1, "p50": 2, "p75": 3, "p95": 5},
+    "yes_50.5": {"p05": 0, "p25": 1, "p50": 2, "p75": 3, "p95": 6},
+    "yes_60.0": {"p05": 0, "p25": 1, "p50": 2, "p75": 4, "p95": 7},
+    "yes_72.0": {"p05": 0, "p25": 1, "p50": 3, "p75": 4, "p95": 8}
+   },
+   "reasoning": "Farmed-animal bills are rare in DC, perhaps a handful per council period on topics like fur or cage-free eggs. A strong vote encourages members to introduce more.",
+   "sources": []
+  },
+  "paf_measures_2027_2028": {
+   "forecasts": {
+    "yes_42.0|denver_pass": {"0": 0.15, "1": 0.27, "2": 0.27, "3": 0.16, "4": 0.08, "5+": 0.07},
+    "yes_42.0|denver_fail": {"0": 0.3, "1": 0.3, "2": 0.22, "3": 0.1, "4": 0.05, "5+": 0.03},
+    "yes_49.5|denver_pass": {"0": 0.13, "1": 0.25, "2": 0.27, "3": 0.18, "4": 0.09, "5+": 0.08},
+    "yes_49.5|denver_fail": {"0": 0.26, "1": 0.3, "2": 0.23, "3": 0.12, "4": 0.05, "5+": 0.04},
+    "yes_50.5|denver_pass": {"0": 0.1, "1": 0.22, "2": 0.27, "3": 0.2, "4": 0.11, "5+": 0.1},
+    "yes_50.5|denver_fail": {"0": 0.2, "1": 0.28, "2": 0.25, "3": 0.14, "4": 0.07, "5+": 0.06},
+    "yes_60.0|denver_pass": {"0": 0.08, "1": 0.2, "2": 0.26, "3": 0.21, "4": 0.13, "5+": 0.12},
+    "yes_60.0|denver_fail": {"0": 0.17, "1": 0.26, "2": 0.26, "3": 0.16, "4": 0.08, "5+": 0.07},
+    "yes_72.0|denver_pass": {"0": 0.06, "1": 0.17, "2": 0.25, "3": 0.22, "4": 0.15, "5+": 0.15},
+    "yes_72.0|denver_fail": {"0": 0.14, "1": 0.24, "2": 0.26, "3": 0.18, "4": 0.1, "5+": 0.08}
+   },
+   "reasoning": "PAF has put two Denver measures on the 2024 ballot and two measures on the 2026 ballot (DC and Denver). It plans to scale up and aims for statewide measures by 2030, so 1-3 measures in 2027-28 is typical. Wins in DC and Denver increase funding and the number of cities it targets.",
+   "sources": ["https://manifund.org/projects/pro-animal-future", "https://proanimal.org/media-coverage/foie-gras-question-will-be-on-denvers-2026-ballot/"]
+  },
+  "paf_statewide_2028": {
+   "forecasts": {
+    "yes_42.0|denver_pass": {"p": 0.14},
+    "yes_42.0|denver_fail": {"p": 0.08},
+    "yes_49.5|denver_pass": {"p": 0.16},
+    "yes_49.5|denver_fail": {"p": 0.1},
+    "yes_50.5|denver_pass": {"p": 0.2},
+    "yes_50.5|denver_fail": {"p": 0.13},
+    "yes_60.0|denver_pass": {"p": 0.23},
+    "yes_60.0|denver_fail": {"p": 0.15},
+    "yes_72.0|denver_pass": {"p": 0.27},
+    "yes_72.0|denver_fail": {"p": 0.18}
+   },
+   "reasoning": "Qualifying a statewide measure takes far more signatures and money than PAF has used so far. Its stated goal is 2030, so 2028 would be early. Local wins raise the chance it accelerates.",
+   "sources": ["https://manifund.org/projects/pro-animal-future"]
+  },
+  "us_new_coverage_2027_2032": {
+   "forecasts": {
+    "yes_42.0|statewide": {"p05": 0.5, "p25": 3, "p50": 8, "p75": 18, "p95": 50},
+    "yes_42.0|no_statewide": {"p05": 0.2, "p25": 2, "p50": 6, "p75": 14, "p95": 45},
+    "yes_49.5|statewide": {"p05": 0.5, "p25": 3, "p50": 8.5, "p75": 19, "p95": 52},
+    "yes_49.5|no_statewide": {"p05": 0.2, "p25": 2, "p50": 6.5, "p75": 15, "p95": 46},
+    "yes_50.5|statewide": {"p05": 0.6, "p25": 3.5, "p50": 9.5, "p75": 21, "p95": 55},
+    "yes_50.5|no_statewide": {"p05": 0.3, "p25": 2.2, "p50": 7, "p75": 16, "p95": 48},
+    "yes_60.0|statewide": {"p05": 0.7, "p25": 4, "p50": 10.5, "p75": 23, "p95": 58},
+    "yes_60.0|no_statewide": {"p05": 0.3, "p25": 2.5, "p50": 7.5, "p75": 17, "p95": 50},
+    "yes_72.0|statewide": {"p05": 0.8, "p25": 4.5, "p50": 11.5, "p75": 25, "p95": 62},
+    "yes_72.0|no_statewide": {"p05": 0.35, "p25": 2.8, "p50": 8, "p75": 18, "p95": 52}
+   },
+   "reasoning": "New coverage comes from occasional state cage-free or crate laws (each adds several million people), local foie gras bans like Portland's, and possibly a PAF statewide measure, which might pass about half the time. Federal preemption risk and the slowdown after 2021 keep the median in single-digit millions.",
+   "sources": ["https://opb.org/article/2026/06/04/portland-approves-foie-gras-ban/"]
+  },
+  "other_foie_gras_bans_2030": {
+   "baseline": {"value": 5, "as_of": "2026-10-25", "source": "PETA foie gras bans tracker and news: California (state), New York City, Pittsburgh, Brookline MA, Portland OR"},
+   "forecasts": {
+    "yes_49.5": {"p05": 4, "p25": 5, "p50": 6, "p75": 8, "p95": 11},
+    "yes_50.5": {"p05": 4, "p25": 5, "p50": 7, "p75": 8, "p95": 12}
+   },
+   "reasoning": "The baseline is 5 and rises if Denver passes, roughly a coin flip, plus about one more city every couple of years (Philadelphia and others are pending). A DC pass slightly raises momentum. Repeal or an injunction could knock one out, as happened with Chicago and with NYC's long litigation.",
+   "sources": ["https://www.peta.org/features/foie-gras-bans/", "https://opb.org/article/2026/06/04/portland-approves-foie-gras-ban/", "https://news.bgov.com/new-york-brief/new-york-citys-foie-gras-ban-is-revived-by-state-appeals-court"]
+  },
+  "federal_preemption_2030": {
+   "forecasts": {
+    "yes_49.5": {"p": 0.25},
+    "yes_50.5": {"p": 0.26}
+   },
+   "reasoning": "House farm bill drafts since 2024 have included Prop 12 preemption (the Save Our Bacon Act). It faces Senate resistance and the farm bill keeps stalling, so I give it about a 25% chance of enactment by 2030. A DC foie gras result barely matters.",
+   "sources": []
+  },
+  "dc_bans_other_food_2030": {
+   "forecasts": {
+    "yes_49.5": {"p": 0.12},
+    "yes_50.5": {"p": 0.13}
+   },
+   "reasoning": "The main path is a ban on food dyes or additives for all buyers, following West Virginia's 2025 law, while many states limit such rules to schools. DC has no such bill moving yet, so I put it at about 12%.",
+   "sources": []
+  }
+ }
+}
+```

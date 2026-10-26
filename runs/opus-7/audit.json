@@ -1,0 +1,27 @@
+{
+ "events": 93,
+ "tool_calls": 16,
+ "web_calls": 16,
+ "urls": [
+  "https://dc.citycast.fm/food-drink/i86-jose-andres-dc-foie-gras",
+  "https://denverite.com/2026/09/25/vg-2026-initiated-ordinance-311-force-feeding-birds-ban-voter-guide/",
+  "https://washingtondcmagazine.substack.com/p/dc-voters-will-decide-november-3",
+  "https://wtop.com/business-finance/2025/11/michelin-guide-doesnt-include-any-new-stars-for-dc-restaurants/",
+  "https://www.axios.com/local/washington-dc/2026/10/21/dc-foie-gras-ban-ballot-initiative-fight",
+  "search: \"Initiative 86\" DC opposition committee Restaurant Association Metropolitan Washington vote no",
+  "search: DC early voting turnout November 2026 general election mayor ballots cast",
+  "search: DC foie gras ban \"outside spending\" legal threats chicken liver pate definition fattened",
+  "search: DC foie gras ban Initiative 86 opposition spending restaurants lawsuit Axios",
+  "search: Denver Initiated Ordinance 311 foie gras 2026",
+  "search: Denver foie gras ban ordinance 311 opposition campaign poll restaurants",
+  "search: Initiative 86 foie gras DC poll",
+  "search: Michelin Guide Washington DC 2026 stars list how many restaurants",
+  "search: NYC foie gras ban court ruling 2026 Hudson Valley Foie Gras appeal",
+  "search: Pro-Animal Future 2028 ballot measure plans statewide Oregon Colorado",
+  "search: Prop 12 preemption farm bill 2026 Save Our Bacon Act status House Senate"
+ ],
+ "violations": [],
+ "suspect": [],
+ "local_calls": [],
+ "passed": true
+}

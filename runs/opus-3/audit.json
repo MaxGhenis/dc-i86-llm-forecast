@@ -1,0 +1,27 @@
+{
+ "events": 99,
+ "tool_calls": 16,
+ "web_calls": 16,
+ "urls": [
+  "https://axios.com/local/washington-dc/2026/10/23/jose-andres-dc-foie-gras-ban-chef-protest",
+  "https://dc.citycast.fm/opinion/dc-foie-gras-ban-initiative",
+  "https://denverite.com/2026/09/25/vg-2026-initiated-ordinance-311-force-feeding-birds-ban-voter-guide/",
+  "https://en.wikipedia.org/wiki/List_of_Michelin-starred_restaurants_in_Washington,_D.C.",
+  "https://sites.warnercnr.colostate.edu/animalhumanpolicy/ahpc-studies-document-the-prevalence-of-foie-gras-on-menus-and-denver-voters-support-of-a-foie-gras-ban/",
+  "https://washingtonian.com/2026/08/05/foie-gras-ban-will-be-on-dcs-ballot-this-november/",
+  "https://www.axios.com/local/washington-dc/2026/10/21/dc-foie-gras-ban-ballot-initiative-fight",
+  "search: \"Initiative 86\" DC foie gras campaign finance opposition committee Restaurant Association",
+  "search: Colorado State University study foie gras restaurants US cities number DC",
+  "search: DC Initiative 86 foie gras ballot poll",
+  "search: DC foie gras ban outside spending legal threats Capitol Hill chef lawsuit Initiative 86 Council Mendelson",
+  "search: Denver Initiated Ordinance 311 foie gras 2026",
+  "search: Denver foie gras ban 311 opposition poll Westword restaurants",
+  "search: Jos\u00e9 Andr\u00e9s foie gras Initiative 86 restaurants opposition chicken liver pate",
+  "search: Michelin Guide Washington DC 2025 starred restaurants number",
+  "search: Pro-Animal Future 2026 ballot measures statewide 2028 plans"
+ ],
+ "violations": [],
+ "suspect": [],
+ "local_calls": [],
+ "passed": true
+}

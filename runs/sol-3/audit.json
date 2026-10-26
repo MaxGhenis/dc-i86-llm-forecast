@@ -1,0 +1,22 @@
+{
+ "events": 33,
+ "tool_calls": 11,
+ "web_calls": 11,
+ "urls": [
+  "https://electionresults.dcboe.org/",
+  "https://electionresults.dcboe.org/election_statistics/2022-General-Election",
+  "https://ora-cfo.dc.gov/sites/default/files/dc/sites/ora-cfo/documents/Revenue_Estimate_Letter_SEP2026.pdf",
+  "search: \"DC\" \"2022\" \"179,786\" Initiative ...",
+  "search: 'Food & Drink'",
+  "search: California Proposition 12 2018 results yes 62.66 Massachusetts Question 3 2016 77 ...",
+  "search: DC Council 2026 artificial food dye potassium bromate ban food legislation ...",
+  "search: DC Initiative 86 foie gras October 2026 poll election ...",
+  "search: Initiative 86 Janeese Lewis George support 2026 foie gras ...",
+  "search: site.dcboe.org 2022 \"206\" turnout general ...",
+  "search: site.dcboe.org 2022 general election Initiative 82 2022 total votes ..."
+ ],
+ "violations": [],
+ "suspect": [],
+ "local_calls": [],
+ "passed": true
+}

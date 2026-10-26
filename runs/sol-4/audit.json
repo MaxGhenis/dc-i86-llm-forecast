@@ -1,0 +1,19 @@
+{
+ "events": 26,
+ "tool_calls": 8,
+ "web_calls": 8,
+ "urls": [
+  "https://electionresults.dcboe.org/election_results/2022-General-Election",
+  "https://proanimaldc.org/faq/",
+  "https://sites.warnercnr.colostate.edu/animalhumanpolicy/ahpc-study-finds-strong-public-support-for-and-limited-impacts-to-restaurants-from-foie-gras-bans/",
+  "search: DC Initiative 86 foie gras 2026 poll October opposition ...",
+  "search: District Columbia farmed animal fur ban bill 2025 2026 food dyes law ...",
+  "search: site.awionline.org 2026 farm animal state laws cage-free states ...",
+  "search: site.lims.dccouncil.gov \"Fur Products\" \"2025\" ...",
+  "search: site.lims.dccouncil.gov farm animal fur sale ban 2026 ..."
+ ],
+ "violations": [],
+ "suspect": [],
+ "local_calls": [],
+ "passed": true
+}

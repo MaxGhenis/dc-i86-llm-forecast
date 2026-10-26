@@ -1,0 +1,21 @@
+{
+ "events": 31,
+ "tool_calls": 10,
+ "web_calls": 10,
+ "urls": [
+  "https://downloads.regulations.gov/FSIS-2024-0010-6287/attachment_2.pdf",
+  "https://guide.michelin.com/us/en/district-of-columbia/restaurants/all-starred",
+  "https://sites.warnercnr.colostate.edu/animalhumanpolicy/ahpc-studies-document-the-prevalence-of-foie-gras-on-menus-and-denver-voters-support-of-a-foie-gras-ban/",
+  "https://stetsonlawreview.org/wp-content/uploads/2024/04/12-VanAllen.373-403.pdf",
+  "https://www.govinfo.gov/content/pkg/BILLS-119s5526rs/html/BILLS-119s5526rs.htm",
+  "search: 2026 farm bill Save Our Bacon Act October 2026 Senate House Prop 12 preemption",
+  "search: DC Initiative 86 foie gras 2026 poll October ...",
+  "search: site.dcboe.org 2022 general election turnout 202 2024 initiative 83 results ...",
+  "search: site.denverite.com 2024 fur slaughterhouse bans results 308 309 58 64 ...",
+  "search: site.electionresults.dcboe.org \"2022\" \"INITIATIVE\" \"82\" \"Yes\" ..."
+ ],
+ "violations": [],
+ "suspect": [],
+ "local_calls": [],
+ "passed": true
+}

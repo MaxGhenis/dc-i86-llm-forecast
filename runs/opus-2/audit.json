@@ -1,0 +1,32 @@
+{
+ "events": 107,
+ "tool_calls": 21,
+ "web_calls": 21,
+ "urls": [
+  "https://dc.citycast.fm/food-drink/i86-jose-andres-dc-foie-gras",
+  "https://denverite.com/2025/12/30/foie-gras-ban-activists-voters/",
+  "https://news.ballotpedia.org/2026/08/06/voters-in-washington-d-c-and-denver-colorado-will-decide-on-foie-gras-ban-ballot-initiatives-in-november/",
+  "https://sites.warnercnr.colostate.edu/animalhumanpolicy/?p=792",
+  "https://washingtondcmagazine.substack.com/p/dc-voters-will-decide-november-3",
+  "https://washingtonsun.com/metro/foie-gras-ban-washington-dc?redirected=notus_org",
+  "https://www.axios.com/local/washington-dc/2026/10/21/dc-foie-gras-ban-ballot-initiative-fight",
+  "https://www.notus.org/metro/foie-gras-ban-washington-dc",
+  "search: Colorado State University study foie gras restaurants US cities Washington DC number",
+  "search: Congress rider DC foie gras ban Republicans Initiative 86",
+  "search: DC foie gras ban outside spending restaurant association lawsuit Initiative 86 October 2026",
+  "search: DC food services and drinking places employment 2026 BLS restaurants jobs decline",
+  "search: Denver 2024 Initiated Ordinance 309 slaughterhouse ban results percent 308 fur",
+  "search: Denver Initiated Ordinance 311 foie gras 2026",
+  "search: Denver foie gras ban poll Pro-Animal Colorado opposition October 2026",
+  "search: Initiative 86 foie gras \"p\u00e2t\u00e9\" chicken liver definition fattened concern",
+  "search: Initiative 86 foie gras DC poll",
+  "search: Michelin Guide Washington DC 2025 starred restaurants list number",
+  "search: Portland foie gras ban council vote 2026 approved",
+  "search: Pro-Animal Future 2028 statewide ballot measure",
+  "search: US cities that ban foie gras sales list Pittsburgh New York City ban status 2026"
+ ],
+ "violations": [],
+ "suspect": [],
+ "local_calls": [],
+ "passed": true
+}

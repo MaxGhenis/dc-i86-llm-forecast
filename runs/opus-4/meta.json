@@ -1,5 +1,8 @@
 {
+  "attempt_id": "20261025-223153-i86-opus-4/a1",
   "backend": "subfleet",
+  "backend_state": "lost",
+  "collected_at": "2026-10-26T07:32:14Z",
   "command": [
     "subfleet",
     "run",
@@ -22,11 +25,24 @@
   "dispatch_rc": 0,
   "dispatch_stdout": "{\"created\": true, \"detached\": true, \"job_id\": \"20261025-223153-i86-opus-4\", \"lane\": null, \"log\": \"/Users/maxghenis/.subfleet/jobs/20261025-223153-i86-opus-4/a1/lane.log\", \"model\": null, \"out\": \"/Users/maxghenis/.subfleet/jobs/20261025-223153-i86-opus-4/a1/deliverable.md\", \"outcome\": \"created\", \"reason\": \"inside a Claude session \\u2014 the job must outlive it\", \"requeried\": false, \"request_id\": \"b97c91ee-63a3-4b5d-94fd-13decb217bce\", \"run_id\": \"20261025-223153-i86-opus-4\", \"sandbox\": \"read-only\", \"state\": null, \"wait_inline\": false, \"worktree\": null}\n",
   "dispatched_at": "2026-10-26T05:31:53Z",
+  "finished_at": "2026-10-26T06:41:38Z",
   "job_id": "20261025-223153-i86-opus-4",
   "label": "opus-4",
+  "lane_id": "claude-8",
   "model_pin": "opus",
+  "model_served": "claude-opus-5-5",
   "prepared_at": "2026-10-26T05:31:52Z",
+  "prompt_sent_sha256": "1325f7d10cc29653fd846914e7c5f1591295d71ea0b2407be9a35394dc2ef4e5",
   "prompt_sha256": "2b6cd481ddb6eca123d5ac1f9da4afb1a47ef95fea4eb63bd03d64dbfe272799",
+  "recovered": {
+    "at": "2026-10-26T07:32:13Z",
+    "attempt_state": "quarantined",
+    "result_sha256": "c7925b94cf407b813ebe7f7921c605dcc92a9917c6c2cd1b5e09f6d3de67e587",
+    "supervisor_reason": "{\"descendant_pids\": [2037, 96617, 96647], \"errors\": [\"marker read unavailable for pid 7332\"], \"group_pids\": [2037, 96617, 96647], \"identities\": {\"2037\": {\"boot_id\": \"93c98812-ed34-40fd-98d9-6999100c63df\", \"pid\": 2037, \"proc_start\": \"Mon Oct 26 06:31:56 2026\"}, \"96617\": {\"boot_id\": \"93c98812-ed34-40fd-98d9-6999100c63df\", \"pid\": 96617, \"proc_start\": \"Mon Oct 26 06:41:07 2026\"}, \"96647\": {\"boot_id\": \"93c98812-ed34-40fd-98d9-6999100c63df\", \"pid\": 96647, \"proc_start\": \"Mon Oct 26 06:41:07 2026\"}}, \"live_pids\": [2037, 96617, 96647], \"marker_pids\": [2037, 96617, 96647], \"reason\": \"writers remain after exit receipt\", \"recycled\": {}, \"responsible_pids\": [2037, 96617, 96647], \"shapes\": {\"2037\": {\"pgid\": 2037, \"ppid\": 2949, \"stat\": \"Ss\"}, \"96617\": {\"pgid\": 2037, \"ppid\": 1, \"stat\": \"S\"}, \"96647\": {\"pgid\": 2037, \"ppid\": 96617, \"stat\": \"S\"}}, \"unverifiable\": true}"
+  },
+  "state": "succeeded",
   "tier": "standard",
+  "transcript": "/Users/maxghenis/dc-i86-llm-forecast/runs/opus-4/transcript.jsonl",
+  "transcript_original": "/Users/maxghenis/.subfleet/jobs/20261025-223153-i86-opus-4/a1/stdout",
   "workdir": "/Users/maxghenis/.cache/dc-i86-llm-forecast/opus-4"
 }

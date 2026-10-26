@@ -1,0 +1,21 @@
+{
+ "events": 28,
+ "tool_calls": 10,
+ "web_calls": 10,
+ "urls": [
+  "https://ora-cfo.dc.gov/node/1824291",
+  "https://proanimaldc.org/",
+  "search: \"2022\" \"INITIATIVE MEASURE NO. 82\" \"YES\" \"132\" ...",
+  "search: \"Denver\" \"foie gras\" \"support\" \"2026\" \"85%\" CSU ...",
+  "search: \"Initiative 82\" \"131\" \"2022\" votes ...",
+  "search: \"Initiative 86\" poll DC 2026 -site:reddit.com -site:onpointpolitics.us ...",
+  "search: DC Initiative 86 October 2026 poll foie gras November 3 2026 ...",
+  "search: Pittsburgh foie gras ban ordinance sale effective 2026 2025 law ...",
+  "search: site:dcboe.org \"2022\" \"INITIATIVE MEASURE\" \"Yes\" \"No\" 82 certified ...",
+  "search: site:dcboe.org \"2026\" \"Voter Registration Statistics\" October ..."
+ ],
+ "violations": [],
+ "suspect": [],
+ "local_calls": [],
+ "passed": true
+}
