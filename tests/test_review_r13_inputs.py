@@ -115,6 +115,23 @@ def test_webfetch_applies_the_host_check_to_every_url_spelling(area, tmp_path, u
     assert out["suspect"] and not out["web_calls"], out
 
 
+@pytest.mark.parametrize("url,web", [
+    ("https://example.org/MOCK?q=1#f", True),
+    ("https://example.org:8443/", True),
+    ("https://user@example.org/MOCK", False),  # a user name
+    ("https://example.org/MOCK\\path", False),  # a backslash, a slash to the WHATWG parser
+    ("https://example.org/MOCK path", False),  # a space
+    ("https://example.org/MOCKé", False),  # outside printable ASCII
+])
+def test_webfetch_takes_as_web_only_a_url_every_parser_reads_alike(area, tmp_path, url, web):
+    """README: a web call counts as web only where the URL it fetches is written `http(s)://host/...`;
+    a URL that names another machine but is spelled any other way is suspect (`exact.web_url`). The
+    scan of the whole input already catches every spelling found that reaches this machine, so this
+    rule matters only for these."""
+    out = audit_lines(area, tmp_path, [claude("WebFetch", {"url": url, "prompt": "MOCK"})])
+    assert (out["web_calls"] == 1 and not out["suspect"]) if web else (out["suspect"] and not out["web_calls"]), out
+
+
 # --- where a Bash call starts ------------------------------------------------------------------
 
 @pytest.mark.parametrize("first", [{"command": "cd MOCK-sub; false"}, {"command": "cd MOCK-sub && false"},
