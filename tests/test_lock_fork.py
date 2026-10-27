@@ -118,7 +118,7 @@ def test_child_without_spare_closes_and_leaves_the_number_alone(tmp_path, monkey
     other.write_text("MOCK other file\n")
     impostor = os.open(other, os.O_RDONLY)  # the spare's number, now another file's
     monkeypatch.setattr(runners, "_spare_null", impostor)
-    monkeypatch.setattr(runners, "_closed_in_child", set())
+    monkeypatch.setattr(runners, "_closed_in_child", {})
     rd, wr = os.pipe()
     other_id = (os.stat(other).st_dev, os.stat(other).st_ino)
     lock_path = runners.STAGE.with_name(runners.STAGE.name + ".lock")
@@ -136,7 +136,7 @@ def test_child_without_spare_closes_and_leaves_the_number_alone(tmp_path, monkey
                             result = {"closed": False}
                         except OSError:
                             result = {"closed": True}
-                        result["recorded"] = fd in runners._closed_in_child
+                        result["recorded"] = fd in runners._closed_in_child.values()
                         for f in fillers:
                             os.close(f)
                         reuse = os.open(other, os.O_RDONLY)  # likely the lowest free number, fd's
@@ -152,7 +152,7 @@ def test_child_without_spare_closes_and_leaves_the_number_alone(tmp_path, monkey
             except OSError:
                 result["left_alone"] = False
             try:
-                result["forgotten"] = fd not in runners._closed_in_child
+                result["forgotten"] = fd not in runners._closed_in_child.values()
                 with runners.bookkeeping_lock():  # the parent let go before it waited for this child
                     result["took_lock"] = True
                 os.write(wr, json.dumps(result).encode())

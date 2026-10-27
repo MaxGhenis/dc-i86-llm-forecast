@@ -5,6 +5,8 @@
   value, computed directly from the unscaled answers (node_params and _allowed_mass, the path the
   defensive mixture uses).
 - Irrelevance: answers no share in the band reads change neither the tilt there nor its scale.
+  Which answers a share reads comes from probing the node's interpolated parameters (one answer
+  changed at a time, at every cell, end and midpoint of the band), not from `_used_answers`.
 """
 
 import math
@@ -15,7 +17,7 @@ from hypothesis import strategies as st
 
 from i86 import graph as graph_mod
 from i86.response import Forecasts
-from i86.simulate import _allowed_mass, _Tilt, _used_answers, node_params
+from i86.simulate import _allowed_mass, _Tilt, node_params
 
 GRAPH = graph_mod.load()
 NODES = ["ban_status", "dc_animal_initiative_filed", "federal_preemption_2030", "dc_bans_other_food_2030"]
@@ -72,6 +74,27 @@ def test_tilt_matches_unscaled_answers_in_band():
     check()
 
 
+def _params(graph, node, answers, v):
+    """The node's interpolated parameters at shares v, where it exists (zero elsewhere)."""
+    fc = Forecasts(values={node.id: answers})
+    exists = (node.exists_if.evaluate_vec({"yes_share": v, "passes": v > 0.5})
+              if node.exists_if is not None else np.ones(len(v), bool))
+    return np.where(exists[:, None], node_params(graph, node, fc, v, None), 0.0)
+
+
+def _read(graph, node, answers, other, band):
+    """The keys whose answer, replaced alone by its value in `other`, changes the node's
+    parameters at some share in the band where the node exists. The parameters, not the chance of
+    an allowed value: with every value allowed, that chance is 1 whatever the answers but for
+    rounding. Interpolation is linear between cells, so the band's ends, the cells and 50% inside
+    it, and the midpoints between them reach every row with a positive weight."""
+    pts = np.unique(_points(graph, band, []))
+    v = np.concatenate([pts, (pts[:-1] + pts[1:]) / 2])
+    base = _params(graph, node, answers, v)
+    return {key for key in answers
+            if not np.array_equal(_params(graph, node, {**answers, key: other[key]}, v), base)}
+
+
 def test_unread_answers_change_neither_tilt_nor_scale():
     graph = GRAPH
 
@@ -79,19 +102,18 @@ def test_unread_answers_change_neither_tilt_nor_scale():
     @given(cases(), st.integers(0, 1060), st.lists(st.floats(0.0, 1.0), min_size=1, max_size=8))
     def check(case, k, extra):
         node, answers, allowed, band = case
-        lo, hi = band
-        lo_eff = float(np.nextafter(lo, 1.0)) if lo >= 0.5 else lo
-        used = _used_answers(graph, node, answers, lo_eff, hi)
-        # Tiny answers where the band reads them; certain allowed values everywhere else.
+        # Tiny answers; certain allowed values in the other set.
         if node.kind == "binary":
             small = {key: p * 2.0 ** -k for key, p in answers.items()}
-            loud = {key: small[key] if key in used else (1.0 if True in allowed else 0.0) for key in answers}
+            certain = {key: 1.0 if True in allowed else 0.0 for key in answers}
         else:
             small = {key: [q * 2.0 ** -k for q in p[:-1]] + [1 - sum(q * 2.0 ** -k for q in p[:-1])]
                      for key, p in answers.items()}
             first = next((i for i, o in enumerate(node.options) if o in allowed), None)
-            loud = {key: small[key] if key in used or first is None else
-                    [1.0 if i == first else 0.0 for i in range(len(node.options))] for key in answers}
+            certain = {key: small[key] if first is None else
+                       [1.0 if i == first else 0.0 for i in range(len(node.options))] for key in answers}
+        read = _read(graph, node, small, certain, band)
+        loud = {key: small[key] if key in read else certain[key] for key in answers}
         a = _Tilt(graph, node, Forecasts(values={node.id: small}), allowed, band)
         b = _Tilt(graph, node, Forecasts(values={node.id: loud}), allowed, band)
         v = _points(graph, band, extra)

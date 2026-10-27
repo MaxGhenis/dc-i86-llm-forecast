@@ -553,3 +553,18 @@ def test_codex_open_page_url_is_checked():
     assert calls == [("web_search", {"query": "", "url": "https://github.com/MaxGhenis/dc-i86-llm-forecast"})]
     verdict, _ = audit.check_call(*calls[0], audit.Path("/nonexistent"), [])
     assert verdict == "suspect"  # MOCK event: this project's own repository, opened on the web
+
+
+# A path that starts with two slashes, which macOS reads as one
+
+@pytest.mark.parametrize("command", [
+    "cat /{other}", "cat //{other_rel}", "cd /; cd \"$PWD/..\"; cat {other_rel}", "cd //; cat {other_rel}",
+    "cat //{protected_rel}", "ls //{other_dir_rel}",
+])
+def test_leading_double_slash_is_root(review_area, command):
+    other = review_area.parent / "opus-2" / "draft.json"
+    protected = audit.protected_roots()[0] / "draft.json"
+    command = command.format(other=other, other_rel=str(other)[1:], protected_rel=str(protected)[1:],
+                             other_dir_rel=str(other.parent)[1:])
+    assert "MOCK OTHER ANSWER" in sh(BASH, command, cwd=review_area).stdout or command.startswith("ls")
+    assert audit.check_call("shell", {"command": command}, review_area, audit.protected_roots())[0] == "violation", command

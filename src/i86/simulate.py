@@ -154,24 +154,30 @@ def _allowed_mass(node: Node, params: np.ndarray, exists: np.ndarray, allowed) -
 
 
 def _used_answers(graph: Graph, node: Node, answers: dict, lo: float, hi: float) -> set[str]:
-    """The keys of the answers that node_params interpolates from for some share in [lo, hi]: on
-    each side of 50% the band reaches, the cells bracketing the band's part there. A key without an
-    answer stands for the filler row (see _table)."""
+    """The keys of the answers that the tilt reads at some share in [lo, hi]: on each side of 50%
+    the band reaches where the node exists, the cells that node_params gives a positive weight
+    between the ends of the band's part there (a cell an end lies exactly on has weight 0 on its
+    other side). A key without an answer stands for the filler row (see _table)."""
     if node.cells_mode == "none":
         keys = {Entry(None, None).key}
     else:
         half = float(np.nextafter(0.5, 1.0))
         if node.cells_mode == "all":
-            sides = [(graph.pass_cells, max(lo, half), hi), (graph.fail_cells, lo, min(hi, 0.5))]
+            fail, passing = graph.fail_cells, graph.pass_cells
         elif node.cells_mode == "near":
-            sides = [(graph.near_cells[1:], max(lo, half), hi), (graph.near_cells[:1], lo, min(hi, 0.5))]
+            fail, passing = graph.near_cells[:1], graph.near_cells[1:]
         else:
-            sides = [(graph.pass_cells, lo, hi)]  # the passing cells' answers serve every share
+            fail = passing = graph.pass_cells  # the passing cells' answers serve every share
         keys = set()
-        for cells, a, b in sides:
-            if a <= b:
-                j0, j1, _ = _cell_weights(cells, np.array([a, b]))
-                keys |= {Entry(c, None).key for c in cells[int(j0[0]):int(j1[1]) + 1]}
+        for cells, a, b in [(fail, lo, min(hi, 0.5)), (passing, max(lo, half), hi)]:
+            ends = np.array([a, b])
+            if a > b or (node.exists_if is not None
+                         and not node.exists_if.evaluate_vec({"yes_share": ends, "passes": ends > 0.5}).any()):
+                continue
+            j0, j1, w = _cell_weights(cells, ends)
+            first = int(j0[0]) if w[0] < 1 else int(j1[0])
+            last = int(j1[1]) if w[1] > 0 else int(j0[1])
+            keys |= {Entry(c, None).key for c in cells[first:last + 1]}
     if keys - set(answers):
         keys.add(next(iter(answers)))
     return keys & set(answers)

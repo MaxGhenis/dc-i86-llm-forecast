@@ -1,17 +1,18 @@
 """The audit's model of what a shell command prints, against bash and zsh, on generated MOCK programs.
 
-The model keeps a command's standard output as one text, a choice of texts (where the shells differ,
-or branches may have run), or unknown. Programs mix echo and printf (with options and escapes),
-echo's option state (bash's xpg_echo and POSIX mode, zsh's BSD_ECHO, emulate sh), variables (several
-in one string), declarations that list or stay quiet, pwd, cd, dirname and basename, files written
-and read back (cat FILE, < FILE), /dev/null, output sent to standard error or another descriptor,
-closed standard output (bash 3.2 keeps what a builtin wrote and writes it later; bash's builtins
-then fail, zsh's do not), exec's redirections, process substitution, pipelines with a redirected
-stage (zsh's MULTIOS sends it down the pipe too), groups, subshells, functions, loops, if, && and
-||, background jobs, eval, sh -c, exit and return, unset, and writes to a readonly variable (which
-end the line, the eval or the shell, or fail, by shell and kind of write). Each program sets the variable it
-prints first: the audit cannot know a variable's value from the environment. Property, for every
-program under bash and zsh (no startup files): when the model's output is known, what the shell
+The model keeps a command's standard output as one text, a choice of texts (where the shells differ, or
+branches may have run), or unknown. Programs mix echo and printf (with options and escapes), echo's
+option state (bash's xpg_echo and POSIX mode, zsh's BSD_ECHO, emulate sh), variables (several in one
+string), declarations that list or stay quiet, pwd, cd, dirname and basename, files written and read
+back (cat FILE, < FILE), here-documents and here-strings, /dev/null, several stdout redirections on one
+command, output sent to standard error or another descriptor (`2>&1` before or after the move), closed
+standard output (bash 3.2 keeps what a builtin wrote, of printf the first pass of its format, and writes
+it later; bash's builtins then fail, zsh's do not), exec's redirections, process substitution, pipelines
+with a redirected stage (zsh's MULTIOS sends it down the pipe too), groups, subshells, functions, loops,
+if, && and ||, background jobs, eval, sh -c, exit and return, unset, and writes to a readonly variable
+(which end the line, the eval or the shell, or fail, by shell and kind of write). Each program sets the
+variable it prints first: the audit cannot know a variable's value from the environment. Property, for
+every program under bash and zsh (no startup files): when the model's output is known, what the shell
 printed is one of its texts, an unknown part matching anything.
 """
 
@@ -50,6 +51,22 @@ printing = st.one_of(
         "echo MOCK-q &",  # no `wait`: in a zsh pipeline stage it waits for the pipe's reader forever
         "sh -c 'echo -n MOCK-r'", "bash -c 'echo -e MOCK\\\\ts'", "zsh -fc 'echo MOCK\\\\nt'",
         "eval 'echo MOCK-u'",
+        # Here-documents: expansions, backquotes and backslashes in the body, a quoted delimiter,
+        # <<- (leading tabs go), and one sent to a file.
+        "cat <<EOF\nMOCK-ha $x ${x}\nEOF", "cat <<'EOF'\nMOCK-hb $x `echo no`\nEOF",
+        "cat <<-EOF\n\tMOCK-hc `echo MOCK-hd`\n\tEOF", "cat <<EOF\nMOCK-he \\$x \\\\ $(echo MOCK-hf)\nEOF",
+        "cat <<EOF > out.txt\nMOCK-hg\nEOF", "cat - <<EOF | cat\nMOCK-hh $x\nEOF",
+        # Several stdout redirections (zsh's MULTIOS writes to each, bash only to the last), and
+        # standard error copied before standard output moves.
+        "echo MOCK-ra > out.txt > /dev/null", "echo MOCK-rb > /dev/null > out.txt", "echo MOCK-rc >> out.txt > log.txt",
+        "echo MOCK-rd 2>&1 > out.txt", "{ echo MOCK-re >&2; } 2>&1 > /dev/null", "exec 2>&1",
+        "exec 2>&1 > log.txt",  # never read: cat out.txt into out.txt would never end
+        "cat <(printf MOCK-pa) <(echo MOCK-pb)", "printf '%s-%s\\n' MOCK pc MOCK",
+        'echo "$z"', 'printf "%s|" "${z+set}"',
+        # A here-string (its word and a newline), descriptors named against the arrow (`1<&-`
+        # closes standard output), and printf's format reused at a closed standard output.
+        'cat <<< "MOCK-hs $x"', "cat <<< MOCK-ht > out.txt", "printf MOCK-pd 1<&-", "exec 1<&-",
+        "{ echo MOCK-re >&2; } 2<&1", "printf '%s\\n' MOCK-pe MOCK-pf >&-",
     ]),
 )
 state = st.sampled_from([
@@ -58,6 +75,10 @@ state = st.sampled_from([
     "unset x", "z=MOCK-w", "z=MOCK-w true", "z=MOCK-w echo MOCK-zw", "unset z", "export z=MOCK-v", "readonly z",
     "typeset z=MOCK-t", "read z < MOCK.txt", "for z in MOCK-f; do echo MOCK-fz; done", ": $((z=1))",
     "eval 'z=MOCK-e; echo MOCK-ez'",
+    # Integers, bases, zsh's padding and case, names that are not names, kept prefix assignments.
+    "typeset -i z", "z=1+1", "z=0x10", "z+=1", "for z in 1+1; do :; done", "integer z 2>/dev/null",
+    "let z=1+1 2>/dev/null", "(( z = 2 ))", "typeset -i 16 z 2>/dev/null", "typeset -Z 3 z 2>/dev/null",
+    "typeset -u z 2>/dev/null", "typeset +i z", "export 1x 2>/dev/null", "z=MOCK-k :", "z=MOCK-l exec",
     "shopt -s xpg_echo 2>/dev/null", "set -o posix 2>/dev/null", "setopt bsd_echo 2>/dev/null",
     "setopt sh_word_split 2>/dev/null", "emulate sh 2>/dev/null", "set -o noglob", "alias e=echo",
     "exit", "exit 1", "(exit 1)", "return", "return 1 2>/dev/null",
@@ -159,15 +180,48 @@ EXACT = [
     # Files written and read back, standard error and /dev/null.
     "echo MOCK-a > out.txt; cat out.txt; cat < out.txt; echo MOCK-b >&2; echo MOCK-c > /dev/null",
     "{ echo MOCK-a; echo MOCK-b; } > out.txt; cat out.txt; cat /dev/null",
-    # A redirected pipeline stage: zsh's MULTIOS sends it down the pipe too, bash does not.
+    # A redirected pipeline stage: zsh's MULTIOS sends it down the pipe too, bash does not (what
+    # the file then holds is unknown in zsh, whose copier may end at the pipe first).
     "echo MOCK-a > /dev/null | cat",
-    "echo MOCK-a > out.txt | cat; cat out.txt",
+    "echo MOCK-a > out.txt | cat",
     # pwd, dirname and basename end in a newline.
     "pwd; dirname a/b/c; basename a/b.txt .txt; dirname ''; basename /",
     # exit stops the program; nothing after it prints.
     "echo MOCK-a; exit; echo MOCK-b",
     "sh -c 'echo -n MOCK-a'; echo",
+    # Here-documents expand the body as a double-quoted string does, backquotes included.
+    "x=MOCK-x; cat <<EOF\nMOCK-a $x `echo MOCK-b` \\$x\nEOF\ncat <<'EOF'\nMOCK $x\nEOF",
+    # Only the last of several stdout redirections gets the output, in bash.
+    "echo MOCK-a > out.txt > /dev/null; cat out.txt; echo end",
+    # zsh's arithmetic makes z an integer, so its read is arithmetic: an error that ends zsh.
+    "x=MOCK-init\n{ : $((z=1))\n}\nread z < MOCK.txt\necho",
+    # At a closed standard output bash keeps only the first pass of printf's format, and writes
+    # it at the end, once the group's redirection is undone; a here-string ends in a newline.
+    "x=MOCK-init\n{ exec >&-\nprintf '%s\\n' MOCK-a MOCK-a\n} > /dev/null",
+    "cat <<< MOCK-a; cat <<< \"MOCK-b $x\" > out.txt; cat out.txt",
+    # Standard error sent to standard output inside the group goes where that output goes.
+    "{ { echo MOCK-j >&2; } 2>&1; } > /dev/null; echo MOCK-k",
 ]
+
+
+# Programs whose output the model may leave unknown but must not get wrong: at a closed standard
+# output bash keeps only the first pass of a printf's format, which the model follows for a printf
+# alone but not inside a group, a function or an eval; standard error copied to standard output
+# around a group still prints there when the group's standard output moves (the 3000-example
+# search's counterexample), and after `&> f` a later `> g` leaves standard error at f.
+AGREE = [
+    "{ printf '%s\\n' MOCK-a MOCK-b; } >&-",
+    "f() { printf '%s\\n' MOCK-a MOCK-b; }\nf >&-",
+    "eval \"printf '%s\\\\n' MOCK-a MOCK-b\" >&-",
+    "{ printf '%s\\n' MOCK-a MOCK-b; echo MOCK-c; } >&-; echo MOCK-d",
+    "x=MOCK-init\n{ { echo MOCK-j >&2\n} > /dev/null\n} 2>&1",
+    "{ echo MOCK-j >&2; } &> /dev/null > out.txt; cat out.txt; echo MOCK-k",
+]
+
+
+def test_output_model_agrees_where_it_may_not_know():
+    for program in AGREE:
+        check(program)
 
 
 def test_output_model_is_known_and_right_for_plain_programs():

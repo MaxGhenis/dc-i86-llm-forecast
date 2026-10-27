@@ -1,7 +1,8 @@
 """The audit's shell model against the real shells, on generated MOCK programs.
 
 Each program mixes directory changes (to directories present, missing or made on the way), statuses
-(writes to readonly variables and to a closed standard output among them), && and ||, if, case,
+(writes to readonly variables and to a closed standard output among them, with `command` and
+`builtin`, declaration options, arithmetic, `printf -v`, `getopts` and traps), && and ||, if, case,
 loops (while, until, for, C-style, with counters), break, continue and return, arithmetic, file
 tests, functions (with arguments and locals), subshells, background jobs, pipelines (whose last
 stage zsh runs in the current shell), sh, bash and zsh -c (with positional parameters), exported and
@@ -24,7 +25,7 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-from hypothesis import HealthCheck, given, settings
+from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 from i86 import audit, runners
@@ -68,7 +69,24 @@ atoms = st.one_of(
                      "readonly r=1", "r=2", "r=2 true", "r=2 /bin/echo MOCK 2>/dev/null", "readonly r=2 2>/dev/null",
                      "unset r 2>/dev/null", "for r in 1; do :; done 2>/dev/null", "eval 'r=3' 2>/dev/null",
                      "read r < /dev/null 2>/dev/null", "echo x >&- 2>/dev/null", "printf x >&- 2>/dev/null",
-                     "{ echo x; } >&- 2>/dev/null", "pwd >&- 2>/dev/null"]),
+                     "{ echo x; } >&- 2>/dev/null", "pwd >&- 2>/dev/null",
+                     # command and builtin, declaration options, arithmetic, printf -v, getopts, traps
+                     "command readonly r=2 2>/dev/null", "builtin readonly r=2 2>/dev/null",
+                     "command export r=2 2>/dev/null", "command eval 'r=3' 2>/dev/null",
+                     "r=2 command true 2>/dev/null", "command cd scratch 2>/dev/null", "builtin cd .. 2>/dev/null",
+                     "command -v cd >/dev/null", "export -r q=1 2>/dev/null", "readonly -n q=1 2>/dev/null",
+                     "declare -r q=1 2>/dev/null", "typeset -Z q 2>/dev/null", ": $((r=3)) 2>/dev/null",
+                     "(( r=3 )) 2>/dev/null", "printf -v r %s 2 2>/dev/null", "printf -v x %s .. 2>/dev/null",
+                     "getopts a r -a 2>/dev/null", "shopt -sZ xpg_echo 2>/dev/null",
+                     "emulate zsh -o no_such -c 'cd ..' 2>/dev/null", "trap 'cd ..' EXIT", "trap - EXIT",
+                     "trap 'cd scratch' INT", "q=1; readonly q || cd ..",
+                     # integers (zsh's from arithmetic too), zsh's padding and case, names that are
+                     # not names, prefix assignments sh, dash or zsh keep, and branches a variable
+                     # is set in only some of
+                     "typeset -i n", "n=1+1", "n=..", "n=0x10", "[ \"$n\" = 2 ]", '[ -n "${n+x}" ] || cd ..',
+                     "typeset -i 16 n 2>/dev/null", "typeset -Z 3 n 2>/dev/null", "typeset -u n 2>/dev/null",
+                     "typeset +i n", "integer n 2>/dev/null", "export 1x 2>/dev/null", "local 1x 2>/dev/null",
+                     "x=.. :", "x=scratch eval :", "x=.. exec", "[ -d scratch ] && n=", "x=.. g 2>/dev/null"]),
     st.sampled_from(DIRS).map(lambda d: f"pushd {d} >/dev/null 2>&1"),
     st.sampled_from(DIRS).map(lambda d: f"cd {d} | cat"),
     st.sampled_from(DIRS).map(lambda d: f"eval {shlex.quote('cd ' + d)}"),
@@ -111,6 +129,9 @@ def compound(inner):
         st.tuples(inner, inner).map(lambda t: f"for d in 1 2; do for e in 1 2; do {t[0]}; done; {t[1]}; done"),
         st.tuples(name, inner, inner).map(lambda t: f"{t[0]}(){{ {t[1]}; return 1; {t[2]}; }}; {t[0]}"),
         st.tuples(name, inner).map(lambda t: f"{t[0]}(){{ local x=scratch; {t[1]}; }}; {t[0]}"),
+        # A function a break or continue leaves, with its locals and positional parameters.
+        st.tuples(name, inner).map(
+            lambda t: f"{t[0]}(){{ local x=scratch; set -- scratch; {t[1]}; }}; for d in 1 2; do {t[0]}; done"),
         st.tuples(name, inner).map(lambda t: f"{t[0]}(){{ {t[1]}; }}; export -f {t[0]} 2>/dev/null; bash -c {t[0]}"),
     )
 
@@ -175,12 +196,18 @@ def run(shell: list[str], program: str, work: Path, top: Path) -> tuple[Path | N
     marker = [line for line in lines if line.startswith("PWD=")]
     # No marker: the shell rejected the program (zsh does not parse `x=1 &`) or exited before the
     # end, so it never reached the read either.
-    return (Path(marker[-1][4:]) if marker else None), read
+    # bash writes a directory reached by a path with two leading slashes with both (`//`).
+    return (Path(os.path.realpath(marker[-1][4:])) if marker else None), read
 
 
 @settings(max_examples=int(os.environ.get("I86_DIFFERENTIAL_EXAMPLES", "300")), deadline=None,
           suppress_health_check=[HealthCheck.too_slow])
 @given(programs)
+# An EXIT trap's code runs after the last marker: the audit keeps the place it ran from too.
+@example(("trap 'cd ..' EXIT; ", "cat {t}", "../opus-2/draft.json"))
+# bash expands "${a[@]}" of an unset a to no word, zsh to one empty word: only zsh's loop runs.
+@example(('for d in 1; do for d in "${a[@]}"; do cd scratch; done; done; ', "cat {t}", "../opus-2/draft.json"))
+@example(('unset a; for d in "${a[@]}"; do cd scratch; done; ', "cat {t}", "../opus-2/draft.json"))
 def test_audit_agrees_with_bash_and_zsh(case):
     prefix, read_with, target = case
     for shell in SHELLS:

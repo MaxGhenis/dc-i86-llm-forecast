@@ -21,14 +21,15 @@ def test_fork_during_lock_teardown_does_not_leak_lock_descriptor(tmp_path, monke
     owner_errors = []
     active = {}
 
-    class PausedDiscard(set):
-        def discard(self, fd):
+    class PausedDiscard(dict):
+        def pop(self, fd, *default):
             # Control only the schedule: the ordinary removal has already happened, and the
             # owner's next operation will close this descriptor after the main thread forks.
-            super().discard(fd)
+            token = super().pop(fd, *default)
             removed.set()
             if not release.wait(10):
                 owner_errors.append("timed out waiting to close the descriptor")
+            return token
 
     monkeypatch.setattr(runners, "_lock_fds", PausedDiscard())
 
