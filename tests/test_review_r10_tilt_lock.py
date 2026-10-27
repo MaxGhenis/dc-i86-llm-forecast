@@ -109,7 +109,8 @@ def test_fallback_marker_does_not_leak_reused_fd_after_another_fork(tmp_path, mo
         _, status = os.waitpid(child, 0)
         child = None
         assert os.waitstatus_to_exitcode(status) == 0, result
-        assert result['marker'] and result['reused'] and result['tracked'] == [], result
+        # The vanished thread's descriptor is closed and not recorded: no frame here refers to it.
+        assert not result['marker'] and result['reused'] and result['tracked'] == [], result
         assert not result['leaked'], result
     finally:
         release.set()

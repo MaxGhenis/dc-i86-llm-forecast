@@ -56,9 +56,10 @@ def child_report(work, rd, wr):
     return pid
 
 
-def test_child_lets_go_with_no_descriptor_free(tmp_path, monkeypatch):
-    """The parent's waiting-or-held descriptor is pointed at /dev/null without needing a free slot,
-    the child's locks are fresh, and the child takes the file lock once the parent lets go."""
+def test_child_closes_another_threads_descriptor(tmp_path, monkeypatch):
+    """A descriptor another parent thread holds the lock through is closed in the child, with no
+    descriptor free: that thread does not survive the fork, so nothing else would close it. The
+    child's locks are fresh, and the child takes the file lock once the parent lets go."""
     isolate(tmp_path, monkeypatch)
     holding, release = threading.Event(), threading.Event()
     seen = {}
@@ -73,14 +74,17 @@ def test_child_lets_go_with_no_descriptor_free(tmp_path, monkeypatch):
     thread.start()
     assert holding.wait(5)
     rd, wr = os.pipe()
-    null = os.stat(os.devnull)
 
     def work():
-        inherited = os.fstat(seen["fd"])
+        try:
+            os.fstat(seen["fd"])
+            closed = False
+        except OSError:
+            closed = True
         result = {"tracked": sorted(runners._lock_fds),
                   "guard_free": runners._fd_guard.acquire(blocking=False),
                   "mutex_free": runners._mutex.acquire(blocking=False),
-                  "points_at_null": (inherited.st_rdev, inherited.st_ino) == (null.st_rdev, null.st_ino)}
+                  "closed": closed}
         runners._fd_guard.release()
         runners._mutex.release()
         for fd in fillers:
@@ -105,8 +109,59 @@ def test_child_lets_go_with_no_descriptor_free(tmp_path, monkeypatch):
         if wr is not None:
             os.close(wr)
     assert os.waitstatus_to_exitcode(status) == 0, result
-    assert result == {"tracked": [], "guard_free": True, "mutex_free": True, "points_at_null": True,
+    assert result == {"tracked": [], "guard_free": True, "mutex_free": True, "closed": True,
                       "took_lock": True}
+
+
+def test_child_points_its_own_frames_descriptor_at_null(tmp_path, monkeypatch):
+    """A descriptor the forking thread holds the lock through is pointed at /dev/null without needing
+    a free slot; its frame, unwinding in the child, closes it without letting go of the parent's lock,
+    and the child takes the file lock once the parent lets go."""
+    isolate(tmp_path, monkeypatch)
+    rd, wr = os.pipe()
+    null = os.stat(os.devnull)
+    pid = None
+    try:
+        with runners.bookkeeping_lock():
+            fd = next(iter(runners._lock_fds))
+            with no_descriptor_free() as fillers:
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        signal.alarm(10)
+                        st = os.fstat(fd)
+                        result = {"points_at_null": (st.st_rdev, st.st_ino) == (null.st_rdev, null.st_ino),
+                                  "tracked": sorted(runners._lock_fds)}
+                        for f in fillers:
+                            os.close(f)
+                    except BaseException:
+                        os._exit(2)
+        if pid == 0:
+            try:
+                try:
+                    os.fstat(fd)
+                    result["closed"] = False
+                except OSError:
+                    result["closed"] = True
+                with runners.bookkeeping_lock():  # the parent let go before it waited for this child
+                    result["took_lock"] = True
+                os.write(wr, json.dumps(result).encode())
+                os._exit(0)
+            except BaseException:
+                os._exit(2)
+        os.close(wr)
+        wr = None
+        result = json.loads(os.read(rd, 4096) or b"{}")
+        _, status = os.waitpid(pid, 0)
+        pid = None
+    finally:
+        if pid not in (None, 0):
+            os.waitpid(pid, 0)
+        os.close(rd)
+        if wr is not None:
+            os.close(wr)
+    assert os.waitstatus_to_exitcode(status) == 0, result
+    assert result == {"points_at_null": True, "tracked": [], "closed": True, "took_lock": True}
 
 
 def test_child_without_spare_closes_and_leaves_the_number_alone(tmp_path, monkeypatch):

@@ -61,8 +61,8 @@ FINISHED = {"succeeded", "failed", "cancelled", "canceled", "lost", "killed", "e
 # the lock reentrant for the thread that holds it.
 _mutex = threading.RLock()
 _held = threading.local()
-_lock_fds: dict[int, object] = {}  # this process's descriptors on the lock file, held or waited on,
-# each with a token for the bookkeeping_lock frame that opened it
+_lock_fds: dict[int, tuple[object, int]] = {}  # this process's descriptors on the lock file, held or
+# waited on, each with a token for the bookkeeping_lock frame that opened it and that frame's thread
 _fd_guard = threading.Lock()  # held from opening a descriptor until it is in _lock_fds, from taking it
 # out of _lock_fds until it is closed, and by fork
 _spare_null = os.open(os.devnull, os.O_RDONLY)  # what a forked child points inherited lock descriptors at
@@ -81,22 +81,30 @@ def _after_fork_in_parent() -> None:
 def _forget_lock_after_fork() -> None:
     # A forked child holds none of its parent's lock: it starts afresh and waits for the file lock
     # like any other process. Its copies of the parent's lock descriptors share the parent's lock, or
-    # the lock a parent thread is still waiting for, so they are pointed at /dev/null; otherwise the
-    # lock would outlive a parent that exits while the child still runs, and the child, waiting for it
-    # through a new descriptor, would wait forever. Fork waits for _fd_guard, so no descriptor can be
-    # open but not yet in _lock_fds, or out of _lock_fds but not yet closed.
+    # the lock a parent thread is still waiting for; otherwise the lock would outlive a parent that
+    # exits while the child still runs, and the child, waiting for it through a new descriptor, would
+    # wait forever. Fork waits for _fd_guard, so no descriptor can be open but not yet in _lock_fds,
+    # or out of _lock_fds but not yet closed.
     #
-    # The locks are replaced first, so a failure below cannot leave the child's copies held. The
-    # descriptors are pointed at a /dev/null descriptor opened at import, which needs no free
+    # The locks are replaced first, so a failure below cannot leave the child's copies held. A copy
+    # opened by another thread's frame is closed: that thread does not survive the fork, so its frame
+    # never runs here to close it. A copy opened by a frame of the thread that forked, which unwinds
+    # here and closes it, is pointed at a /dev/null descriptor opened at import, which needs no free
     # descriptor; failing that (the spare closed, or its number now another file's), at a newly
-    # opened one; failing that (no descriptor free), they are closed, and recorded by the token of the
-    # frame that opened them, so that frame leaves the number alone. A token names one frame, so the
-    # record of a frame that never runs here (its thread did not survive the fork) cannot make a later
-    # frame that gets the same number leave its own descriptor open.
+    # opened one; failing that (no descriptor free), it is closed, and recorded by the frame's token,
+    # so that frame leaves the number alone. A token names one frame, so the record cannot make a
+    # later frame that gets the same number leave its own descriptor open.
     global _mutex, _held, _lock_fds, _fd_guard
     inherited = _lock_fds
     _mutex, _held, _lock_fds, _fd_guard = threading.RLock(), threading.local(), {}, threading.Lock()
-    for fd, token in inherited.items():
+    me = threading.get_ident()  # the thread that forked: the child's one thread
+    for fd, (token, thread) in inherited.items():
+        if thread != me:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            continue
         try:
             spare = os.fstat(_spare_null)
             if (spare.st_dev, spare.st_ino) == _spare_id:
@@ -147,7 +155,7 @@ def bookkeeping_lock():
         with _fd_guard:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
             fds = _lock_fds
-            fds[fd] = token
+            fds[fd] = (token, threading.get_ident())
         owner = os.getpid()
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)

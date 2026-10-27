@@ -9,9 +9,14 @@ command, output sent to standard error or another descriptor (`2>&1` before or a
 standard output (bash 3.2 keeps what a builtin wrote, of printf the first pass of its format, and writes
 it later; bash's builtins then fail, zsh's do not), exec's redirections, process substitution, pipelines
 with a redirected stage (zsh's MULTIOS sends it down the pipe too), groups, subshells, functions, loops,
-if, && and ||, background jobs, eval, sh -c, exit and return, unset, and writes to a readonly variable
-(which end the line, the eval or the shell, or fail, by shell and kind of write). Each program sets the
-variable it prints first: the audit cannot know a variable's value from the environment. Property, for
+if, && and ||, background jobs, eval, sh -c, exit and return (also where the audit cannot tell
+whether it runs, `[ -n "$X" ] || exit`), unset, writes to a readonly variable (which end the line, the
+eval or the shell, or fail, by shell and kind of write), lines that start with a backslash, zsh's `|&`
+(bash rejects the line), declarations whose values name a variable they assign, here-document lines
+that are not the end (` EOF`, `EOF `, the word as written), `set -e`, `set -u` and `set -x` (by
+letter, by name and in clusters, also where bash stops after an `o`) and `exec`. Each program sets the variable it
+prints first (X, never set, decides branches and is the parameter `set -u` ends the shell at): the
+audit cannot know a variable's value from the environment. Property, for
 every program under bash and zsh (no startup files): when the model's output is known, what the shell
 printed is one of its texts, an unknown part matching anything.
 """
@@ -67,6 +72,18 @@ printing = st.one_of(
         # closes standard output), and printf's format reused at a closed standard output.
         'cat <<< "MOCK-hs $x"', "cat <<< MOCK-ht > out.txt", "printf MOCK-pd 1<&-", "exec 1<&-",
         "{ echo MOCK-re >&2; } 2<&1", "printf '%s\\n' MOCK-pe MOCK-pf >&-",
+        # A line that starts with a backslash (the grammar folds it into the line before), a
+        # here-document line that does, zsh's `|&` (which bash rejects with its line), a
+        # declaration's values expanded before it assigns any, and a subshell that may exit after
+        # writing a file.
+        "\\echo MOCK-bs", "cat <<EOF\n\\MOCK-hi \\`echo no\\` \\$x\nEOF", "{ echo MOCK-pg >&2; } |& cat",
+        'x=MOCK-dx; export x=MOCK-dy w=$x; echo "$w"',
+        '( echo MOCK-xa > out.txt; [ -n "$X" ] || exit; echo MOCK-xb > out.txt ); cat out.txt',
+        # a here-document line that is not its end: blanks around the delimiter, or the word as written
+        "cat <<EOF\nMOCK-hj\n EOF\nEOF \nEOF", "cat <<-EOF\n\tMOCK-hk\n  EOF\n\tEOF",
+        "cat <<E'O'F\nE'O'F\nMOCK-hl\nEOF",
+        # A parameter that `set -u` ends the shell at, quoted and not.
+        'echo "MOCK-u$X"', "echo MOCK-v${1}",
     ]),
 )
 state = st.sampled_from([
@@ -81,7 +98,14 @@ state = st.sampled_from([
     "typeset -u z 2>/dev/null", "typeset +i z", "export 1x 2>/dev/null", "z=MOCK-k :", "z=MOCK-l exec",
     "shopt -s xpg_echo 2>/dev/null", "set -o posix 2>/dev/null", "setopt bsd_echo 2>/dev/null",
     "setopt sh_word_split 2>/dev/null", "emulate sh 2>/dev/null", "set -o noglob", "alias e=echo",
-    "exit", "exit 1", "(exit 1)", "return", "return 1 2>/dev/null",
+    "exit", "exit 1", "(exit 1)", "return", "return 1 2>/dev/null", '[ -n "$X" ] || exit',
+    # errexit, nounset and xtrace, by letter, by name and in clusters; exec ending the shell.
+    "set -e", "set -u", "set +eu", "set -o errexit", "set -ou pipefail 2>/dev/null", "set -el 2>/dev/null",
+    "set -x 2>/dev/null", "set +x 2>/dev/null", "exec true",
+    # bash keeps what came before a letter or name it lacks after an `o`, and lists the options
+    # before a word that starts with `-`.
+    "set -oc pipefail 2>/dev/null", "set -uoc pipefail 2>/dev/null", "set -o bogus x 2>/dev/null",
+    "set -o -u > /dev/null 2>&1",
 ])
 atoms = st.one_of(printing, printing, state)
 
@@ -115,10 +139,11 @@ programs = st.lists(st.recursive(atoms, compound, max_leaves=6), min_size=1, max
 
 def matches(real: str, model: str) -> bool:
     """Whether the real output is one of the model's texts, an UNKNOWN part matching anything. So
-    does a variable's name: where a new shell may have the variable from an environment the audit
-    cannot see (one the program never exported to it), the audit keeps `$name`."""
+    does a parameter's name: where a shell may have the variable from an environment the audit
+    cannot see (one the program never exported to it), or the positional parameters of a shell it
+    did not start (the transcript's own), the audit keeps `$name` or `$1`."""
     def pattern(text):
-        parts = re.split(r"\x00|\$[A-Za-z_][A-Za-z0-9_]*", text)
+        parts = re.split(r"\x00|\$(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)", text)
         return "(?s:.*)".join(map(re.escape, parts))
     return any(re.fullmatch(pattern(text), real) for text in audit._choices(model))
 
@@ -201,6 +226,22 @@ EXACT = [
     "cat <<< MOCK-a; cat <<< \"MOCK-b $x\" > out.txt; cat out.txt",
     # Standard error sent to standard output inside the group goes where that output goes.
     "{ { echo MOCK-j >&2; } 2>&1; } > /dev/null; echo MOCK-k",
+    # A line that starts with a backslash runs as a command of its own; in a here-document the
+    # backslash before `$`, a backquote or a backslash quotes it, and before other text stays.
+    "true\n\\echo MOCK-a",
+    "cat <<EOF\n\\MOCK-a\n\\`echo MOCK-b\\`\n\\\\\nEOF",
+    # A declaration expands all its values before it assigns any.
+    'p=MOCK-a; export p=MOCK-b q=$p; echo "$q"',
+    # A subshell that exits leaves the files it wrote; X is never set.
+    '( echo MOCK-a > out.txt; [ -z "$X" ] && exit; echo MOCK-b > out.txt ); cat out.txt',
+    'x=$(echo MOCK-a > out.txt; [ -z "$X" ] && exit; echo MOCK-b > out.txt); cat out.txt',
+    # bash 3.2 rejects a line with `|&`, running nothing on it; zsh pipes standard error too.
+    "{ echo MOCK-a >&2; } |& cat",
+    "echo MOCK-x\n{ echo MOCK-a >&2; } |& cat\necho MOCK-y",
+    # The transcript's shell may have positional parameters, which the model keeps as `$1` (the
+    # 3000-example search's counterexample); `set -u` may end the shell at them.
+    "x=MOCK-init\necho MOCK-v${1}",
+    'set -u; echo MOCK-a; echo "MOCK-b$X"',
 ]
 
 
@@ -216,6 +257,15 @@ AGREE = [
     "{ printf '%s\\n' MOCK-a MOCK-b; echo MOCK-c; } >&-; echo MOCK-d",
     "x=MOCK-init\n{ { echo MOCK-j >&2\n} > /dev/null\n} 2>&1",
     "{ echo MOCK-j >&2; } &> /dev/null > out.txt; cat out.txt; echo MOCK-k",
+    # zsh's MULTIOS with a duplication or close among several redirections of one descriptor
+    # (`> f >&-` leaves f empty, `2>&1 2>/dev/null` writes to both): the output is unknown.
+    "{ echo MOCK-a >&2; echo MOCK-b; } > out.txt >&-; cat out.txt 2>/dev/null",
+    "f(){ echo MOCK-a >&2; echo MOCK-b; }; f 2>&1 2>/dev/null >out.txt; cat out.txt 2>/dev/null",
+    'echo MOCK-b > out.txt 1>&1; echo "f=$(cat out.txt)"',
+    'echo MOCK-b > out.txt >&2; echo "f=$(cat out.txt)"',
+    "{ echo MOCK-a >&2; } 2>&1 2>/dev/null",
+    # An EXIT trap's code runs with the variables of the way the shell ended.
+    "trap 'echo \"$p\"' EXIT; p=MOCK-a; [ -z \"$X\" ] && exit; p=MOCK-b",
 ]
 
 
