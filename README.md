@@ -85,7 +85,8 @@ uv pip install -e ".[dev]"
 ```
 
 The audit's tests compare its shell model with macOS's shells and BSD tools, so the suite assumes
-macOS (with rg from Homebrew). GitHub Actions runs it on macOS for every pull request.
+macOS (with rg and poppler's pdftotext from Homebrew). GitHub Actions runs it on macOS for every
+pull request.
 
 Dispatch forecasters with any of three backends:
 
