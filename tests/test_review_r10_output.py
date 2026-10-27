@@ -24,7 +24,7 @@ class InexactKnownOutput(AssertionError):
 def real_and_model(shell, code, work):
     proc = subprocess.run(["/bin/" + shell, "-c", code], cwd=work,
                           env={"PATH": "/usr/bin:/bin", "HOME": str(work), "PWD": str(work)},
-                          stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
+                          stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
     wrapped = shell + " -c " + shlex.quote(code)
     model = audit._shell(wrapped, work)
     verdict, why = audit.model_call("shell", {"command": wrapped}, work, audit.protected_roots())

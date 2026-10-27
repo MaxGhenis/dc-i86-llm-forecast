@@ -96,7 +96,7 @@ def test_interpreter_data_uses_real_shell(review_area, shell, program, category,
     (review_area / "opus-2" / "draft.json").write_text("MOCK own path after input consumption\n")
     env = {**os.environ, "PATH": str(Path(sys.executable).parent) + ":" + os.environ["PATH"]}
     proc = subprocess.run([shell, "-c", program], cwd=review_area, env=env,
-                          capture_output=True, text=True, timeout=20)
+                          capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, (program, proc)
     assert ("MOCK OTHER ANSWER" in proc.stdout) == opens_answer, (program, proc.stdout, proc.stderr)
     got, reason = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(program)},

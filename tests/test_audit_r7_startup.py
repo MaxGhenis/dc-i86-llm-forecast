@@ -14,7 +14,7 @@ SHELLS = [("/bin/bash", "posix"), ("/bin/zsh", "zsh")]
 def real(shell, program, work):
     flags = ["--norc", "--noprofile", "-c"] if shell == "/bin/bash" else ["-f", "-c"]
     return subprocess.run(
-        [shell, *flags, program], cwd=work, capture_output=True, text=True, timeout=20,
+        [shell, *flags, program], cwd=work, capture_output=True, text=True, timeout=60,
         env={"PATH": "/usr/bin:/bin", "HOME": str(work), "PWD": str(work), "OLDPWD": str(work)},
     )
 

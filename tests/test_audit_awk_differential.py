@@ -78,7 +78,7 @@ def test_audit_agrees_with_awk(case):
             (work / "MOCK.txt").write_text("MOCK own research\n")
             env = {"PATH": "/usr/bin:/bin", "HOME": str(top / "home"), "PWD": str(work)}
             proc = subprocess.run([*shell, program], cwd=work, env=env, stdin=subprocess.DEVNULL,
-                                  capture_output=True, text=True, timeout=20)
+                                  capture_output=True, text=True, timeout=60)
             read = ANSWER in proc.stdout.splitlines()
             roots = [top / "repository", top / "staging"]
             with mock.patch.object(runners, "WORK", top / "work"), \

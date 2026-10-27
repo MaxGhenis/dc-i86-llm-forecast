@@ -24,7 +24,7 @@ def observe(tmp_path: Path, name: str, code: str):
     roots = [top / "repository", top / "staging"]
     shell = SHELLS[name]
     proc = subprocess.run(
-        [*shell, code], cwd=work, capture_output=True, text=True, timeout=20,
+        [*shell, code], cwd=work, capture_output=True, text=True, timeout=60,
         stdin=subprocess.DEVNULL,
         env={"PATH": "/usr/bin:/bin", "HOME": str(top / "home"), "PWD": str(work)},
     )

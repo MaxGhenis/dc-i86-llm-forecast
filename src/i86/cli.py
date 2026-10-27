@@ -169,6 +169,14 @@ def cmd_audit(args) -> int:
     return worst
 
 
+def _audit_record(result) -> bool:
+    """Whether an audit.json holds what `audit_transcript` writes: whether the run passed, and its
+    violations and suspect calls as lists. A record without them (damaged, or an older audit's)
+    keeps its run out of the pool, as no audit does."""
+    return (isinstance(result, dict) and isinstance(result.get("passed"), bool)
+            and isinstance(result.get("violations"), list) and isinstance(result.get("suspect"), list))
+
+
 def accepted_runs(g, prompt_sha: str, allow_unaudited: bool = False, accept_prior: set[str] = frozenset(),
                   accept_suspect: set[str] = frozenset()) -> dict:
     """Runs with a parsed response, the current prompt's hash, a passing audit with no suspect calls
@@ -190,10 +198,13 @@ def accepted_runs(g, prompt_sha: str, allow_unaudited: bool = False, accept_prio
             print(f"excluding {d.name}: no audit (run `i86 audit`; manual runs need --allow-unaudited)",
                   file=sys.stderr)
             continue
-        if result is not None and not result.get("passed"):
+        if result is not None and not _audit_record(result):
+            print(f"excluding {d.name}: audit.json is not an audit record (run `i86 audit` again)", file=sys.stderr)
+            continue
+        if result is not None and not (result["passed"] and not result["violations"]):
             print(f"excluding {d.name}: audit failed", file=sys.stderr)
             continue
-        suspect = result.get("suspect", []) if result is not None else []
+        suspect = result["suspect"] if result is not None else []
         if suspect and d.name not in accept_suspect:
             print(f"excluding {d.name}: {len(suspect)} suspect call(s) (read them in runs/{d.name}/audit.json; "
                   f"--accept-suspect {d.name} to include)", file=sys.stderr)

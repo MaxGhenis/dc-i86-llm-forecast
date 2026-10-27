@@ -28,7 +28,9 @@ only when it finds nothing. The subset:
   else to check except for ls and find, which read its times.
 - Where a call starts is a list of places, or None when the transcript does not say: Codex's shell
   tool may run a command in a directory its transcript does not record. From an unknown place a
-  relative path is outside. Only `cd` moves the shell, and a `cd` may fail.
+  relative path is outside. Only `cd` moves the shell, and a `cd` may fail. The places a call may
+  end in always include its start, where Claude Code starts the next call after one that failed
+  (see audit._next_place).
 
 It takes the tools the names find, through whatever PATH the shell starts with (a login shell's
 included), to be the standard ones (or, for grep and find, the ugrep and bfs that Claude Code's
@@ -337,6 +339,20 @@ def remote_url(url: str, globs: bool = True) -> str | None:
     return None
 
 
+# An http(s) URL every parser reads alike: the scheme, two slashes, a host (with an optional port)
+# with no user name, then a path, query or fragment of printable ASCII other than a backslash.
+WEB_URL = re.compile(r"(?i)https?://[^/?#@\\\s]*(?:[/?#][!-\[\]-~]*)?")
+
+
+def web_url(url) -> str | None:
+    """`remote_url` for a URL a web tool fetches (WebFetch's, or a page Codex's search opens), which
+    must also be one every parser reads alike: the WHATWG parser that Node's fetch uses reads
+    `http:127.0.0.1`, `HTTP:/\\127.0.0.1` and `http://127.0.0.1\\@example.org` as URLs of 127.0.0.1."""
+    if not isinstance(url, str) or not WEB_URL.fullmatch(url):
+        return "a URL the audit does not read exactly"
+    return remote_url(url, globs=False)
+
+
 def _resolve(word: str, places: list[Path] | None, workdir: Path) -> list[Path] | None:
     """Where a word names from each place, if each is in the work directory with no link on the way.
 
@@ -375,7 +391,7 @@ def _union(a: list[Path] | None, b: list[Path] | None) -> list[Path] | None:
 def outside(command: str, workdir: Path, start: list[Path] | None, nested: bool = False
             ) -> tuple[str | None, list[Path] | None]:
     """(What in the command lies outside the subset, or None; the places the shell may end in, None
-    when unknown). `start`: the places it may start in, None when unknown."""
+    when unknown, `start` among them). `start`: the places it may start in, None when unknown."""
     tokens = _lex(command)
     if isinstance(tokens, str):
         return tokens, None

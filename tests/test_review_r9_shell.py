@@ -19,7 +19,7 @@ class InexactKnownOutput(AssertionError):
 def _real(shell, command, work):
     return subprocess.run(["/bin/" + shell, "-c", command], cwd=work,
                           env={"PATH": "/usr/bin:/bin", "HOME": str(work)},
-                          capture_output=True, text=True, timeout=20)
+                          capture_output=True, text=True, timeout=60)
 
 
 def _audit(shell, command, work):

@@ -203,7 +203,7 @@ def run(shell: list[str], program: str, work: Path, top: Path) -> tuple[Path | N
     for attempt in range(3):  # a shell stalled on a loaded host says nothing about the audit
         try:
             proc = subprocess.run([*shell, program], cwd=work, env=env, stdin=subprocess.DEVNULL,
-                                  capture_output=True, text=True, timeout=20)
+                                  capture_output=True, text=True, timeout=60)
             break
         except subprocess.TimeoutExpired:
             if attempt == 2:

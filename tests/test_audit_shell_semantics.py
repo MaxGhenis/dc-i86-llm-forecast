@@ -23,7 +23,7 @@ EXAMPLES = int(os.environ.get("I86_DIFFERENTIAL_EXAMPLES", "300"))
 
 def sh(shell: str, code: str, cwd=None) -> subprocess.CompletedProcess:
     args = [shell, "-f", "-c", code] if shell == ZSH else [shell, "--norc", "--noprofile", "-c", code]
-    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=20,
+    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=60,
                           env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent-home"})
 
 
@@ -131,7 +131,7 @@ def test_field_splitting_matches_bash_and_zsh(review_area, ifs, y, words):
 def test_field_splitting_ends_where_the_shell_ends(review_area, monkeypatch, program, shell, dialect):
     monkeypatch.setattr(audit, "HOME", review_area / "scratch" / "deep")
     proc = subprocess.run([shell, "-f" if shell == ZSH else "--norc", "-c", program + "; pwd -P"], cwd=review_area,
-                          capture_output=True, text=True, timeout=20,
+                          capture_output=True, text=True, timeout=60,
                           env={"PATH": "/usr/bin:/bin", "HOME": str(review_area / "scratch" / "deep")})
     real = audit.Path(proc.stdout.strip().splitlines()[-1])
     model = _model(program, review_area, dialect)

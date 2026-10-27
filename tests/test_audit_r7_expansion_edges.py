@@ -14,7 +14,7 @@ SHELLS = [("/bin/bash", "posix"), ("/bin/zsh", "zsh")]
 def run_shell(shell, program, workdir):
     flags = ["--norc", "--noprofile", "-c"] if shell == "/bin/bash" else ["-f", "-c"]
     return subprocess.run([shell, *flags, program], cwd=workdir, capture_output=True, text=True,
-                          timeout=20, env={"PATH": "/usr/bin:/bin", "HOME": str(workdir)})
+                          timeout=60, env={"PATH": "/usr/bin:/bin", "HOME": str(workdir)})
 
 
 def model(program, workdir, dialect):

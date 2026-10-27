@@ -13,7 +13,7 @@ from test_review_r4_audit import audit_command, model_suspects
 
 
 def run_sh(command, cwd):
-    return subprocess.run(["/bin/sh", "-c", command], cwd=cwd, capture_output=True, text=True, timeout=10)
+    return subprocess.run(["/bin/sh", "-c", command], cwd=cwd, capture_output=True, text=True, timeout=60)
 
 
 @pytest.mark.parametrize("command", [

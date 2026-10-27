@@ -1,12 +1,11 @@
 """Invariants of the band-aware exact tilt. All forecast answers and Yes-share CDFs are MOCK.
 
 The shares simulate may draw under an exact tilt: those on the segments of the band (lo, hi] that
-the sampler gives probability (dists.share_segments, cut at the CDF's knots and the cells), clipped
-as simulate clips its draws, to [lo, hi] with lo moved just above 50% when the band excludes it.
-The clip is applied after the segments are found, so a sliver of probability between lo and the
-next representable share still counts, at that share. The generated bands have probability (simulate
-raises on one without), and their ends include knots and the floats just either side of them; the
-CDFs have flat stretches.
+the sampler gives probability (dists.share_segments, cut at the CDF's knots and the cells), each
+(a, b] as the samplers draw it: a segment starting at 50% holds no failing share, and a sliver of
+probability between a and the next representable share counts, at that share. The generated bands
+have probability (simulate raises on one without), and their ends include knots and the floats just
+either side of them; the CDFs have flat stretches.
 
 - Reference: at every share simulate may draw, the tilt divided by 2^scale is the chance the node
   takes an allowed value, computed directly from the unscaled answers (node_params and
@@ -72,21 +71,22 @@ def cases(draw):
 
 def _stretches(graph, cdf, band):
     """The parts of the band simulate may draw from (see the module notes): the sampler's segments
-    with probability, each clipped as simulate clips its draws."""
+    with probability, each (a, b]."""
     lo, hi = band
-    low = float(np.nextafter(lo, 1.0)) if lo >= 0.5 else lo
     breaks = sorted({0.5, *graph.cells, *graph.near_cells})
     a, b, m = dists.share_segments(graph.share_grid, np.asarray(cdf, dtype=float), graph.share_floor,
                                    graph.share_ceiling, lo, hi, breaks)
-    return [(min(max(float(x), low), hi), min(float(y), hi)) for x, y, mass in zip(a, b, m) if mass > 0]
+    return [(float(x), float(y)) for x, y, mass in zip(a, b, m) if mass > 0]
 
 
 def _points(graph, stretches, extra):
-    """Each stretch's ends, the cells and 50% inside it, and the points `extra` of the way along it."""
+    """Each stretch's lowest share (the float above a) and b, the cells and 50% inside it, and the
+    points `extra` of the way along it."""
     out = []
     for a, b in stretches:
-        inside = [x for x in [*graph.cells, 0.5, float(np.nextafter(0.5, 1.0))] if a <= x <= b]
-        out += [a, b, *inside, *np.clip(a + (b - a) * np.asarray(extra), a, b)]
+        first = float(np.nextafter(a, 1.0))
+        inside = [x for x in [*graph.cells, 0.5, float(np.nextafter(0.5, 1.0))] if first <= x <= b]
+        out += [first, b, *inside, *np.clip(a + (b - a) * np.asarray(extra), first, b)]
     return np.array(out)
 
 

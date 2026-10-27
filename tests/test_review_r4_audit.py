@@ -34,7 +34,7 @@ def model_suspects(result):
 ])
 def test_child_shell_cannot_hide_protected_read(tmp_path, review_area, command):
     proc = subprocess.run(["/bin/sh", "-c", command], cwd=review_area,
-                          capture_output=True, text=True, check=True, timeout=10)
+                          capture_output=True, text=True, check=True, timeout=60)
     assert proc.stdout == "MOCK OTHER ANSWER\n"
     result = audit_command(tmp_path, command, review_area)
     assert result["violations"], result
@@ -45,7 +45,7 @@ def test_child_shell_cannot_hide_protected_read(tmp_path, review_area, command):
 ])
 def test_executing_protected_script_is_a_violation(tmp_path, review_area, command):
     proc = subprocess.run(["/bin/sh", "-c", command], cwd=review_area,
-                          capture_output=True, text=True, check=True, timeout=10)
+                          capture_output=True, text=True, check=True, timeout=60)
     assert proc.stdout == "MOCK PROTECTED SCRIPT\n"
     result = audit_command(tmp_path, command, review_area)
     assert result["violations"], result
@@ -60,7 +60,7 @@ def test_python_heredoc_protected_read_is_a_violation(tmp_path, review_area, exp
     # Use this environment's interpreter to avoid depending on the login shell's Python.
     import sys
     proc = subprocess.run([sys.executable, "-c", "print(" + expression + ")"], cwd=review_area,
-                          capture_output=True, text=True, check=True, timeout=10)
+                          capture_output=True, text=True, check=True, timeout=60)
     assert proc.stdout.strip() == "MOCK OTHER ANSWER"
     result = audit_command(tmp_path, command, review_area)
     assert result["violations"], result
@@ -69,7 +69,7 @@ def test_python_heredoc_protected_read_is_a_violation(tmp_path, review_area, exp
 def test_curl_file_url_is_a_protected_read(tmp_path, review_area):
     command = 'curl -s "file://$PWD/../opus-2/draft.json"'
     proc = subprocess.run(["/bin/sh", "-c", command], cwd=review_area,
-                          capture_output=True, text=True, check=True, timeout=10)
+                          capture_output=True, text=True, check=True, timeout=60)
     assert proc.stdout == "MOCK OTHER ANSWER\n"
     result = audit_command(tmp_path, command, review_area)
     assert result["violations"], result

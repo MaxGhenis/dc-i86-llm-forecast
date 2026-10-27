@@ -25,7 +25,7 @@ def classification(tmp_path, command, work):
 
 def execute(command, work):
     return subprocess.run(["/bin/sh", "-c", command], cwd=work, capture_output=True,
-                          text=True, timeout=10)
+                          text=True, timeout=60)
 
 
 @pytest.mark.parametrize("command", [

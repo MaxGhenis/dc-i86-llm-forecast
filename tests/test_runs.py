@@ -92,7 +92,10 @@ def _accepted_run(graph, label, prompt_sha="sha", passed=True, prior="none", sus
     obj = MOCK_response(graph)
     obj["forecaster"]["prior_context"] = prior
     (run / "response.json").write_text(json.dumps(obj))
-    (run / "audit.json").write_text(json.dumps({"passed": passed, "suspect": list(suspect)}))
+    # A MOCK audit record with the fields audit_transcript writes (a failed audit has a violation).
+    violations = [] if passed else [{"tool": "MOCK", "call": "MOCK", "why": "MOCK"}]
+    (run / "audit.json").write_text(json.dumps({"passed": passed, "violations": violations,
+                                                "suspect": list(suspect)}))
 
 
 def test_pooling_takes_only_current_prompt_audited_runs_with_no_prior_context(area, graph, capsys):

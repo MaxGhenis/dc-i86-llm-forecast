@@ -39,11 +39,11 @@ def test_a_bash_input_that_is_not_an_object_is_suspect(tmp_path):
         assert check_call(tool, f"cat {SIBLING_ANSWER}", WORK, protected_roots())[0] == "suspect"
 
 
-@pytest.mark.parametrize("first", ["cd ..", "cd .. && echo MOCK", "cd ..; exit 3", "cd /; cd .."])
+@pytest.mark.parametrize("first", ["cd ..", "cd .. && echo MOCK", "cd /; cd .."])
 def test_the_model_starts_a_bash_call_where_the_last_one_ended(tmp_path, first):
-    """Claude Code starts a Bash call where the last ended, or, once a call ends outside the
-    directories it allows, back in the work directory: a read that reaches another run from the
-    first of these places excludes the run."""
+    """Claude Code starts a Bash call where the last ended with status 0, or, once a call ends
+    outside the directories it allows, back in the work directory: a read that reaches another run
+    from the first of these places excludes the run."""
     if first == "cd /; cd ..":
         second = f"cat {(runners.WORK / 'opus-10').relative_to('/')}/draft.json"
     else:
@@ -51,6 +51,17 @@ def test_the_model_starts_a_bash_call_where_the_last_one_ended(tmp_path, first):
     out = run(tmp_path, [claude("Bash", command=first), claude("Bash", command=second)])
     assert [c["call"] for c in out["violations"]] and not out["passed"], out
     assert second in out["violations"][-1]["call"], out
+
+
+@pytest.mark.parametrize("first", ["cd ..; exit 3", "cd ..; exit 0", "cd ..; false", "cd .. && false"])
+def test_the_model_starts_a_bash_call_where_the_last_one_started_after_an_exit_or_a_failure(tmp_path, first):
+    """Claude Code reads where the shell is only after a call that ran to its end with status 0
+    (`eval CMD && pwd -P >| FILE`; measured on 2.1.284 and 2.1.308): after an exit or a failure the
+    next call starts where this one started, and a read from there that reaches another run
+    excludes the run."""
+    out = run(tmp_path, [claude("Bash", command=first), claude("Bash", command="cat ../opus-10/draft.json")])
+    assert [c["call"] for c in out["violations"]] and not out["passed"], out
+    assert "../opus-10/draft.json" in out["violations"][-1]["call"], out
 
 
 def test_a_cd_inside_the_work_directory_keeps_later_reads_local(tmp_path):

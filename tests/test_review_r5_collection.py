@@ -128,6 +128,6 @@ runners.prepare('child', area / 'MOCK-brief.md', 'MOCK-sha', 'manual')
         assert (area / "MOCK-child-ready").exists()
         assert child.poll() is None
         assert not (runners.RUNS / "child" / "meta.json").exists()
-    stdout, stderr = child.communicate(timeout=20)
+    stdout, stderr = child.communicate(timeout=60)
     assert child.returncode == 0, (stdout, stderr)
     assert (runners.RUNS / "child" / "meta.json").exists()

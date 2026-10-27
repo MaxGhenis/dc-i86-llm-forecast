@@ -74,13 +74,22 @@ def share_cdf_at(grid, cdf, floor, ceiling, x) -> np.ndarray:
 
 
 def share_segments(grid, cdf, floor, ceiling, lo, hi, breaks=()):
-    """The band (lo, hi] cut at the CDF's knots, and at `breaks`, inside it: each segment's ends and
-    the forecaster's probability on it. The CDF is linear between knots, so the share is uniform
-    within a segment. The samplers draw only from segments whose probability is positive."""
+    """The band (lo, hi] cut at the CDF's knots, and at `breaks`, inside it: each segment's ends a and
+    b and the forecaster's probability on (a, b]. The CDF is linear between knots, so the share is
+    uniform within a segment. The samplers draw only from segments whose probability is positive,
+    and only shares in (a, b] (see `_inside`)."""
     xs, fs = share_knots(grid, cdf, floor, ceiling)
     inner = np.concatenate([xs, np.asarray(breaks, dtype=float)])
     pts = np.unique(np.concatenate([[lo, hi], inner[(inner > lo) & (inner < hi)]]))
     return pts[:-1], pts[1:], np.diff(np.interp(pts, xs, fs))
+
+
+def _inside(a, b, x):
+    """Draws `x` of segments (a, b], held there: a draw at the first fraction of a segment, or one a
+    segment a few floats wide rounds to its left end, would otherwise land on a, which belongs to
+    the segment before (at 50%, a failing share drawn for a passing one), and rounding can take a
+    draw at the last fraction just past b."""
+    return np.clip(x, np.nextafter(a, np.inf), b)
 
 
 def sample_share_band(grid, cdf, floor, ceiling, lo, hi, u, defensive: float = 0.0):
@@ -105,7 +114,7 @@ def sample_share_band(grid, cdf, floor, ceiling, lo, hi, u, defensive: float = 0
     u = np.asarray(u, dtype=float)
     seg = np.minimum(np.searchsorted(cq, u, side="right"), len(m) - 1)
     frac = np.clip((u - (cq[seg] - q[seg])) / q[seg], 0.0, 1.0)
-    return a[seg] + frac * (b[seg] - a[seg]), p[seg] / q[seg]
+    return _inside(a[seg], b[seg], a[seg] + frac * (b[seg] - a[seg])), p[seg] / q[seg]
 
 
 def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2_scale: int = 0):
@@ -131,8 +140,11 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2
     """
     a, b, mass = share_segments(grid, cdf, floor, ceiling, lo, hi, breaks)
     # The tilt's ends on each segment, from two interior points (exact for a linear function, and
-    # blind to a jump at either end).
+    # blind to a jump at either end). A segment so narrow that its first third rounds to a (a few
+    # floats wide) is read at b, which belongs to it: its tilt is constant there to within rounding.
     x1, x2 = a + (b - a) / 3, a + 2 * (b - a) / 3
+    narrow = x1 <= a
+    x1, x2 = np.where(narrow, b, x1), np.where(narrow, b, x2)
     f1, f2 = np.asarray(tilt(x1), dtype=float), np.asarray(tilt(x2), dtype=float)
     slope = (f2 - f1) * 3
     sa = np.clip(f1 - slope / 3, 0.0, None)
@@ -165,7 +177,7 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2
     s0, s1 = sa[seg] / end, sb[seg] / end
     den = s0 + np.sqrt(s0 * s0 + r * (s1 * s1 - s0 * s0))
     t = np.where(den > 0, r * (s0 + s1) / np.where(den > 0, den, 1.0), 0.0)
-    return a[seg] + np.clip(t, 0.0, 1.0) * (b[seg] - a[seg]), z
+    return _inside(a[seg], b[seg], a[seg] + np.clip(t, 0.0, 1.0) * (b[seg] - a[seg])), z
 
 
 def share_density_at_half(grid, cdf) -> float:

@@ -132,7 +132,7 @@ def run_status(name: str, program: str, cwd: Path, top: Path) -> tuple[str, Path
     env = {"PATH": PATH, "HOME": str(top / "home"), "PWD": str(cwd)}
     marked = f"{prelude}{program}\nmock_status=$?\necho\necho PWD=$(pwd -P)\necho STATUS=$mock_status"
     proc = subprocess.run([*shell, marked], cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True,
-                          text=True, timeout=30)
+                          text=True, timeout=60)
     marks = [line for line in proc.stdout.splitlines() if line.startswith("PWD=")]
     status = [line for line in proc.stdout.splitlines() if line.startswith("STATUS=")]
     heard = proc.stdout, "".join(sorted(proc.stderr))
@@ -416,7 +416,8 @@ def check_program(program: str, root: Path) -> None:
     """Run `program` in every shell from the work directory and, if the subset passes it from an
     unknown start, from above it, from another run's directory and from the repository (the shell
     may be anywhere). A program the subset passes prints no MOCK answer or marker, changes no file,
-    from the work directory ends in one of its places, and prints and exits as before in a second
+    from the work directory ends in one of its places (which hold the work directory, where the next
+    call starts after one that fails), and prints and exits as before in a second
     layout where every file outside the work directory holds other bytes. Claude Code's shell differs
     from zsh only in grep and find. The layout is built afresh in `root`, and again after a program
     outside the subset changes it."""
@@ -424,6 +425,9 @@ def check_program(program: str, root: Path) -> None:
     code = program.replace("{work}", str(work)).replace("{top}", str(top))
     shells = [name for name in SHELLS if name != "claude" or "grep" in code or "find" in code]
     why, ends = exact.outside(code, work, [work])
+    # Claude Code starts the next call where this one started unless it ended with status 0, so the
+    # places the subset returns hold the start.
+    assert why is not None or work in ends, (code, ends)
     unknown = exact.outside(code, work, None)[0] is None
     before = state(root)
     away = [top, top / "work" / "opus-2", top / "repository"]  # places an unknown start may be
@@ -443,9 +447,48 @@ def check_program(program: str, root: Path) -> None:
     passing = [(name, cwd) for name, cwd in runs if (why is None if cwd == work else unknown)]
     if passing:
         build(root, varied=True)
+        differ = []
         for name, cwd in passing:
             _, _, status, heard = run_status(name, code, cwd, top)
-            assert (heard, status) == seen[name, cwd], (name, code, cwd, seen[name, cwd], (heard, status))
+            if (heard, status) != seen[name, cwd]:
+                differ.append((name, cwd, (heard, status)))
+        for name, cwd, varied in differ:
+            same_outcomes(name, code, cwd, root, seen[name, cwd], varied)
+
+
+def same_outcomes(name: str, code: str, cwd: Path, root: Path, first: tuple, varied: tuple) -> None:
+    """A stage that does not read its input may end before the one feeding it, which then dies of
+    SIGPIPE at whatever point it had reached (`cat f dir | cat f` prints dir's error or not), so a
+    program may print differently from run to run in one layout. Where the layouts' first runs
+    differ, each runs again, up to 10 times, until every outcome seen in the varied layout has been
+    seen in the first, as it must be if what the program prints depends on no file outside the work
+    directory; one that reads such a file differs every time."""
+    plain, other = {first}, {varied}
+    for _ in range(10):
+        if other <= plain:
+            return
+        top, _ = build(root)
+        _, _, status, heard = run_status(name, code, cwd, top)
+        plain.add((heard, status))
+        top, _ = build(root, varied=True)
+        _, _, status, heard = run_status(name, code, cwd, top)
+        other.add((heard, status))
+    assert other <= plain, (name, code, cwd, plain, other)
+
+
+def test_same_outcomes_still_fails_a_read_outside_the_work_directory():
+    """The reruns forgive only output that varies from run to run: a read of another run's MOCK
+    answer prints other bytes in the varied layout every time."""
+    code = "cat ../opus-2/answer.json"
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        top, work = build(root)
+        first = run_status("bash", code, work, top)
+        top, work = build(root, varied=True)
+        varied = run_status("bash", code, work, top)
+        assert (first[3], first[2]) != (varied[3], varied[2])
+        with pytest.raises(AssertionError):
+            same_outcomes("bash", code, work, root, (first[3], first[2]), (varied[3], varied[2]))
 
 
 # Every reader on every path and every `cd`, alone; the generator samples longer programs.
@@ -482,7 +525,7 @@ def test_lex_reads_the_shells_words(parts):
             shell, _ = SHELLS[name]
             proc = subprocess.run([*shell, f"printf '<%s>\\n' {text}"], cwd=top, stdin=subprocess.DEVNULL,
                                   env={"PATH": PATH, "HOME": str(top / "home")}, capture_output=True,
-                                  text=True, timeout=30)
+                                  text=True, timeout=60)
             assert proc.stdout == want, (name, text, proc.stdout, proc.stderr)
 
 

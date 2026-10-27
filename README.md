@@ -157,7 +157,9 @@ knows exactly (`src/i86/exact.py`):
   directory, part by part, with no link on the way and no `..` above it.
 
 A Codex shell call may run in a directory its transcript does not record, so there only absolute
-paths in the work directory count; a Claude Code Bash call starts where the previous one ended. The
+paths in the work directory count. A Claude Code Bash call starts where the previous one ended if
+that one ran to its end in the foreground with status 0, and otherwise where the previous one started
+(Claude Code 2.1.308 runs a call as `eval CMD && pwd -P` and reads the directory back from that). The
 subset takes the tools found through the shell's PATH (a login shell's included) to be the standard
 ones (or, for `grep` and `find`, the ugrep and bfs that Claude Code's shell may run in their place, as
 its version 2.1.308 does); the environment, startup files included, to set none of the variables,
@@ -174,8 +176,14 @@ misses (round 11 reported 36), so it no longer decides that a shell call is loca
 Other tools (Read, Grep, Glob and the like) are checked by the paths they name and where those lead
 through links at audit time; one that reaches outside the work directory is suspect, and so is any
 tool the audit does not know (sub-agents, skills), other than the task list, a background Bash
-call's output and loading deferred tools' schemas. A Codex call whose item started but never
-completed is audited as it started.
+call's output and loading deferred tools' schemas. A web call (WebFetch, WebSearch, Codex's web
+search) counts as web only where the URL it fetches is written `http(s)://host/...` with a dotted
+host name that is no IP address (the WHATWG parser Node's fetch uses also reads `http:127.0.0.1` and
+backslashes as slashes), and every URL in its input, read as that parser reads it, names another
+machine; any other web call is suspect. So is a call whose input is not an object, or holds text no
+file name can hold (a NUL, a lone surrogate), one the audit cannot follow, and a transcript
+line it cannot read (cut short, or nested deeper than Python's parser goes). A Codex call whose
+item started but never completed is audited as it started.
 
 Running a file by path counts as reading it, and so does a `file://` URL. These exclude the run:
 - a path resolved from a main place in, or text naming, the repository, the staging area, another

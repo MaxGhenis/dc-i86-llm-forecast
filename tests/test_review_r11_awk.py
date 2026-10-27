@@ -30,7 +30,7 @@ def test_record_actions_carry_names(review_area, shell, program, lines, verdict,
     command = (f"printf '%s\\n' {' '.join(map(shlex.quote, lines))} | "
                f"awk -vq=MOCK.txt {shlex.quote(program)}")
     proc = subprocess.run(["/bin/" + shell, "-c", command], cwd=review_area,
-                          capture_output=True, text=True, timeout=5)
+                          capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0 and ("MOCK OTHER ANSWER" in proc.stdout) == reads, (command, proc)
     got, why = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(command)},
                                 review_area, audit.protected_roots())

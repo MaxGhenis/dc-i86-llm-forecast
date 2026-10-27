@@ -22,7 +22,7 @@ class AuditMisclassification(AssertionError):
 ])
 def test_changed_record_separator_does_not_hide_read(review_area, shell, program):
     real = subprocess.run([shell, "-c", program], cwd=review_area, capture_output=True,
-                          text=True, timeout=20)
+                          text=True, timeout=60)
     assert real.returncode == 0 and real.stderr == "", real
     assert "MOCK OTHER ANSWER" in real.stdout.splitlines(), real
     category, reason = audit.model_call(
@@ -39,7 +39,7 @@ def test_redirected_getline_consumes_main_input(review_area, shell, read):
     program = (f"awk -vp=../opus-2/draft.json 'BEGIN {{{read}}} "
                "{getline line < p; print line}' <<< unused")
     real = subprocess.run([shell, "-c", program], cwd=review_area, capture_output=True,
-                          text=True, timeout=20)
+                          text=True, timeout=60)
     assert real.returncode == 0 and real.stdout == "" and real.stderr == "", real
     category, reason = audit.model_call(
         "shell", {"command": shell + " -c " + shlex.quote(program)},

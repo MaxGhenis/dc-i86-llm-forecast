@@ -762,7 +762,7 @@ def flagged(code: str, name: str) -> tuple[bool, bool, str]:
     with tempfile.TemporaryDirectory() as tmp:
         top = Path(tmp).resolve()
         work = layout(top)
-        proc = subprocess.run([*shell, code], cwd=work, capture_output=True, text=True, timeout=20,
+        proc = subprocess.run([*shell, code], cwd=work, capture_output=True, text=True, timeout=60,
                               stdin=subprocess.DEVNULL,
                               env={"PATH": "/usr/bin:/bin", "HOME": str(top / "home"), "PWD": str(work)})
         roots = [top / "repository", top / "staging"]

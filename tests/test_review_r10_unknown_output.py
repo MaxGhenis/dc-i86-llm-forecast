@@ -11,7 +11,7 @@ from i86 import audit
 def test_printf_q_to_xargs_is_not_local(review_area, shell):
     command = "printf '%q' ../opus-2/draft.json | xargs cat"
     real = subprocess.run(["/bin/" + shell, "-c", command], cwd=review_area,
-                          capture_output=True, text=True, timeout=5)
+                          capture_output=True, text=True, timeout=60)
     assert real.returncode == 0 and real.stdout == "MOCK OTHER ANSWER\n", real
     category, reason = audit.model_call(
         "shell", {"command": shell + " -c " + shlex.quote(command)},

@@ -15,7 +15,7 @@ from test_review_r4_audit import audit_command, model_suspects
 def run_local(command, work):
     (work / "report.txt").write_text("MOCK foie forecast / ../opus-2/draft.json\n")
     return subprocess.run(["/bin/bash", "-c", command], cwd=work,
-                          capture_output=True, text=True, check=True, timeout=10)
+                          capture_output=True, text=True, check=True, timeout=60)
 
 
 def test_rg_hostname_value_is_not_a_pattern(tmp_path, review_area):
@@ -82,7 +82,7 @@ def test_round5_research_controls(tmp_path, review_area, command):
         run_local(command, review_area)
     else:
         proc = subprocess.run(["/bin/bash", "-c", command], cwd=review_area,
-                              capture_output=True, text=True, timeout=10)
+                              capture_output=True, text=True, timeout=60)
         assert proc.returncode != 0 and not proc.stdout
     result = audit_command(tmp_path, command, review_area)
     assert not result["violations"], result

@@ -16,7 +16,7 @@ class AuditMisclassification(AssertionError):
 
 def run(review_area, shell, code):
     proc = subprocess.run([shell, "-c", code], cwd=review_area, capture_output=True, text=True,
-                          timeout=10, env={"PATH": str(Path(sys.executable).parent) + ":/usr/bin:/bin"})
+                          timeout=60, env={"PATH": str(Path(sys.executable).parent) + ":/usr/bin:/bin"})
     assert proc.returncode == 0, proc
     verdict, reason = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(code)},
                                        review_area, audit.protected_roots())

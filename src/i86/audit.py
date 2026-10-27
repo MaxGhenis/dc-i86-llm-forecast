@@ -65,7 +65,8 @@ command's exit status (`_World`):
   in the current shell and then restores only the options. `${x:=word}` and `${x=word}` assign in the
   current shell, except in words a forked child expands (below), where the assignment is lost;
   failed `${x:?word}` and `${x?word}` expansions exit it, except in those words and in dash's
-  here-documents, where only the command fails (see below). An upper-case name the code never set
+  here-documents, where only the command fails unless it is a special builtin (the audit follows
+  both ways there; see below). An upper-case name the code never set
   may come from the environment: the audit follows `${NAME?}` on, with its value unknown.
   Bash expands a failed parameter's diagnostic word before exiting; native zsh prints its source.
   Brace expansions that duplicate substitutions with effects the audit cannot order are suspect.
@@ -113,6 +114,8 @@ command's exit status (`_World`):
   standard error, `/dev/null` or another descriptor, it is gone, except that zsh's MULTIOS (as it
   stands when the redirections are made) also sends a redirected pipeline stage down the pipe;
   what such a stage's files then hold is unknown (zsh's copier may end at the pipe first).
+  Standard input given more than once reads the last (bash, sh, dash) or, under zsh's MULTIOS, each
+  in turn, after the pipe where the command is a pipeline stage fed by one (`echo in | cat < f`).
   `exec`'s redirections, `2>&1` among them, hold for the rest of the shell; the model drops one
   made as the last command of `&&` and keeps one that failed, where the shells do the reverse.
   A duplication or close
@@ -241,6 +244,7 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import functools
 import glob as globlib
 import itertools
 import json
@@ -261,6 +265,10 @@ HOME = Path.home()
 # The start of the reason for a shell call that is suspect only because it lies outside `exact`'s subset.
 EXACT_REASON = "shell code the audit does not read exactly"
 URL = re.compile(r"https?://[^\s'\"<>)`]+")
+# Text a URL parser may read as an http(s) URL: the scheme in any case, then any number of slashes
+# or backslashes (the WHATWG parser, as in Node's fetch, reads `http:host`, `HTTP:/\\host` and
+# `http://host` alike).
+URLISH = re.compile(r"(?i)\bhttps?:[/\\]*[^\s'\"<>)`]+")
 # Text, outside URLs, that names a protected place.
 PROTECTED_TEXT = re.compile(
     r"dc-i86-llm-forecast|dc-ballot|\.subfleet|\.claude\b|\.codex\b|chief-of-staff|\.brier|"
@@ -430,9 +438,18 @@ CODE_CHDIR = re.compile(r"""(?:\b(?:os\.|process\.|Dir\.)?chdir|\bsetwd)\s*\(?\s
 WEB_TOOLS = {"WebSearch", "WebFetch"}
 # Tools that name files, checked by the paths they name (and where those lead through links).
 FILE_TOOLS = {"Read", "Edit", "MultiEdit", "Write", "NotebookEdit", "LS", "Grep", "Glob", "file_read", "file_change"}
-# Tools that read nothing: the task list, plan mode, a background Bash call's output (the call
-# itself is audited) and loading the schemas of deferred tools. Any other tool is suspect.
-QUIET_TOOLS = {"TodoWrite", "TodoRead", "BashOutput", "KillShell", "KillBash", "ExitPlanMode", "ToolSearch"}
+# Tools that read nothing: the task list, plan mode, a background Bash call's output and stopping
+# it (the call itself is audited; Claude Code 2.1.308 names these TaskOutput and TaskStop and keeps
+# BashOutput, KillShell and KillBash as aliases) and loading the schemas of deferred tools. Any
+# other tool is suspect.
+QUIET_TOOLS = {"TodoWrite", "TodoRead", "BashOutput", "TaskOutput", "KillShell", "KillBash", "TaskStop",
+               "ExitPlanMode", "ToolSearch"}
+# Claude Code's tools for MCP servers' resources (2.1.308's names and the aliases its table maps to
+# them), which reach whatever the server reaches, as the servers' own tools (`mcp__server__tool`) do.
+MCP_TOOLS = {"ListMcpResourcesTool", "ReadMcpResourceTool", "ReadMcpResourceDirTool", "ListMcpResources",
+             "ReadMcpResource", "ReadMcpResourceDir"}
+# Codex items that are not tool calls. An item of any other type is suspect.
+CODEX_NOT_CALLS = {"agent_message", "reasoning", "todo_list", "error"}
 # This project's own public repository. It holds no answers until every run has finished.
 OWN_REPO = re.compile(r"dc-i86-llm-forecast", re.I)
 
@@ -2331,11 +2348,14 @@ class _Shell:
         # Words being expanded that bash or zsh may expand in the child a command forks: its
         # redirections, and in zsh an external command's prefix assignments (see `failed_redirect`).
         self.forked_words = 0
-        self.inline = False  # while the command whose redirections expand runs in the shell itself
+        # While a command's redirections expand: whether it runs in the shell itself (None: it may
+        # or may not, see `runs_inline`).
+        self.inline: bool | None = False
         self.subshell_words = False  # while the command whose redirections expand is a subshell
-        self.shnullcmd = False  # zsh's SH_NULLCMD: a command of redirections alone runs `:`
+        self.shnullcmd = False  # zsh's SH_NULLCMD (see `null_command`)
         self.out_closed = False  # whether a redirection around has closed standard output
         self.stage = None  # the pipeline stage running, while one before the last is
+        self.fed = None  # the pipeline stage running, while one after the first is (see `redirect`)
         # The options of the emulation `emulate MODE -c` runs code in, while it does: functions
         # defined there keep them (zsh's sticky emulation; see `emulate`), by body.
         self.sticky: dict | None = None
@@ -3034,8 +3054,10 @@ class _Shell:
         """The shell may end at an unset parameter under `set -u` (`surely`: it does, at a failed
         `${name?word}`), printing a message where standard error is (the command's own redirections
         may not be made yet). In words a forked child may expand (`forked_words`), only that child
-        may end, the command failing (see `failed_redirect`), so the shell also goes on. Only an
-        ending carries the message; where the shell goes on, it printed nothing."""
+        may end, the command failing (see `failed_redirect`), so the shell also goes on. Only the
+        ending carries the message: where the shell goes on, the child printed it where standard
+        error went as the word expanded (see `erring`), which may be standard output (`2>&1 <
+        "${x?}"`), and the ending kept alongside then leaves the output unknown."""
         self.child_ends += bool(self.forked_words)
         if surely and not self.forked_words:
             self.complain(around=True)
@@ -3059,7 +3081,8 @@ class _Shell:
         command's at a file in dash and a special builtin's at a here-document there.
         The audit takes this way wherever a shell that may run the code does, and follows the
         ending too (see `end_unbound`). What the command's output files then hold is unknown: those
-        before the failed one are emptied, the rest left."""
+        before the failed one are opened (left empty, or holding the message where standard error
+        went there: `cat > out 2>&1 < "${x?}"`), the rest untouched."""
         self.complain(around=True)
         self.set_status(FAILED)
 
@@ -4978,6 +5001,8 @@ class _Shell:
         Where a stage may read several inputs (a CHOICE: what echo prints in different shells,
         say), the rest of the pipeline runs on each."""
         readers = [self._reads_names(s) for s in stages]
+        # The first stage is fed by a pipe where the pipeline is itself a stage fed by one.
+        inherited = self.fed is not None and self.fed == stages[0].parent
         for i in range(start, len(stages)):
             stage = stages[i]
             if data is not None and CHOICE.search(data) and len(alts := _choices(data)) > 1:
@@ -4993,6 +5018,7 @@ class _Shell:
             fed = any(readers[i + 1:])
             self.feeding += fed
             outer, self.stage = self.stage, None if last else stage
+            feeder, self.fed = self.fed, stage if i > 0 or inherited else None
             try:
                 with nullcontext() if last and here else self.child():
                     if not last:
@@ -5006,7 +5032,7 @@ class _Shell:
                         self.statement(stage, data)
             finally:
                 self.feeding -= fed
-                self.stage = outer
+                self.stage, self.fed = outer, feeder
             data = self.output
         self.set_status(MAYBE)
         return data
@@ -5105,7 +5131,7 @@ class _Shell:
             self.around_redirects(body, body.parent, redirects, stdin, run, body.type != "subshell",
                                   body.type == "subshell")
 
-    def around_redirects(self, node, unit, redirects: list, stdin: str | None, run, inline: bool,
+    def around_redirects(self, node, unit, redirects: list, stdin: str | None, run, inline: bool | None,
                          subshell: bool = False) -> None:
         """Make `redirects` and run `run(data)` inside them, `data` being what they feed standard
         input; `node` is what runs, `unit` the statement they belong to (a pipeline's stage, say),
@@ -5113,7 +5139,7 @@ class _Shell:
         outs: list[tuple[str, bool]] = []
         ends = self.child_ends
         with self.redirecting(inline, subshell):
-            data, after = self.redirect(redirects, stdin, outs)
+            data, after = self.redirect(redirects, stdin, outs, piped=self.fed is not None and self.fed == unit)
         fails = self.child_ends > ends  # see `failed_redirect`
         before, self.output = self.output, ""
         diverted, emits, err, mark = self.diverted, self.emits, self.err_out, self.jumped
@@ -5139,78 +5165,103 @@ class _Shell:
         self.emit(before, own, outs, after, piped, node, bool(outs) or self.emits == emits, tees,
                   False if self.trims == trims else None)
 
-    def null_command(self, node, redirects: list, stdin: str | None) -> None:
-        """Redirections with no command (`< f`, `> f`). bash, sh and dash make them in the shell and
-        run nothing. zsh runs a command with them: `:`, in the shell, where it emulates sh or ksh
-        (SH_NULLCMD); otherwise, forked, $READNULLCMD (`more` unless set) for a lone `<` and
-        $NULLCMD (`cat`) for any other. Where that is empty or unset it ends the shell, with no
-        redirection made (measured on zsh 5.9). `more` copies its input as cat does, its output not
-        being a terminal. Either variable may come from the environment (see `never_set`)."""
+    def null_command(self, node, redirects: list, stdin: str | None, unit=None) -> None:
+        """Redirections with no command (`< f`, `> f`, and in zsh a command whose words all expand
+        to nothing; `unit` is the statement they belong to, `node` by default). bash, sh and dash
+        make them in the shell and run nothing, with the status of the last command substitution in
+        them, or 0. zsh runs a command with them, chosen in this order (measured on zsh 5.9, in the
+        order of its exec.c): where NULLCMD is empty or unset, it prints "redirection with no
+        command", makes no redirection, and ends what the nearest `eval`, `.` or `emulate -c` runs,
+        or else the shell (see `abort`); otherwise `:` where it emulates sh or ksh (SH_NULLCMD);
+        otherwise $READNULLCMD (`more` unless set) for one `<` on any descriptor and nothing else,
+        where READNULLCMD is not empty; otherwise $NULLCMD (`cat` unless set). That command is
+        looked up as a function, a builtin or a file, never an alias, and runs in the shell where it
+        is a builtin or a function, so what its redirections' words assign stays. A precommand
+        modifier there (`noglob`, `builtin`, `command`, `-`) gives the same error; `exec` and `time`
+        are not followed. `more` copies its input as cat does, its output not being a terminal.
+        Either variable may come from the environment (see `never_set`)."""
+        unit = node if unit is None else unit
+        substituted = any(_assignment_status(n) == MAYBE for n in [node, *redirects])
+
+        def posix() -> None:
+            self.around_redirects(node, unit, redirects, stdin,
+                                  lambda data: self.set_status(MAYBE if substituted else OK), True)
+
+        def unknown() -> None:
+            self.notes.append("a redirection with no command, which zsh runs with a NULLCMD the audit cannot tell")
+
+            def run(data) -> None:
+                self.output = None
+                self.set_status(MAYBE)
+            self.around_redirects(node, unit, redirects, stdin, run, None)
+
+        def error() -> None:
+            self.complain()
+            self.abort()  # zsh: redirection with no command
+
         def verb(name: str) -> None:
             if name == ":":
-                self.around_redirects(node, node, redirects, stdin, lambda data: self.set_status(OK), True)
-            else:
-                self.around_redirects(node, node, redirects, stdin,
-                                      lambda data: self.command(["cat" if name == "more" else name], data), False)
+                self.around_redirects(node, unit, redirects, stdin, lambda data: self.set_status(OK), True)
+                return
+            name = "cat" if name == "more" else name
+
+            def run(data) -> None:
+                alias = self.aliases.pop(name, None)  # no alias expands there
+                try:
+                    self.command([name], data)
+                finally:
+                    if alias is not None and name not in self.aliases:
+                        self.aliases[name] = alias
+            defined = self.functions.get(name)
+            ways = {True} if name in ZSH_BUILTINS - {"command"} or defined is not None and None not in defined else \
+                {True, False} if defined is not None else {False}
+            self.around_redirects(node, unit, redirects, stdin, run, ways.pop() if len(ways) == 1 else None)
 
         def zsh() -> None:
-            if self.shnullcmd is not False:
-                if self.shnullcmd is None:
-                    self.either(lambda: verb(":"), native)
-                else:
-                    verb(":")
-                return
-            native()
-
-        def native() -> None:
             lone = len(redirects) == 1 and redirects[0].type == "file_redirect" and \
-                "".join(_text(c) for c in redirects[0].children if not c.is_named) == "<" and \
-                all(_text(c) in {"", "0"} for c in redirects[0].named_children if c.type == "file_descriptor")
-            names = ["READNULLCMD", "NULLCMD"] if lone else ["NULLCMD"]
+                "".join(_text(c) for c in redirects[0].children if not c.is_named) == "<"
+            names = ["NULLCMD", "READNULLCMD"] if lone else ["NULLCMD"]
             values = [self.vars.get(n, {"NULLCMD": "cat", "READNULLCMD": "more"}[n]
                                     if self.never_set(n) == UNSET else UNKNOWN) for n in names]
-            if any(UNKNOWN in v or "$" in v for v in values):
-                self.notes.append("a redirection with no command, which zsh runs with a NULLCMD the audit cannot tell")
-
-                def unknown(data) -> None:
-                    self.output = None
-                    self.set_status(MAYBE)
-                self.around_redirects(node, node, redirects, stdin, unknown, False)
-                return
-            if CHOICE.search(values[0]) or len(values) > 1 and CHOICE.search(values[1]):
-                runs = {}
-                first = _choices(values[0])
-                second = _choices(values[1]) if len(values) > 1 else [UNSET]
-                for a in first:
-                    for b in second:
-                        c = a if a not in {"", UNSET} else b
-                        runs[c] = None
-                self.either(*(lambda c=c: run_with(c) for c in runs))
-                return
-            run_with(values[0] if values[0] not in {"", UNSET} else values[1] if len(values) > 1 else UNSET)
-
-        def run_with(name: str) -> None:
-            if name in {"", UNSET}:
-                self.complain()
-                self.leave()  # zsh: redirection with no command
-            else:
-                verb(name)
+            # Each value a variable may have, "?" where the audit cannot tell it; a value counts
+            # only where zsh consults it.
+            def pick(value: str) -> list[str]:
+                return [("?" if UNKNOWN in v or "$" in v else v) for v in _choices(value)]
+            runs: dict[str, None] = {}
+            for null in pick(values[0]):
+                for read in pick(values[1]) if lone else [UNSET]:
+                    for sh in [True, False] if self.shnullcmd is None else [self.shnullcmd]:
+                        name = "?" if null == "?" else "" if null in {"", UNSET} else ":" if sh else \
+                            read if read not in {"", UNSET} else null
+                        runs["" if name in {"noglob", "builtin", "command", "-"} else name] = None
+            thunks = [error if name == "" else unknown if name in {"?", "exec", "time"} else
+                      (lambda name=name: verb(name)) for name in runs]
+            thunks[0]() if len(thunks) == 1 else self.either(*thunks)
 
         kinds = self.kinds()
         if "zsh" not in kinds:
-            verb(":")
+            posix()
         elif kinds == ["zsh"]:
             zsh()
         else:
-            self.either(zsh, lambda: verb(":"))
+            self.either(zsh, posix)
 
     def redirect(self, redirects: list, stdin: str | None, outs: list | None = None,
-                 ifs: str | None | bool = False) -> tuple[str | None, list]:
-        """Note the files that redirections name; return what reaches standard input (a
-        here-document or here-string, when there is one) and any statements a here-document
-        carries after it (the rest of a pipeline, say). Files standard output goes to are added to
-        `outs`, as (target, appended)."""
+                 ifs: str | None | bool = False, piped: bool = False,
+                 inputs: list | None = None) -> tuple[str | None, list]:
+        """Note the files that redirections name; return what reaches standard input and any
+        statements a here-document carries after it (the rest of a pipeline, say). Files standard
+        output goes to are added to `outs`, as (target, appended).
+
+        Standard input is `stdin` unless the redirections give it another: a file (`<`, `<>`), a
+        here-document or here-string, another descriptor's input, or nothing (closed). With several,
+        bash, sh and dash read the last; zsh's MULTIOS reads them all in turn, after the pipe where
+        the command is a pipeline stage fed by the one before (`piped`): `echo in | cat < f` prints
+        both (measured on zsh 5.9; a group's or a loop's own redirections join its pipe, the commands
+        inside it do not). `inputs` gathers them for the here-document's redirections."""
         after: list = []
+        top = inputs is None
+        inputs = ([stdin] if piped else []) if inputs is None else inputs
         # Whether standard error is a copy of standard output as it stands before this
         # redirection: from a `2>&1` around (`{ { echo x >&2; } > f; } 2>&1`) or earlier here.
         err = self.err_out
@@ -5246,7 +5297,7 @@ class _Shell:
                     if which == "1" and outs is not None:
                         outs.append((CLOSED, False))
                     elif which == "0":
-                        stdin = ""
+                        inputs.append(CLOSED)
                     continue
                 dest = r.child_by_field_name("destination")
                 if dest is None:
@@ -5264,27 +5315,33 @@ class _Shell:
                         outs.append((CLOSED if target == "-" else MAYBE_OUT if target == "2" and err else "/dev/null",
                                      False))
                     elif which == "0" and target != "0":
-                        stdin = "" if target == "-" else None  # another descriptor's input
+                        inputs.append(CLOSED if target == "-" else None)  # another descriptor's input
                     continue
-                if op == "<" and fd in {"", "0"}:
-                    stdin = self.file_text(target)  # standard input reads the file instead
+                if op in {"<", "<>"} and fd in {"", "0"}:
+                    inputs.append(self.file_text(target))  # standard input reads the file
                 self.add(target, bare=True)
                 if outs is not None and op in {">", ">>", ">|", "&>", "&>>", ">&"} and fd in {"", "1"}:
                     outs.append((target, op.endswith(">>")))
             elif r.type == "heredoc_redirect":
                 with self.child_words(here=True), self.erring(made):
-                    stdin = self.heredoc(r)
+                    inputs.append(self.heredoc(r))
                 for c in r.named_children:
                     if c.type == "file_redirect":
-                        self.redirect([c], None, outs)
+                        self.redirect([c], None, outs, inputs=inputs)
                     elif c.type in STATEMENTS:
                         after.append(c)
                         if c.type == "pipeline" and c.children and c.children[0].type == "|&":
                             self.notes.append("a here-document's command sends standard error down `|&`")
             elif r.type == "herestring_redirect":
                 with self.child_words(), self.erring(made):
-                    stdin = self.herestring(list(r.named_children), ifs)
-        return stdin, after
+                    inputs.append(self.herestring(list(r.named_children), ifs))
+        if not top or len(inputs) <= int(piped):
+            return stdin, after
+        last = "" if inputs[-1] == CLOSED else inputs[-1]
+        joined = None if CLOSED in inputs else functools.reduce(_concat, inputs)  # zsh: a closed one fails
+        multios = self.tees()
+        return (joined if multios else last if multios is False or len(inputs) == 1 else
+                _either_output([joined, last])), after
 
     @contextmanager
     def erring(self, err: bool):
@@ -5299,31 +5356,32 @@ class _Shell:
     @contextmanager
     def child_words(self, here: bool = False):
         """Expanding a redirection's word. bash and zsh expand it in the child a command forks,
-        unless the command runs in the shell (`inline`). dash expands a file's in the shell, and a
-        here-document's (`here`) there too except for a subshell, but fails the command without
-        ending at a here-document for any but a special builtin (measured). Where the shell may go
-        on (`forked_words`) the expansion's assignments stay only where it ran in the shell (see
-        `in_child`)."""
+        unless the command runs in the shell (`inline`; None where it may or may not). dash expands
+        a file's in the shell, and a here-document's (`here`) there too except for a subshell, but
+        fails the command without ending at a here-document for any but a special builtin
+        (measured). Where the shell may go on (`forked_words`) the expansion's assignments stay
+        only where it ran in the shell (see `in_child`)."""
         kinds = self.kinds()
         forks = here and "dash" in kinds or not self.inline and (here or kinds != ["dash"])
         child = [k for k in kinds if not self.inline and (k != "dash" or here and self.subshell_words)]
         self.forked_words += forks
         try:
-            with self.in_child(child):
+            with self.in_child(child, maybe=self.inline is None):
                 yield
         finally:
             self.forked_words -= forks
 
     @contextmanager
-    def in_child(self, child: list[str]):
-        """Expansions that the shells in `child` make in a forked child: what they assign
-        (`${x:=word}`, `$((x=1))`) is lost there and stays in the other shells that may run the code."""
+    def in_child(self, child: list[str], maybe: bool = False):
+        """Expansions that the shells in `child` make in a forked child (`maybe`: or in the shell
+        itself): what they assign (`${x:=word}`, `$((x=1))`) is lost there and stays in the other
+        shells that may run the code."""
         if not child:
             yield
             return
         vars, exports = dict(self.vars), dict(self.exports)
         yield
-        every = set(child) >= set(self.kinds())
+        every = set(child) >= set(self.kinds()) and not maybe
         for name in set(vars) | set(self.vars):
             old, new = vars.get(name), self.vars.get(name)
             if old == new:
@@ -5346,9 +5404,10 @@ class _Shell:
                     self.exports[name] = "maybe"
 
     @contextmanager
-    def redirecting(self, inline: bool, subshell: bool = False):
+    def redirecting(self, inline: bool | None, subshell: bool = False):
         """Expanding the redirections of a command that runs in the shell itself (`inline`: a
-        builtin, a function, a group, a loop), or that may fork (an external command, a subshell)."""
+        builtin, a function, a group, a loop), or that may fork (an external command, a subshell);
+        `inline` None: either, as where a function is defined in some branches."""
         saved = self.inline, self.subshell_words
         self.inline, self.subshell_words = inline, subshell
         try:
@@ -5356,25 +5415,77 @@ class _Shell:
         finally:
             self.inline, self.subshell_words = saved
 
-    def runs_inline(self, words: list[str], assigns: list) -> bool:
-        """Whether a simple command with these words runs in the shell in every shell it may be
-        (see `inline_verb`). One with only assignments and redirections does (measured; zsh runs a
-        command for redirections alone, see `null_command`)."""
+    def runs_inline(self, words: list[str], assigns: list) -> bool | None:
+        """Whether a simple command with these words runs in the shell itself (see `inline_ways`):
+        True or False in every shell it may be, None where that differs or may go either way. One
+        with only assignments and redirections does (measured; zsh runs a command for redirections
+        alone, see `null_command`)."""
         if not words:
             return bool(assigns) or "zsh" not in self.kinds()
-        return self.inline_verb(_alt(self.expand(words[0]))[0], self.kinds())
+        ways = set().union(*(self.inline_ways(words, kind) for kind in self.kinds()))
+        return ways.pop() if len(ways) == 1 else None
 
-    def inline_verb(self, verb: str, kinds: list[str]) -> bool:
-        """Whether `verb` runs in the shell in each of `kinds`: a function every branch defines, or
-        a builtin of each (zsh's `command` runs an external one). Not an alias, which the shell
-        expands before it looks for a function, and which may or may not expand (see `command`)."""
-        if verb in self.aliases:
-            return False
-        defined = self.functions.get(verb)
-        if defined is not None and None not in defined:
-            return True
-        tables = {"zsh": ZSH_BUILTINS - {"command"}}
-        return all(verb in tables.get(kind, BASH_BUILTINS) for kind in kinds)
+    def inline_ways(self, words: list[str], kind: str) -> set[bool]:
+        """Whether a simple command with these words runs in the shell itself in shell `kind`: a
+        function every branch defines, or a builtin of that shell. Both, where it may go either way:
+        a function some branches define, or an alias, which may or may not expand (see `command`).
+        In zsh (measured on 5.9) the precommand modifiers `noglob` and `nocorrect` (a reserved word,
+        so only as written), and `builtin` before `noglob` or `builtin`, leave it to the command
+        after them; `builtin` before another builtin runs it, and before anything else runs nothing
+        (see `simple`); `command` runs a builtin only under POSIX_BUILTINS, and otherwise a file
+        (see `prefixed`)."""
+        i = 0
+        while i < len(words):
+            verb = _alt(self.expand(words[i]))[0]
+            if kind == "zsh" and (verb == "noglob" or words[i] == "nocorrect"):
+                i += 1
+                continue
+            if kind == "zsh" and verb == "builtin" and i + 1 < len(words):
+                if _alt(self.expand(words[i + 1]))[0] in {"noglob", "builtin"}:
+                    i += 1
+                    continue
+                return {True}
+            if kind == "zsh" and verb == "command":
+                j = i + 1
+                while j < len(words) and _alt(self.expand(words[j]))[0].startswith("-") and words[j] != "-":
+                    if _alt(self.expand(words[j]))[0] == "--":
+                        j += 1
+                        break
+                    if set(_alt(self.expand(words[j]))[0][1:]) & {"v", "V"}:
+                        return {True}  # describes the command, running nothing
+                    j += 1
+                if j >= len(words):
+                    return {True}
+                builtin = _alt(self.expand(words[j]))[0] in ZSH_BUILTINS - {"command"}
+                return {True} if builtin and self.posixbuiltins is True else \
+                    {False} if not builtin or self.posixbuiltins is False else {True, False}
+            if verb in self.aliases:
+                return {True, False}
+            defined = self.functions.get(verb)
+            if defined is not None and None not in defined:
+                return {True}
+            builtin = verb in (ZSH_BUILTINS - {"command"} if kind == "zsh" else BASH_BUILTINS)
+            return {builtin, True} if defined is not None else {builtin}
+        return {True}
+
+    def zsh_no_builtin(self, words: list[str]) -> bool:
+        """Whether zsh's `builtin` (after any precommand modifiers, see `inline_ways`) names no
+        builtin: zsh then prints "no such builtin", makes none of the command's redirections and
+        fails (measured on zsh 5.9: `builtin cat < "${x?}"` goes on)."""
+        i = 0
+        while i < len(words):
+            verb = _alt(self.expand(words[i]))[0]
+            if verb == "noglob" or words[i] == "nocorrect":
+                i += 1
+                continue
+            if verb != "builtin" or i + 1 >= len(words):
+                return False
+            name = _alt(self.expand(words[i + 1]))[0]
+            if name in {"noglob", "builtin"}:
+                i += 1
+                continue
+            return name not in ZSH_BUILTINS
+        return False
 
     def heredoc(self, r) -> str | None:
         """What a here-document feeds standard input: its lines as written (`<<-` drops their
@@ -5443,10 +5554,36 @@ class _Shell:
         # Words expand, and split into fields, before the command's own assignments take effect,
         # as in the shell. Where the shells split them differently, the command runs each way.
         lists = self.word_lists(words)
+        kinds = self.kinds()
+        wrapped = node.parent is not None and node.parent.type == "redirected_statement"
+        unit = node.parent if wrapped else node  # the statement the redirections belong to
+        if "zsh" in kinds and not assigns and redirs and not all(lists):
+            if any(lists):
+                self.notes.append("a command whose words may expand to nothing, which zsh runs as redirections alone")
+            else:
+                self.null_command(node, redirs, stdin, unit)  # words that all expand to nothing
+                return
+        missing = [self.zsh_no_builtin(ws) for ws in lists] if "zsh" in kinds else []
+        if any(missing):
+            def nothing():
+                self.complain()  # no such builtin, with none of the redirections made
+                self.set_status(FAILED)
+            if kinds == ["zsh"] and all(missing) and not assigns:
+                nothing()
+            else:
+                self.either(nothing, lambda: self.run_words(node, assigns, lists, redirs, stdin, unit))
+            return
+        self.run_words(node, assigns, lists, redirs, stdin, unit)
+
+    def run_words(self, node, assigns: list, lists: list[list[str]], redirs: list, stdin: str | None,
+                  unit) -> None:
+        """`simple` from its expanded words on: make the redirections, then run the command once
+        for each way its words and standard input may be."""
         outs: list[tuple[str, bool]] = []
         ends = self.child_ends
+        piped = self.fed is not None and self.fed == unit
         with self.redirecting(self.runs_inline(lists[0], assigns)):
-            stdin, after = self.redirect(redirs, stdin, outs, ifs=self.prefix_ifs(assigns))
+            stdin, after = self.redirect(redirs, stdin, outs, ifs=self.prefix_ifs(assigns), piped=piped)
         inputs = _choices(stdin) if stdin is not None and CHOICE.search(stdin) else [stdin]
         runs = [(ws, data, False) for ws in lists for data in inputs]
         if self.child_ends > ends:
@@ -5634,24 +5771,30 @@ class _Shell:
         else:
             verb = _alt(self.expand(words[0]))[0]
             ends = self.child_ends
-            # zsh expands an external command's prefix assignments in its child (see `failed_redirect`).
-            forked = bool(assigns) and "zsh" in self.kinds() and not self.inline_verb(verb, ["zsh"])
 
-            def run():
-                self.forked_words -= forked
+            def runs(forked: bool) -> None:
+                # zsh expands an external command's prefix assignments in its child (see
+                # `failed_redirect`), losing what they assign.
+                def run():
+                    self.forked_words -= forked
+                    try:
+                        if self.child_ends > ends and forked:
+                            self.either(lambda: self.command(words, stdin), self.failed_redirect)
+                        else:
+                            self.command(words, stdin)
+                    finally:
+                        self.forked_words += forked
+                self.forked_words += forked
                 try:
-                    if self.child_ends > ends and forked:
-                        self.either(lambda: self.command(words, stdin), self.failed_redirect)
-                    else:
-                        self.command(words, stdin)
+                    with self.in_child(["zsh"] if forked else []):
+                        self.with_assignments(assigns, verb, run)
                 finally:
-                    self.forked_words += forked
-            self.forked_words += forked
-            try:
-                with self.in_child(["zsh"] if forked else []):
-                    self.with_assignments(assigns, verb, run)
-            finally:
-                self.forked_words -= forked
+                    self.forked_words -= forked
+            ways = self.inline_ways(words, "zsh") if assigns and "zsh" in self.kinds() else {True}
+            if len(ways) == 1:
+                runs(not ways.pop())
+            else:
+                self.either(lambda: runs(True), lambda: runs(False))
         kept = False if self.trims == trims else self.kept  # see `kept`: unknown when nested
         self.kept = None
         if outs:
@@ -7850,9 +7993,9 @@ def _shell(command: str, workdir: Path, files: dict | None = None, place: dict |
         shell.files = dict(files)
         shell.run(command)
         passes.append(shell)
-    shell.run_traps(0)
     if place is not None:
         place.update(_next_place(shell, workdir, place))
+    shell.run_traps(0)
     shell.finish(0)
     shell.flush()  # bash's exit
     files.clear()
@@ -7861,21 +8004,48 @@ def _shell(command: str, workdir: Path, files: dict | None = None, place: dict |
 
 
 def _next_place(shell: _Shell, workdir: Path, place: dict) -> dict:
-    """Where the next Claude Code Bash call may start, once `shell` has run (before `finish`): where
-    it ended or exited, and, if it may have exited, where it started (the exit can cut short Claude
-    Code's record of where the shell is). Claude Code moves a shell that ends outside the directories
-    it allows back to where the session started (2.1.308's Bash tool), the work directory here; the
-    audit does not know which other directories it allows, so a place outside the work directory
-    keeps both."""
-    ended = [w for entry in shell.exits for w in entry[2]]
-    worlds = [*shell.worlds, *ended]
-    if ended or not worlds:
-        worlds += place.get("worlds") or [_World(workdir, None)]
+    """Where the next Claude Code Bash call may start, once `shell` has run (before its EXIT trap,
+    which the shell runs after Claude Code has read where it is, and before `finish`). Claude Code
+    2.1.308 runs a call as `eval CMD && pwd -P >| FILE` and starts the next where FILE says, so where
+    this one ended only if it ran to its end with status 0; after an exit, a failing status, or a
+    call killed or moved to the background at its timeout, the next starts where this one started
+    (measured on 2.1.284 and 2.1.308). So a place where the shell ended with status 0 for certain
+    (a builtin's, as `cd sub; echo` ends) is the only one; where it may have failed, the start is
+    one too. Claude Code moves a shell that ends outside the directories it allows back to where
+    the session started, the work directory here; the audit does not know which other directories
+    it allows, so a place outside the work directory keeps both."""
+    began = place.get("worlds") or [_World(workdir, None)]
+    worlds = [w for w in shell.worlds if w.status != FAILED]
+    if shell.exits or not worlds or len(worlds) < len(shell.worlds) or any(w.status != OK for w in worlds):
+        worlds += began
     if any(not _under(w.cwd, workdir) for w in worlds):
         worlds.append(_World(workdir, None))
     # A new shell: no $OLDPWD of the command's, no pushd stack.
     worlds = list({(w.cwd, w.primary): _World(w.cwd, None, (), MAYBE, w.primary) for w in worlds}.values())
     return {"worlds": worlds, "known": shell.known}
+
+
+def _unwritable(value) -> bool:
+    """Whether a tool input holds text no file name or argument can hold: a NUL, or a lone surrogate
+    (a JSON escape a transcript may hold that no encoding writes)."""
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return True
+        return "\x00" in value
+    if isinstance(value, dict):
+        return any(_unwritable(k) or _unwritable(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_unwritable(v) for v in value)
+    return False
+
+
+def _url_as_parsed(url: str) -> str:
+    """A URL as the WHATWG parser reads an http(s) one: the scheme in lower case, any run of slashes
+    and backslashes after it as `//`, and a backslash as a slash."""
+    scheme, _, rest = url.partition(":")
+    return scheme.lower() + "://" + rest.lstrip("/\\").replace("\\", "/")
 
 
 def _shell_command(inp) -> str | None:
@@ -7903,10 +8073,13 @@ def _tool_calls(line: dict):
     content = msg.get("content") if isinstance(msg, dict) else None
     for part in content if isinstance(content, list) else []:
         if isinstance(part, dict) and part.get("type") == "tool_use":
-            yield part.get("name", "?"), part.get("input") or {}
-    item = line.get("item") or {}
-    if not item or line.get("type") not in {None, "item.completed"}:
-        return  # Codex repeats an item as started and completed; count it once.
+            yield part.get("name", "?"), part.get("input", {})
+    item = line.get("item")
+    if item is None or line.get("type") not in {None, "item.completed"}:
+        return  # Codex repeats an item as started and completed; `audit_transcript` counts it once.
+    if not isinstance(item, dict):
+        yield "codex_item", item
+        return
     kind = item.get("type")
     if kind == "command_execution":
         yield "shell", {"command": item.get("command")}
@@ -7921,6 +8094,8 @@ def _tool_calls(line: dict):
                              **({"url": str(action["url"])} if action.get("url") else {})}
     elif kind == "collab_tool_call":
         yield "collab", item
+    elif kind not in CODEX_NOT_CALLS:
+        yield f"codex:{kind}", item
 
 
 def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: dict | None = None,
@@ -7949,21 +8124,32 @@ def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: di
     call writes. `place`: for a shell call, where it may start ({} or None: the work directory),
     updated with where the next may start (see `_next_place`). An input the audit cannot read (not
     an object, or a shell call without a command it can read) is suspect."""
+    if not isinstance(tool, str):
+        return "suspect", "a tool call without a name the audit can read"
+    if _unwritable(inp):
+        return "suspect", "an input with text no file name can hold (a NUL, or a lone surrogate)"
     text = json.dumps(inp) if not isinstance(inp, str) else inp
     outside_urls = URL.sub("", text)
-    if tool.startswith("mcp:") or tool.startswith("mcp__"):
+    if tool.startswith("mcp:") or tool.startswith("mcp__") or tool in MCP_TOOLS:
         return "violation", "MCP tool"
     if tool == "collab":
         return "suspect", "sub-agent call; its work is not in this transcript"
+    if tool == "codex_item" or tool.startswith("codex:"):
+        return "suspect", f"a Codex item the audit does not know ({tool})"
+    if not isinstance(inp, dict):
+        return "suspect", "a tool input the audit cannot read"
     if tool in WEB_TOOLS or tool == "web_search":
         if OWN_REPO.search(text):
             return "suspect", "opens this project's repository on the web"
-        local = next((why for u in URL.findall(text) if (why := exact.remote_url(u.rstrip("\\"), globs=False)) is not None), None)
+        # The URL WebFetch fetches, or the page Codex's search opened, read exactly; a URL elsewhere
+        # in the input (a query, a prompt) as a URL parser would read it.
+        fetched = [inp.get("url")] if tool == "WebFetch" or "url" in inp else []
+        local = next((why for u in fetched if (why := exact.web_url(u)) is not None), None)
+        local = local or next((why for u in URLISH.findall(text)
+                               if (why := exact.remote_url(_url_as_parsed(u), globs=False)) is not None), None)
         if local:
             return "suspect", f"a web call that may reach this machine or its network: {local}"
         return "web", ""
-    if not isinstance(inp, dict):
-        return "suspect", "a tool input the audit cannot read"
     paths, searches, notes, weak, alt, alt_searches, unknown = [], [], [], [], [], [], []
     literal_paths: set[Path] = set()
     if tool in {"shell", "Bash"}:
@@ -8001,7 +8187,15 @@ def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: di
     elif tool in {"file_read", "file_change"}:
         named = [inp.get(key) for key in ("path", "file_path")]
         changes = inp.get("changes")
-        named += [c.get("path") for c in changes if isinstance(c, dict)] if isinstance(changes, list) else []
+        # A list of {path, kind}, as `codex exec --json` writes them, or a mapping from path to change.
+        if isinstance(changes, dict):
+            named += list(changes)
+        elif isinstance(changes, list) and all(isinstance(c, dict) for c in changes):
+            named += [c.get("path") for c in changes]
+        elif changes is not None:
+            return "suspect", "a file change the audit cannot read"
+        if any(n is not None and not isinstance(n, str) for n in named):
+            return "suspect", "a file change the audit cannot read"
         for name in named:
             if name:
                 p = _resolve(str(name), workdir, bare=True)
@@ -8065,37 +8259,79 @@ def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: di
     return "suspect", f"a tool the audit does not know ({tool})"
 
 
+def _id_key(value):
+    """A Codex item's id as a key: numbers that are equal (1 and 1.0) alike, anything else by its
+    JSON text."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return ("number", float(value))
+    return ("json", json.dumps(value, sort_keys=True, default=str))
+
+
+def _covers(done: list, begun: list) -> bool:
+    """Whether a completed Codex item's calls cover a started one's: the same tools, each input the
+    same where the started one gave a value (a search starts with an empty query)."""
+    if [t for t, _ in done] != [t for t, _ in begun]:
+        return False
+    for (_, a), (_, b) in zip(done, begun):
+        if not (isinstance(a, dict) and isinstance(b, dict)):
+            if a != b:
+                return False
+            continue
+        if any(v not in (None, "", [], {}) and a.get(k) != v for k, v in b.items()):
+            return False
+    return True
+
+
 def audit_transcript(path: Path, workdir: str) -> dict:
     work = Path(workdir) if workdir else Path("/nonexistent-workdir")
     roots = protected_roots()
     files: dict[Path, tuple] = {}  # what the run's calls wrote so far, by path (see `_Shell.files`)
-    # Where the next Claude Code Bash call may start: it starts where the last one ended, as the
-    # subset (`exact.outside`) and as the model (`_next_place`) follow it.
+    # Where the next Claude Code Bash call may start: where the last one ended if it ran to its end
+    # in the foreground with status 0, and otherwise where the last one started (see `_next_place`).
+    # The subset follows it with the places `exact.outside` gives, which hold the start too.
     bash_start: list[Path] | None = [work]
     bash_place: dict = {}
     events = calls = web = 0
     lists: dict[str, list] = {"violations": [], "suspect": [], "local_calls": []}
     urls: list[str] = []
-    # Codex items started and not yet completed, by id: one that never completes (a killed run)
-    # ran all the same, and is audited as it started. An item without an id counts at completion.
-    started: dict = {}
+    # Codex items started and not yet completed: one that never completes (a killed run) ran all
+    # the same, and is audited as it started. A completion covers the started item with its id,
+    # or, without an id, one whose calls it covers (see `_covers`); any other stays to be audited.
+    started: list[tuple] = []
 
     def audit_calls(line: dict) -> None:
         nonlocal calls, web, bash_start
         for tool, inp in _tool_calls(line):
             calls += 1
-            verdict, why = check_call(tool, inp, work, roots, files,
-                                      **({"start": bash_start, "place": bash_place} if tool == "Bash" else {}))
-            if tool == "Bash":
-                command = _shell_command(inp)
-                bash_start = None if command is None else exact.outside(command, work, bash_start)[1]
-            text = json.dumps(inp)
+            text = json.dumps(inp, default=str)
+            # A call run in the background leaves the next where it found it (Claude Code reads no
+            # place back from one); one whose flag the audit cannot read may have done either.
+            background = inp.get("run_in_background") if tool == "Bash" and isinstance(inp, dict) else None
+            place = dict(bash_place) if background not in (None, False) else bash_place
+            try:
+                verdict, why = check_call(tool, inp, work, roots, files,
+                                          **({"start": bash_start, "place": place} if tool == "Bash" else {}))
+                if tool == "Bash":
+                    command = _shell_command(inp)
+                    ended = None if command is None else exact.outside(command, work, bash_start)[1]
+                    if background is not True:
+                        bash_start = ended  # what `outside` returns holds where the call started
+                    if background not in (None, False, True):
+                        bash_place.update(worlds=list({(w.cwd, w.primary): w for w in [
+                            *(bash_place.get("worlds") or [_World(work, None)]), *place.get("worlds", [])]}.values()),
+                            known=bash_place.get("known", True) and place.get("known", True))
+            except Exception as e:  # noqa: BLE001 - a call the audit cannot follow is suspect, never skipped
+                verdict, why = "suspect", f"the audit could not follow this call ({type(e).__name__})"
+                if tool == "Bash":
+                    bash_start = None
+                    bash_place.update(worlds=[_World(work, None)], known=False)
             if verdict == "web":
                 web += 1
-                found = URL.findall(text)
+                found = URLISH.findall(text)
                 urls.extend(found or [f"search: {inp.get('query', '') if isinstance(inp, dict) else ''}"[:200]])
                 continue
-            record = {"tool": tool, "call": text[:4000], **({"why": why} if why else {})}
+            record = {"tool": tool if isinstance(tool, str) else repr(tool), "call": text[:4000],
+                      **({"why": why} if why else {})}
             key = {"violation": "violations", "suspect": "suspect", "local": "local_calls"}.get(verdict)
             if key:
                 lists[key].append(record)
@@ -8103,19 +8339,28 @@ def audit_transcript(path: Path, workdir: str) -> dict:
     for raw in path.read_text(errors="replace").splitlines():
         try:
             line = json.loads(raw)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError) as e:
+            # A line the audit cannot read (damaged, or nested deeper than Python's parser goes) may
+            # hold a call; it is not an event, so a transcript of nothing else still fails.
+            if raw.strip():
+                lists["suspect"].append({"tool": "?", "call": raw[:4000],
+                                         "why": f"a transcript line the audit cannot read ({type(e).__name__})"})
             continue
         if not isinstance(line, dict):
             continue
         events += 1
         item = line.get("item")
-        if isinstance(item, dict) and item.get("id") is not None:
-            if line.get("type") == "item.started":
-                started[json.dumps(item.get("id"))] = line
-            elif line.get("type") == "item.completed":
-                started.pop(json.dumps(item.get("id")), None)
+        if line.get("type") == "item.started" and item is not None:
+            started.append((_id_key(item.get("id")) if isinstance(item, dict) and "id" in item else None,
+                            list(_tool_calls({**line, "type": "item.completed"})), line))
+        elif line.get("type") == "item.completed" and item is not None:
+            key = _id_key(item.get("id")) if isinstance(item, dict) and "id" in item else None
+            done = list(_tool_calls(line))
+            same = [i for i, (k, begun, _) in enumerate(started) if k == key and _covers(done, begun)]
+            if same:
+                started.pop(same[0])
         audit_calls(line)
-    for line in started.values():
+    for _, _, line in started:
         audit_calls({**line, "type": "item.completed"})
     return {
         "events": events,
