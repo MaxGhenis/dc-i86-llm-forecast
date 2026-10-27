@@ -266,6 +266,25 @@ AGREE = [
     "{ echo MOCK-a >&2; } 2>&1 2>/dev/null",
     # An EXIT trap's code runs with the variables of the way the shell ended.
     "trap 'echo \"$p\"' EXIT; p=MOCK-a; [ -z \"$X\" ] && exit; p=MOCK-b",
+    # `set -u` ends the shell at $X, and its message goes where the group sends standard error
+    # (a 300-example run's counterexample).
+    'x=MOCK-init\n{ set -u\n}\n{ echo "MOCK-u$X"\n} 2>&1',
+    # An unset parameter in an external command's or a subshell's redirections, or a here-document,
+    # fails the command and the shell goes on (bash, zsh), as does one in an external command's
+    # prefix assignment in zsh; the file a failed command's `>` named first is emptied (the
+    # 3000-example search's counterexample is the first).
+    'x=MOCK-init\nfor k in 1 2; do { { set -u\n}\n} && { { echo\nunset x\ncat <<< "MOCK-hs $x"\n}\n}\ndone',
+    'set -u; cat <<< "MOCK-a $X" && echo MOCK-and || echo MOCK-or; echo MOCK-after',
+    'set -u; (cat) <<< "MOCK-a $X"; echo MOCK-after',
+    'set -u; cat <<E\nMOCK-a $X\nE\necho MOCK-after',
+    'set -u; y=$X /bin/echo MOCK-hi; echo MOCK-after',
+    'set -u; echo MOCK-old > out.txt; cat > out.txt <<< "$X"; cat out.txt; echo MOCK-end',
+    # So does a failed `${X?word}` there, whose message also goes where standard error does.
+    '{ echo "MOCK-a ${X?MOCK-m}"; } 2>&1',
+    'cat <<< "MOCK-a ${X?MOCK-m}"; echo MOCK-after',
+    'cat <<E\nMOCK-a ${X?MOCK-m}\nE\necho MOCK-after',
+    'y=${X?MOCK-m} /bin/echo MOCK-hi; echo MOCK-after',
+    'echo MOCK-hi <<< "${X?MOCK-m}"; echo MOCK-after',
 ]
 
 

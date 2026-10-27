@@ -9,14 +9,14 @@ import subprocess
 
 import pytest
 
-from test_review_r4_audit import audit_command
+from test_review_r4_audit import audit_command, model_suspects
 
 
 def classification(tmp_path, command, work):
     result = audit_command(tmp_path, command, work)
     if result["violations"]:
         return "violation"
-    if result["suspect"]:
+    if model_suspects(result):
         return "suspect"
     if result["web_calls"]:
         return "web"

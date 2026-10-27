@@ -21,6 +21,11 @@ def audit_command(tmp_path, command, work):
     return audit.audit_transcript(path, str(work))
 
 
+def model_suspects(result):
+    """The suspect calls the shell model finds, leaving out those only `exact`'s subset adds."""
+    return [s for s in result["suspect"] if not s.get("why", "").startswith(audit.EXACT_REASON)]
+
+
 @pytest.mark.parametrize("command", [
     "(cd scratch); cat ../opus-2/draft.json",
     "sh -c 'cd scratch'; cat ../opus-2/draft.json",

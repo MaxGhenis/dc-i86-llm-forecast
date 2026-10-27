@@ -194,10 +194,11 @@ class _Tilt:
     sampler, taking the tilt as linear, still draws. Scaled first, the tilt is positive wherever its
     exact value is at least 2^-1022, against a largest value of at least 1/2.
 
-    Only what the shares in `band` ((lo, hi], as simulate draws them, by default the whole range) can
-    use sets the scale: the answers they interpolate from, and absence where the node may not exist
-    there. The other answers are set to 0, which shares in the band never read and which cannot
-    overflow, so an answer of 1 at a cell the band never reaches leaves a tiny tilt its precision.
+    Only what the shares simulate may draw can use sets the scale: shares in `band` ((lo, hi], by
+    default the whole range) on stretches the forecaster gives probability, the answers they
+    interpolate from, and absence where the node may not exist there. The other answers are set to 0,
+    which the draws never read and which cannot overflow, so an answer of 1 at a cell no draw reaches
+    leaves a tiny tilt its precision.
     """
 
     def __init__(self, graph: Graph, node: Node, fc: Forecasts, allowed,
@@ -215,9 +216,15 @@ class _Tilt:
             self.absent = 1.0 if None in allowed else 0.0
         lo, hi = band if band is not None else (graph.share_floor, graph.share_ceiling)
         lo = float(np.nextafter(lo, 1.0)) if lo >= 0.5 else float(lo)  # simulate's draws lie in [lo, hi]
-        used = _used_answers(graph, node, answers, lo, hi)
+        # The stretches of the band the forecaster gives probability, the only ones drawn from.
+        xs, fs = dists.share_knots(graph.share_grid, np.asarray(fc.values["yes_share"]["all"], dtype=float),
+                                   graph.share_floor, graph.share_ceiling)
+        pts = np.unique(np.concatenate([[lo, hi], xs[(xs > lo) & (xs < hi)]]))
+        spans = [(float(a), float(b)) for a, b, m in zip(pts[:-1], pts[1:], np.diff(np.interp(pts, xs, fs)))
+                 if m > 0] or [(lo, hi)]
+        used = set().union(*(_used_answers(graph, node, answers, a, b) for a, b in spans))
         rows = {key: r if key in used else np.zeros_like(r) for key, r in rows.items()}
-        ends = np.array([v for v, side in ((lo, lo <= 0.5), (hi, hi > 0.5)) if side])
+        ends = np.array([v for a, b in spans for v, side in ((a, a <= 0.5), (b, b > 0.5)) if side])
         if node.exists_if is None or self.exists(ends).all():
             self.absent = 0.0  # never used: the node exists at every share in the band
         top = max(float(np.sum(r)) for r in [*rows.values(), self.absent])

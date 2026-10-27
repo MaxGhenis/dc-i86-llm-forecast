@@ -13,6 +13,7 @@ from i86 import runners
 from i86.audit import audit_transcript, shell_paths
 from i86.cli import discloses
 from i86.runners import parse_stream
+from test_review_r4_audit import model_suspects
 
 HOME = Path.home()
 WORK = runners.WORK / "opus-1"
@@ -106,7 +107,7 @@ def test_forbidden_calls_are_violations(tmp_path, event):
 ])
 def test_suspect_calls_are_reported_without_excluding(tmp_path, event):
     out = run(tmp_path, [event])
-    assert out["passed"] and out["suspect"] and not out["violations"], out
+    assert out["passed"] and model_suspects(out) and not out["violations"], out
 
 
 def test_work_directory_files_and_ordinary_reads_are_listed_not_excluded(tmp_path):
@@ -125,7 +126,7 @@ def test_work_directory_files_and_ordinary_reads_are_listed_not_excluded(tmp_pat
         codex("curl -sL https://code.dccouncil.gov/x.pdf -o law.pdf 2>/dev/null && pdftotext law.pdf -"),
         codex("sed -n 1,40p law.txt | grep -n certif"),
     ])
-    assert out["passed"] and not out["suspect"] and not out["violations"], out
+    assert out["passed"] and not model_suspects(out) and not out["violations"], out
 
 
 def test_a_cd_chain_moves_the_base_for_later_paths():

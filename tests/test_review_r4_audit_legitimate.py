@@ -11,6 +11,7 @@ import subprocess
 import pytest
 
 from i86 import audit, runners
+from test_review_r4_audit import model_suspects
 
 
 @pytest.fixture
@@ -107,4 +108,4 @@ def test_research_controls_pass(tmp_path, own_work, command):
 ])
 def test_own_repository_shell_fetch_is_suspect(tmp_path, own_work, command):
     result = classify(tmp_path, command, own_work)
-    assert result["suspect"], result
+    assert model_suspects(result), result

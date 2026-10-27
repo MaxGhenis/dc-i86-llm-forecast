@@ -33,7 +33,7 @@ def model(program, work, dialect):
 def assert_protected_read(shell, program, work):
     proc = real(shell, program, work)
     assert proc.returncode == 0 and "MOCK OTHER ANSWER" in proc.stdout, (program, proc)
-    verdict, reason = audit.check_call(
+    verdict, reason = audit.model_call(
         "shell", {"command": shell + " -c " + shlex.quote(program)}, work, audit.protected_roots(),
     )
     assert verdict == "violation", (program, verdict, reason)

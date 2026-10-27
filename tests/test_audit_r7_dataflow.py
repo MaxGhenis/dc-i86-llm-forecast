@@ -99,6 +99,6 @@ def test_interpreter_data_uses_real_shell(review_area, shell, program, category,
                           capture_output=True, text=True, timeout=20)
     assert proc.returncode == 0, (program, proc)
     assert ("MOCK OTHER ANSWER" in proc.stdout) == opens_answer, (program, proc.stdout, proc.stderr)
-    got, reason = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(program)},
+    got, reason = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(program)},
                                    review_area, audit.protected_roots())
     assert got == category, (program, got, reason)

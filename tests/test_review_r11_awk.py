@@ -32,6 +32,6 @@ def test_record_actions_carry_names(review_area, shell, program, lines, verdict,
     proc = subprocess.run(["/bin/" + shell, "-c", command], cwd=review_area,
                           capture_output=True, text=True, timeout=5)
     assert proc.returncode == 0 and ("MOCK OTHER ANSWER" in proc.stdout) == reads, (command, proc)
-    got, why = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(command)},
+    got, why = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(command)},
                                 review_area, audit.protected_roots())
     assert got == verdict, (command, got, why)

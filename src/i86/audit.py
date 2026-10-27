@@ -2,16 +2,24 @@
 
 The forecasters run on machines that also hold earlier forecasts of these questions, other runs'
 answers and the operator's notes. The prompt forbids reading local files; this audit reads each run's
-native transcript (Claude stream-json or Codex JSONL) and checks every tool call. It guards against
-accidental and casual reads, not a forecaster set on hiding them.
+native transcript (Claude stream-json or Codex JSONL) and checks every tool call.
+
+A shell call counts as local, or web, only inside the subset whose reads `exact` knows from the
+command's text (`check_call`); within its assumptions such a call reads nothing outside the run's
+work directory but what the tools load to run and the ignore files rg and ugrep consult, and any
+other shell call is suspect. The rest of this module models the shells for every call: it finds the
+reads that exclude a run and the reasons a call is suspect. The model is not exact. What follows is
+what it models; of the round-11 review's inputs, each a read in some shell (ROUND11 in
+tests/test_audit_exact.py), it still took 64 of 97 as local when the subset came.
 
 Each shell command is parsed with tree-sitter's bash grammar, so quoting, here-documents, subshells,
-command substitutions, pipelines, loops, functions and redirections are read as the shell reads them
-(`cat <file` reads `file`; a quoted `';'` is an argument, and the lines of a here-document fed to
+command substitutions, pipelines, loops, functions and redirections are read much as the shell
+reads them (`cat <file` reads `file`; a quoted `';'` is an argument, and the lines of a here-document fed to
 `cat` are data). The grammar misreads `!` before a compound command (`! { ...; }`, `! if ...`), a
 line that starts with a backslash, and a here-document line with blanks around its delimiter
 (` EOF`, which the shells take as more of the body); the audit mends those before it reads them,
-and any other command it cannot fully read is suspect.
+and any other command it cannot fully read is suspect. It also splits an unquoted `$a$b$c/x` into
+two words, which the audit does not see.
 
 The working directory is tracked as the set of places the shell could be, each with the last
 command's exit status (`_World`):
@@ -23,7 +31,8 @@ command's exit status (`_World`):
   earlier, may have worked or failed: the shell is then in either place. For a literal scratch
   directory the failed place is an alternative; an expansion-generated target keeps both as main
   places, since expansion can produce a filename rather than the intended directory.
-  A `cd` to a file fails. `CDPATH` is followed, `cd -` and `pushd -` go to `$OLDPWD`,
+  A `cd` to a file fails. `CDPATH` is followed where its value is known on every branch (zsh's
+  `cdpath` array is not), `cd -` and `pushd -` go to `$OLDPWD`,
   and one before any `cd` in the command goes where the audit cannot follow.
 - `&&`, `||`, `if`, `case` and loops run their parts only where the status allows. The audit knows
   the status of `true`, `false`, `:`, `cd`, `!`, tests of known strings and numbers (`[ a = b ]`,
@@ -52,7 +61,8 @@ command's exit status (`_World`):
   Expansion options (`set -f`, `noglob`, zsh's option spellings and `emulate sh`) travel with each
   shell state through branches, functions and subshells; `emulate MODE -c command` runs the command
   in the current shell and then restores only the options. `${x:=word}` and `${x=word}` assign in the
-  current shell; failed `${x:?word}` and `${x?word}` expansions exit it.
+  current shell; failed `${x:?word}` and `${x?word}` expansions exit it, except in an external
+  command's or a subshell's redirections, where bash and zsh fail only that command (see below).
   Bash expands a failed parameter's diagnostic word before exiting; native zsh prints its source.
   Brace expansions that duplicate substitutions with effects the audit cannot order are suspect.
 - Subshells, command substitutions, pipeline stages, background jobs, `sh -c` and wrapped commands
@@ -91,16 +101,21 @@ command's exit status (`_World`):
   differ) or unknown, in order through groups, functions, loops and branches: `echo` and `printf`
   with each shell's options and escapes, `pwd`, `dirname`, `basename`, `cat` of a file written
   earlier or in the work directory, here-documents (the body, expanded as a double-quoted string
-  is unless the delimiter is quoted), `<(code)` (a name that reads as what the code prints), and
+  is unless the delimiter is quoted, though a `)` in a comment or a `case` pattern ends a `$(...)`
+  in it early), `<(code)` (a name that reads as what the code prints), and
   declarations that list. Output redirected to a file
-  becomes its text (of the last of several files; zsh's MULTIOS writes it to each); sent to
+  becomes its text (of the last of several files, the earlier ones left empty even where standard
+  error was copied there; zsh's MULTIOS writes it to each); sent to
   standard error, `/dev/null` or another descriptor, it is gone, except that zsh's MULTIOS (as it
   stands when the redirections are made) also sends a redirected pipeline stage down the pipe;
   what such a stage's files then hold is unknown (zsh's copier may end at the pipe first).
-  `exec`'s redirections, `2>&1` among them, hold for the rest of the shell. A duplication or close
+  `exec`'s redirections, `2>&1` among them, hold for the rest of the shell; the model drops one
+  made as the last command of `&&` and keeps one that failed, where the shells do the reverse.
+  A duplication or close
   acts on the descriptor it names, whichever way its arrow points (`1<&-` closes standard output).
   On a closed standard output (`>&-`) bash 3.2 keeps what a builtin wrote (of printf, the first
-  pass of its format, where the write fails) and writes it with its next builtin write or at exit;
+  pass of its format, where the write fails; bash keeps more where a pass does not end in a
+  newline, which the model misses) and writes it with its next builtin write or at exit;
   dash and zsh drop it. bash's and dash's `echo`, `printf`, `pwd` and `type` fail there where
   zsh's succeed; another command's status is then unknown. A here-string feeds its word and a
   newline. Where standard error may be standard output (`2>&1`),
@@ -114,7 +129,10 @@ command's exit status (`_World`):
   holds); at a later letter or option name it lacks, bash and sh keep what came before and fail.
   dash exits and zsh ends the eval or the shell, after the letters before it. Under `set -e` a command that may fail, outside the places the
   shells ignore -e, and under `set -u` a parameter that may be unset (quoted or not), may end the
-  shell, as `exec CMD` does; the audit follows that ending and goes on. An option the audit does
+  shell, as `exec CMD` does; the audit follows that ending and goes on. In an external command's
+  or a subshell's redirections, which bash and zsh expand in the child they fork, such a parameter
+  ends only the child, and the command fails; so does one in a here-document in dash, and one in an
+  external command's prefix assignment in zsh (measured). An option the audit does
   not follow that could change what the code reads, prints or where it runs (noclobber, keyword,
   physical, globdots and the like) makes the call suspect.
 - Writes to a readonly variable follow each shell, as measured on macOS's bash 3.2, sh and dash
@@ -133,7 +151,8 @@ command's exit status (`_World`):
   builtin's own error from ending bash's POSIX mode, and dash's `command` fails where the code it
   runs would end the shell; zsh's `command` runs only a file (a builtin there runs as a child
   process) unless `emulate sh` set POSIX_BUILTINS. `setopt`, `emulate` and `shopt` fail in the
-  shells that lack them, and at an option name the shell lacks; at `set -o` with an option it
+  shells that lack them, and at an option name the shell lacks (the model takes some of zsh's
+  aliases, `dotglob` among them, for names zsh lacks, and `nonoglob` for one it has); at `set -o` with an option it
   lacks, bash fails, dash exits and zsh ends the eval or the shell as at `readonly`.
 - An EXIT trap's code runs where the shell or subshell ends, in each way it may end (an exit
   included). Code that other traps run where their signal or event comes, and zsh's EXIT trap set
@@ -230,7 +249,11 @@ from urllib.parse import unquote
 import tree_sitter_bash
 from tree_sitter import Language, Parser
 
+from . import exact
+
 HOME = Path.home()
+# The start of the reason for a shell call that is suspect only because it lies outside `exact`'s subset.
+EXACT_REASON = "shell code the audit does not read exactly"
 URL = re.compile(r"https?://[^\s'\"<>)`]+")
 # Text, outside URLs, that names a protected place.
 PROTECTED_TEXT = re.compile(
@@ -2280,6 +2303,11 @@ class _Shell:
         self.exec_err = False
         self.err_around = False  # the same outside the redirections of the simple command running
         self.noisy = 0  # commands run that may have written to standard error while err_out held
+        self.child_ends = 0  # unset parameters met in words a forked child may expand
+        # Words being expanded that bash or zsh may expand in the child a command forks: its
+        # redirections, and in zsh an external command's prefix assignments (see `failed_redirect`).
+        self.forked_words = 0
+        self.inline = False  # while the command whose redirections expand runs in the shell itself
         self.out_closed = False  # whether a redirection around has closed standard output
         self.stage = None  # the pipeline stage running, while one before the last is
         # The options of the emulation `emulate MODE -c` runs code in, while it does: functions
@@ -2529,9 +2557,12 @@ class _Shell:
         exits, exec_err = len(self.exits), self.exec_err
         err_out = self.err_out
         traps, self.exit_traps = self.exit_traps, []  # a subshell starts with no EXIT trap
+        # It ends at its own unset parameters.
+        forked, inline, self.forked_words, self.inline = self.forked_words, self.inline, 0, False
         try:
             yield
         finally:
+            self.forked_words, self.inline = forked, inline
             self.memo = memo
             self.exec_err, self.err_out = exec_err, err_out  # a subshell's `exec` holds in it alone
             self.run_traps(exits)
@@ -2955,9 +2986,9 @@ class _Shell:
             self.worlds = live
 
     def unbound(self, name: str) -> None:
-        """`$name` under `set -u`: expanding an unset parameter ends the shell, as `${name?}` does.
-        bash 3.2 takes "$@" with no positional parameters as unset too; `$!` is unset before a
-        background job."""
+        """`$name` under `set -u`: expanding an unset parameter ends the shell, as `${name?}` does
+        (see `end_unbound`). bash 3.2 takes "$@" with no positional parameters as unset too; `$!` is
+        unset before a background job."""
         if self.nounset is False or name in {"#", "?", "$", "-", "0"}:
             return
         count = self.vars.get("#")
@@ -2965,11 +2996,43 @@ class _Shell:
             known = count is not None and count.isdigit()
             if known and (int(count) >= int(name) if name.isdigit() else int(count) > 0):
                 return
-            self.may_end()
+            self.end_unbound()
             return
         raw = self.vars.get(name, self.never_set(name) if IDENTIFIER.fullmatch(name) else UNSET)
         if raw == UNSET or UNKNOWN in raw or "$" in raw or UNSET in _choices(raw):
+            self.end_unbound()
+
+    def end_unbound(self, surely: bool = False) -> None:
+        """The shell may end at an unset parameter under `set -u` (`surely`: it does, at a failed
+        `${name?word}`), printing a message where standard error is (the command's own redirections
+        may not be made yet). In words a forked child may expand (`forked_words`), only that child
+        may end, the command failing (see `failed_redirect`), so the shell also goes on. Only an
+        ending carries the message; where the shell goes on, it printed nothing."""
+        self.child_ends += bool(self.forked_words)
+        if surely and not self.forked_words:
+            self.complain(around=True)
+            self.leave()
+            return
+        output, noisy = self.output, self.noisy
+        self.complain(around=True)
+        try:
             self.may_end()
+        finally:
+            self.output, self.noisy = output, noisy
+
+    def failed_redirect(self) -> None:
+        """A command whose redirections or here-document met an unset parameter, under `set -u` or
+        at `${name?word}` (see `end_unbound`), may fail without ending the shell. bash 3.2, its sh
+        and zsh 5.9 make an external command's redirections, and a subshell's, in the child they
+        fork, which alone ends (zsh also an external command's prefix assignments), and dash
+        expands a here-document in a child for any command: the command does not run, fails, and
+        the shell goes on (measured). A builtin's, a function's, a group's or a loop's redirections
+        end the shell, as do dash's at a file. The audit takes this way for any command at its
+        redirections, and for an external command in zsh at its prefix assignments. What the
+        command's output files then hold is unknown: those before the failed one are emptied, the
+        rest left."""
+        self.complain(around=True)
+        self.set_status(FAILED)
 
     def trap(self, args: list[str]) -> None:
         """`trap CODE SIGNAL...`. An EXIT trap's code runs when the shell (or subshell) ends (see
@@ -3568,7 +3631,7 @@ class _Shell:
                         else:
                             for c in node.named_children[1:]:
                                 self.value(c)
-                    self.leave()  # an EXIT trap still runs, and the files are as they are here
+                    self.end_unbound(surely=True)  # an EXIT trap still runs; the files are as they are
                     return ""
                 if use_word:
                     # The default word's substitutions run only when the default is used.
@@ -4985,7 +5048,10 @@ class _Shell:
             self.pipeline(self._stages(body), tail=redirects)
         else:
             outs: list[tuple[str, bool]] = []
-            data, after = self.redirect(redirects, stdin, outs)
+            ends = self.child_ends
+            with self.redirecting(body.type != "subshell"):
+                data, after = self.redirect(redirects, stdin, outs)
+            fails = self.child_ends > ends  # see `failed_redirect`
             before, self.output = self.output, ""
             diverted, emits, err, mark = self.diverted, self.emits, self.err_out, self.jumped
             closed, tees = self.out_closed, self.tees()  # MULTIOS as the redirections are made
@@ -4995,11 +5061,14 @@ class _Shell:
                 self.out_closed = any(target == CLOSED for target, _ in outs)
             self.err_out = _err_state(redirects, err)
             noisy = self.noisy
-            try:
+
+            def run():
                 if body.type == "while_statement":
                     self.while_loop(body, data)
                 else:
                     self.visit(body)
+            try:
+                self.either(run, self.failed_redirect) if fails else run()
             finally:
                 if outs:
                     self.diverted, self.out_closed = diverted, closed
@@ -5008,7 +5077,7 @@ class _Shell:
                 self.err_out = err or self.exec_err
             own = self.output
             self.carry(mark, before, not outs and not after and self.diverted is None and not self.stray)
-            self.write_outs(outs, own, tees, self.stage is not None and self.stage == body.parent)
+            self.write_outs(outs, None if fails else own, tees, self.stage is not None and self.stage == body.parent)
             self.emit(before, own, outs, after, self.stage is not None and self.stage == body.parent, body,
                       bool(outs) or self.emits == emits, tees, False if self.trims == trims else None)
 
@@ -5061,7 +5130,8 @@ class _Shell:
                     dest = named[-1] if named else None
                 if dest is None:
                     continue
-                target = self.expand(self.value(dest))
+                with self.child_words():
+                    target = self.expand(self.value(dest))
                 if op.endswith("&") and (target.isdigit() or target == "-"):
                     # Duplicates or closes a file descriptor: `>&2` sends standard output elsewhere.
                     if target not in {"-", "0", "1", "2"}:
@@ -5078,7 +5148,8 @@ class _Shell:
                 if outs is not None and op in {">", ">>", ">|", "&>", "&>>", ">&"} and fd in {"", "1"}:
                     outs.append((target, op.endswith(">>")))
             elif r.type == "heredoc_redirect":
-                stdin = self.heredoc(r)
+                with self.child_words(here=True):
+                    stdin = self.heredoc(r)
                 for c in r.named_children:
                     if c.type == "file_redirect":
                         self.redirect([c], None, outs)
@@ -5087,8 +5158,51 @@ class _Shell:
                         if c.type == "pipeline" and c.children and c.children[0].type == "|&":
                             self.notes.append("a here-document's command sends standard error down `|&`")
             elif r.type == "herestring_redirect":
-                stdin = self.herestring(list(r.named_children), ifs)
+                with self.child_words():
+                    stdin = self.herestring(list(r.named_children), ifs)
         return stdin, after
+
+    @contextmanager
+    def child_words(self, here: bool = False):
+        """Expanding a redirection's word, which bash and zsh expand in the child a command forks
+        (see `forked_words`), unless the command runs in the shell (`inline`); dash expands a file's
+        or a here-string's before it forks, and a here-document (`here`) in a child for any command."""
+        kinds = self.kinds()
+        forks = here and "dash" in kinds or not self.inline and (here or kinds != ["dash"])
+        self.forked_words += forks
+        try:
+            yield
+        finally:
+            self.forked_words -= forks
+
+    @contextmanager
+    def redirecting(self, inline: bool):
+        """Expanding the redirections of a command that runs in the shell itself (`inline`: a
+        builtin, a function, a group, a loop), or that may fork (an external command, a subshell)."""
+        saved, self.inline = self.inline, inline
+        try:
+            yield
+        finally:
+            self.inline = saved
+
+    def runs_inline(self, words: list[str], assigns: list) -> bool:
+        """Whether a simple command with these words runs in the shell in every shell it may be
+        (see `inline_verb`). One with only redirections does in bash, sh and dash; zsh runs `cat`
+        (its NULLCMD) unless the command also assigns (measured)."""
+        if not words:
+            return bool(assigns) or "zsh" not in self.kinds()
+        return self.inline_verb(_alt(self.expand(words[0]))[0], self.kinds())
+
+    def inline_verb(self, verb: str, kinds: list[str]) -> bool:
+        """Whether `verb` runs in the shell in each of `kinds`: a function every branch defines, or
+        a builtin of each (zsh's `command` runs an external one); not an alias."""
+        defined = self.functions.get(verb)
+        if defined is not None and None not in defined:
+            return True
+        if verb in self.aliases:
+            return False
+        tables = {"zsh": ZSH_BUILTINS - {"command"}}
+        return all(verb in tables.get(kind, BASH_BUILTINS) for kind in kinds)
 
     def heredoc(self, r) -> str | None:
         """What a here-document feeds standard input: its lines as written (`<<-` drops their
@@ -5158,14 +5272,19 @@ class _Shell:
         # as in the shell. Where the shells split them differently, the command runs each way.
         lists = self.word_lists(words)
         outs: list[tuple[str, bool]] = []
-        stdin, after = self.redirect(redirs, stdin, outs, ifs=self.prefix_ifs(assigns))
+        ends = self.child_ends
+        with self.redirecting(self.runs_inline(lists[0], assigns)):
+            stdin, after = self.redirect(redirs, stdin, outs, ifs=self.prefix_ifs(assigns))
         inputs = _choices(stdin) if stdin is not None and CHOICE.search(stdin) else [stdin]
-        runs = [(ws, data) for ws in lists for data in inputs]
+        runs = [(ws, data, False) for ws in lists for data in inputs]
+        if self.child_ends > ends:
+            runs.append((lists[0], stdin, True))  # see `failed_redirect`
         if len(runs) == 1:
             self.run_simple(node, assigns, lists[0], stdin, outs, after)
         else:
-            self.either(*(lambda ws=ws, data=data: self.run_simple(node, assigns, ws, data, outs, after)
-                          for ws, data in runs))
+            self.either(*(lambda ws=ws, data=data, fails=fails:
+                          self.run_simple(node, assigns, ws, data, outs, after, fails)
+                          for ws, data, fails in runs))
 
     def marked_words(self, nodes: list, parent) -> list[str]:
         """The marked values of a command's argument nodes. The grammar drops a backslash-escaped
@@ -5298,9 +5417,13 @@ class _Shell:
                 return self.value(val) if plain else UNKNOWN
         return False
 
-    def run_simple(self, node, assigns: list, words: list[str], stdin: str | None, outs: list, after: list) -> None:
+    def run_simple(self, node, assigns: list, words: list[str], stdin: str | None, outs: list, after: list,
+                   fails: bool = False) -> None:
+        """Run a simple command, whose words and redirections `simple` expanded; where `fails`, the
+        command does not run, as an unset parameter in its redirections failed it (see
+        `failed_redirect`)."""
         before, self.output = self.output, ""
-        if len(words) == 1 and _alt(self.expand(words[0]))[0] == "exec" and "exec" not in self.functions:
+        if not fails and len(words) == 1 and _alt(self.expand(words[0]))[0] == "exec" and "exec" not in self.functions:
             # `exec` with only redirections: they hold for the rest of the shell. Standard error
             # sent where standard output goes may stay there (where a branch ran it, say).
             def redirect():
@@ -5332,11 +5455,30 @@ class _Shell:
         around, self.err_around = self.err_around, err
         self.err_out = _err_state(_redirects(node), err)
         noisy = self.noisy
-        if not words:
+        if fails:
+            self.failed_redirect()
+        elif not words:
             self.assignments(node, assigns)
         else:
             verb = _alt(self.expand(words[0]))[0]
-            self.with_assignments(assigns, verb, lambda: self.command(words, stdin))
+            ends = self.child_ends
+            # zsh expands an external command's prefix assignments in its child (see `failed_redirect`).
+            forked = bool(assigns) and "zsh" in self.kinds() and not self.inline_verb(verb, ["zsh"])
+
+            def run():
+                self.forked_words -= forked
+                try:
+                    if self.child_ends > ends and forked:
+                        self.either(lambda: self.command(words, stdin), self.failed_redirect)
+                    else:
+                        self.command(words, stdin)
+                finally:
+                    self.forked_words += forked
+            self.forked_words += forked
+            try:
+                self.with_assignments(assigns, verb, run)
+            finally:
+                self.forked_words -= forked
         kept = False if self.trims == trims else self.kept  # see `kept`: unknown when nested
         self.kept = None
         if outs:
@@ -5351,7 +5493,7 @@ class _Shell:
         if words and own != "":
             self.closed_status(words, own, outs)
         self.carry(mark, before, not outs and not after and self.diverted is None and not self.stray)
-        self.write_outs(outs, own, tees, self.stage is not None and self.stage in (node, node.parent))
+        self.write_outs(outs, None if fails else own, tees, self.stage is not None and self.stage in (node, node.parent))
         self.emit(before, own, outs, after, self.stage is not None and self.stage in (node, node.parent), node,
                   bool(outs) or self.emits == emits, tees, kept)
 
@@ -7568,10 +7710,28 @@ def _tool_calls(line: dict):
         yield "collab", item
 
 
-def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: dict | None = None) -> tuple[str, str]:
-    """('web' | 'violation' | 'suspect' | 'local' | 'other', reason) for one tool call. `files`: what
-    earlier calls in the transcript wrote, by path, so that a script written by one call and run by
-    a later one is read as it was written; updated with what this call writes."""
+def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: dict | None = None,
+               start=...) -> tuple[str, str]:
+    """('web' | 'violation' | 'suspect' | 'local' | 'other', reason) for one tool call: the shell
+    model's verdict (`model_call`), except that a shell call it finds local or web is suspect unless
+    it lies in the subset whose reads `exact.outside` knows exactly. `start`: where a shell call may
+    start (see `exact.outside`); by default the work directory for Claude Code's Bash, and unknown
+    for Codex's shell, which may run a command in a directory its transcript does not record."""
+    verdict, why = model_call(tool, inp, workdir, roots, files)
+    if tool in {"shell", "Bash"} and verdict in {"local", "web"}:
+        if start is ...:
+            start = [workdir] if tool == "Bash" else None
+        beyond, _ = exact.outside(str(inp.get("command", "")), workdir, start)
+        if beyond:
+            return "suspect", f"{EXACT_REASON}: {beyond}"
+    return verdict, why
+
+
+def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: dict | None = None) -> tuple[str, str]:
+    """The shell model's verdict on one tool call: ('web' | 'violation' | 'suspect' | 'local' |
+    'other', reason). `files`: what earlier calls in the transcript wrote, by path, so that a script
+    written by one call and run by a later one is read as it was written; updated with what this
+    call writes."""
     text = json.dumps(inp) if not isinstance(inp, str) else inp
     outside_urls = URL.sub("", text)
     if tool.startswith("mcp:") or tool.startswith("mcp__"):
@@ -7669,6 +7829,8 @@ def audit_transcript(path: Path, workdir: str) -> dict:
     work = Path(workdir) if workdir else Path("/nonexistent-workdir")
     roots = protected_roots()
     files: dict[Path, tuple] = {}  # what the run's calls wrote so far, by path (see `_Shell.files`)
+    # Where the next Claude Code Bash call may start: it starts where the last one ended.
+    bash_start: list[Path] | None = [work]
     events = calls = web = 0
     lists: dict[str, list] = {"violations": [], "suspect": [], "local_calls": []}
     urls: list[str] = []
@@ -7682,7 +7844,10 @@ def audit_transcript(path: Path, workdir: str) -> dict:
         events += 1
         for tool, inp in _tool_calls(line):
             calls += 1
-            verdict, why = check_call(tool, inp, work, roots, files)
+            verdict, why = check_call(tool, inp, work, roots, files,
+                                      **({"start": bash_start} if tool == "Bash" else {}))
+            if tool == "Bash":
+                _, bash_start = exact.outside(str(inp.get("command", "")), work, bash_start)
             text = json.dumps(inp)
             if verdict == "web":
                 web += 1

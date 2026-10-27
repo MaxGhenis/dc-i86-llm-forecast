@@ -23,7 +23,7 @@ def test_awk_begin_consumes_only_record(review_area, shell, program):
                             capture_output=True, text=True, timeout=20)
     assert result.returncode == 0 and result.stdout == "" and result.stderr == "", result
     assert (review_area.parent / "opus-2" / "draft.json").read_text() == "MOCK OTHER ANSWER\n"
-    category, reason = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(program)},
+    category, reason = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(program)},
                                         review_area, audit.protected_roots())
     if category != "local":
         raise AuditMisclassification((category, reason))
@@ -52,7 +52,7 @@ def test_awk_records_follow_begin_getlines(review_area, shell, program, category
     (review_area / "MOCK.txt").write_text("MOCK own research\n")
     real = subprocess.run([shell, "-c", program], cwd=review_area, capture_output=True, text=True, timeout=20)
     assert ("MOCK OTHER ANSWER" in real.stdout) == opens_answer, (program, real)
-    got, reason = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(program)},
+    got, reason = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(program)},
                                    review_area, audit.protected_roots())
     assert got == category, (program, got, reason)
 
@@ -88,5 +88,5 @@ def test_echo_output_is_exact_or_unknown(shell):
 def test_echo_and_printf_feed_exact_lines(review_area, program, category):
     real = subprocess.run(["/bin/zsh", "-fc", program], cwd=review_area, capture_output=True, text=True, timeout=20)
     assert "MOCK OTHER ANSWER" in real.stdout, real
-    got, reason = audit.check_call("shell", {"command": program}, review_area, audit.protected_roots())
+    got, reason = audit.model_call("shell", {"command": program}, review_area, audit.protected_roots())
     assert got == category, (program, got, reason)

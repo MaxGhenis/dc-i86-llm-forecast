@@ -9,7 +9,7 @@ import subprocess
 
 import pytest
 
-from test_review_r4_audit import audit_command
+from test_review_r4_audit import audit_command, model_suspects
 
 
 def run_local(command, work):
@@ -22,7 +22,7 @@ def test_rg_hostname_value_is_not_a_pattern(tmp_path, review_area):
     command = "rg --hostname-bin /bin/hostname / report.txt"
     assert run_local(command, review_area).stdout.startswith("MOCK")
     result = audit_command(tmp_path, command, review_area)
-    assert not result["violations"] and not result["suspect"], result
+    assert not result["violations"] and not model_suspects(result), result
 
 
 @pytest.mark.parametrize("command", [
@@ -35,7 +35,7 @@ def test_rg_hostname_value_is_not_a_pattern(tmp_path, review_area):
 def test_equals_option_data_is_not_a_file(tmp_path, review_area, command):
     assert run_local(command, review_area).stdout
     result = audit_command(tmp_path, command, review_area)
-    assert not result["violations"] and not result["suspect"], result
+    assert not result["violations"] and not model_suspects(result), result
 
 
 @pytest.mark.parametrize("command", [
@@ -46,7 +46,7 @@ def test_equals_option_data_is_not_a_file(tmp_path, review_area, command):
 def test_question_terms_in_patterns_are_not_suspect(tmp_path, review_area, command):
     assert run_local(command, review_area).stdout
     result = audit_command(tmp_path, command, review_area)
-    assert not result["violations"] and not result["suspect"], result
+    assert not result["violations"] and not model_suspects(result), result
 
 
 @pytest.mark.parametrize("command", [
@@ -57,7 +57,7 @@ def test_unrelated_substitution_does_not_feed_find_results(tmp_path, review_area
     run_local(command, review_area)
     result = audit_command(tmp_path, command, review_area)
     # A name-only search above siblings is suspect under the stated policy, not a violation.
-    assert result["suspect"] and not result["violations"], result
+    assert model_suspects(result) and not result["violations"], result
 
 
 @pytest.mark.parametrize("command", [
@@ -87,9 +87,9 @@ def test_round5_research_controls(tmp_path, review_area, command):
     result = audit_command(tmp_path, command, review_area)
     assert not result["violations"], result
     if command.startswith("find .."):
-        assert result["suspect"], result
+        assert model_suspects(result), result
     else:
-        assert not result["suspect"], result
+        assert not model_suspects(result), result
 
 
 @pytest.mark.parametrize("command", [
@@ -100,4 +100,4 @@ def test_round5_research_controls(tmp_path, review_area, command):
 def test_repository_web_warning_close_variants(tmp_path, review_area, command):
     # Classification only: these review controls make no network requests.
     result = audit_command(tmp_path, command, review_area)
-    assert result["suspect"] and not result["violations"], result
+    assert model_suspects(result) and not result["violations"], result

@@ -32,7 +32,7 @@ def observe(tmp_path: Path, name: str, code: str):
     with mock.patch.object(runners, "WORK", top / "work"), \
             mock.patch.object(audit, "protected_roots", lambda: roots), \
             mock.patch.object(audit, "HOME", top / "home"):
-        verdict, why = audit.check_call("shell", {"command": command}, work, roots)
+        verdict, why = audit.model_call("shell", {"command": command}, work, roots)
     return proc, verdict, why
 
 

@@ -23,7 +23,7 @@ def _real(shell, command, work):
 
 
 def _audit(shell, command, work):
-    return audit.check_call("shell", {"command": shell + " -c " + shlex.quote(command)},
+    return audit.model_call("shell", {"command": shell + " -c " + shlex.quote(command)},
                             work, audit.protected_roots())
 
 

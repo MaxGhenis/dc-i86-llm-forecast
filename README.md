@@ -135,60 +135,34 @@ Each forecaster reports, before researching, anything in its context other than 
 mentions the measure (`forecaster.prior_context`). `simulate` excludes a run whose report mentions
 these questions, other than a bare "none"; after reading it, `--accept-prior <label>` admits it.
 
-`i86 audit` reads each run's own transcript and parses every shell command with tree-sitter's bash
-grammar: quoting, pipes, here-documents, subshells, command substitutions, redirections (`cat <file`),
-loops, functions and the rest, with the grammar's misreading of `!` before a compound command
-repaired. It tracks the working directory as the set of places the shell could be, each with the
-last command's exit status. `&&`, `||`, `if`, loops and `case` run their parts only where the status
-allows (the audit knows `true`, `false`, `cd`, tests of known values and files present, literal
-`case` values; after anything else, either way may have run). A `cd`, `pushd` or `popd` moves every
-place, following `CDPATH`, functions, aliases, `eval`, `env -C` and the like, and positional
-parameters for `sh -c` and shell code on standard input; one inside a subshell, a command
-substitution, a pipeline stage or a background job does not move the commands after it. zsh is the
-exception twice over: it runs a pipeline's last stage in the current shell (`x | cd d`, a `while read`
-loop at the end of a pipeline), and of `cd a && make &` it runs only `make` in the background. The
-audit follows the shell a command names (`zsh -c`, `bash -c`) and otherwise keeps both outcomes. Scratch
-directories are often gone by the time the audit runs, so a `cd` to a missing directory (or one the
-command makes only later) leaves the shell either there or where it was. The second place is an
-alternative for a literal scratch directory; an expansion-generated target keeps both as main
-places, since expansion can produce a filename rather than the intended directory.
-Loops are followed pass by pass, through `break`, `continue` and `return`, until they
-end or repeat a state (after 12 passes changing variables become unknown, and after 24 the audit
-stops following the directory), and arithmetic is evaluated where bash and zsh agree on it. Words
-expand brace lists and ranges, directory tildes (`~+`, `~-`, `~N`, `~+N`, `~-N`) and arrays with each
-shell's semantics: unquoted `$a` takes bash's first element and zsh's whole array, while quoted
-`"${a[@]}"` keeps separate elements. Words split into fields as each shell splits them (bash splits
-unquoted variables at `IFS`; zsh does so with `SH_WORD_SPLIT`), and so do `read` and bash 3.2's
-here-strings. `noglob`, `set -f`, zsh's option spellings and `emulate sh` change expansion in the
-shell state where they run, including functions, branches and subshells; `emulate sh -c command`
-runs the command in the current shell, keeping its directory changes, and restores only the options. Parameter defaults with
-`=` or `:=` assign their variable; failed `?` and `:?` expansions exit the shell. Unassigned locals
-follow each shell's rules, including bash's unset local `IFS` and zsh's empty local `IFS`. A new shell
-(`sh -c`, a script) sees only exported variables, resets `IFS`, and starts a fresh directory stack.
-Bash and sh import supported expansion options from exported `SHELLOPTS`; zsh starts with its own
-options. A script written by
-an earlier tool call, or present in the work directory, is read when it is run. Variables, `read`
-from a known input, and variables, functions and aliases that branches may each have set
-differently (or not at all) are followed in each version. The audit resolves every local path from
-every place, expands globs, takes a command's own directory option (`git -C`, `tar -C`) as a further
-base, and reads each search tool's and
-interpreter's options as that tool does, so it mistakes neither a search pattern nor a `python -c`
-or awk program for a path, while still scanning that code for paths and for a literal `os.chdir`.
-An interpreter's standard input is code only when it takes its program there. With `-c`, `-e`, a
-script file, a jq filter, a sed script or an awk program, input is data. Path-shaped input counts as
-a read when the program demonstrably opens it, is suspect when it may supply filenames, and stays
-local for programs that only print or transform it. Awk `-v` values follow their uses in file
-operations, command execution and `ARGV`; a literal `system()` command is audited as shell code
-without turning unrelated values into reads. Awk's actions are followed in the order awk runs them:
-a `getline` in a straight-line BEGIN block reads the next known input line, and record actions with
-no line left never run. What commands print is known as one text, a choice of texts where branches
-or the shells differ (their `echo`s differ on options and backslashes), or not at all; closed
-standard output (bash 3.2 writes later what a builtin wrote there), `exec`'s redirections and zsh's
-MULTIOS are followed. Writes to readonly variables fail, or end the line, the `eval` or the shell
-they are in, as each shell does.
-Known input also reaches a child shell's `while read` loop, a shell script or an awk shell command;
-when several commands share input and its consumption is unresolved, possible filename uses are
-suspect. Protected glob patterns remain checked when their matches are absent at audit time.
+`i86 audit` reads each run's own transcript and checks every tool call. A shell call (Claude Code's
+Bash, Codex's shell) counts as local, or web, only if it lies in a small subset whose reads the audit
+knows exactly (`src/i86/exact.py`):
+
+- words are literal, with no expansion, substitution, glob, redirection, assignment, comment, group,
+  subshell or background job, so bash, zsh, sh and dash read the same words;
+- commands are joined by `;`, `&&`, `||`, `|` and newlines;
+- each command is one of a fixed set of read-only tools (`cat`, `head`, `tail`, `wc`, `sort`, `uniq`,
+  `cut`, `tr`, `ls`, `grep`, `rg`, `sed` printing or deleting numbered lines, `jq` without modules,
+  `echo`, `printf`, `true`, `false`, `:`, `pwd`, `curl` on http(s) URLs, `find` with listed
+  primaries), with options from its list placed before its operands; or `cd DIR` alone in its
+  pipeline; or `bash`, `zsh`, `sh` or `dash` with `-c` running one such command;
+- every file a tool may open resolves, from every place the shell may be, inside the run's work
+  directory, part by part, with no link on the way and no `..` above it.
+
+A Codex shell call may run in a directory its transcript does not record, so there only absolute
+paths in the work directory count; a Claude Code Bash call starts where the previous one ended. The
+subset takes the tools to be the standard ones (or, for `grep` and `find`, the ugrep and bfs that
+Claude Code's shell runs in their place), and the environment to set none of the variables, options
+and files that change them (`exact.py` lists them). Any other shell call is suspect.
+
+A shell model then reads every call, in the subset or not, with tree-sitter's bash grammar. It tracks
+the places the shell may be, statuses, variables, functions, here-documents and what commands print,
+for bash, zsh, sh and dash, and resolves the paths each command may open. It decides which calls
+exclude a run and gives the reasons for suspect ones. It is not exact: every review found reads it
+misses (round 11 reported 36), so it no longer decides that a shell call is local; the subset does.
+Other tools (Read, Grep, Glob and the like) are checked by the paths they name.
+
 Running a file by path counts as reading it, and so does a `file://` URL. These exclude the run:
 - a path resolved from a main place in, or text naming, the repository, the staging area, another
   run's work directory, an agent's home or job store, or the author's notes;
@@ -205,21 +179,23 @@ protected place, a command the parser cannot fully read, a path outside the work
 term from these questions, a web call that opens this repository (it holds no answers until every run
 has finished), and sub-agent calls. The summary counts them per run. A run with no parseable
 transcript fails the audit, and `simulate` pools only runs that pass. `--allow-unaudited` admits manual
-runs, which have no transcript. Whether a directory exists is judged at audit time, apart from what the
-same command makes or removes. A generated-program test (`tests/test_audit_shell_differential.py`)
-runs each program under bash and zsh and checks that every program that reads a MOCK answer is
-reported, that the audit's possible places include where the shell ended, and that where the audit
-has one place it is that one. `tests/test_audit_output_differential.py` checks the audit's model of
-what commands print against both shells on generated programs, and `tests/test_audit_readonly.py`
-checks writes to readonly variables and to a closed standard output, and that the audit flags
-exactly the reads each shell makes. `tests/test_audit_shell_semantics.py` checks the arithmetic, `read`,
-field splitting, here-strings, directory tildes, brace lists and ranges, arrays, assigning and error
-parameters, shell options, locals and exported child environments against both shells on generated
-inputs. Boundary tests also check failed parameter diagnostics, unset arrays, live exported shell
-options and options on script files. Bash's directory tildes follow assigned `PWD` and `OLDPWD`;
-zsh uses its internal directory state. When brace duplication or interpreter data flow exceeds the
-model, the call is suspect with a reason. The audit catches
-accidental and casual reads, not a forecaster set on hiding them.
+runs, which have no transcript. Whether a directory exists, and whether a path holds a link, is judged
+at audit time.
+
+Tests check both parts against the real shells. `tests/test_audit_exact.py` runs generated programs
+of the subset's shape, and every one-step program it builds from, under bash, zsh, sh, dash and Claude
+Code's shell, and checks that no program in the subset prints another run's MOCK answer or a name
+from outside the work directory, or changes a file, also from an unknown start; that each ends in one
+of the places the subset gives; that the subset's words are the shells'; and that the audit keeps the
+model's verdict inside the subset and is suspect or worse outside it, for every measured program and
+every review's inputs.
+`tests/test_audit_shell_differential.py`, `tests/test_audit_output_differential.py`,
+`tests/test_audit_readonly.py` and `tests/test_audit_shell_semantics.py` check the model's places,
+output, readonly writes and expansions against the shells on generated and measured programs.
+Within its assumptions, a call in the subset reads nothing outside the work directory but what the
+tools load to run (libraries, locale data, user names) and the ignore files rg and ugrep consult,
+which only choose among the files they search. A call outside it is
+suspect, and whether it read anything is for a reader to judge from the call and the model's reasons.
 
 ## Files
 
@@ -232,8 +208,9 @@ accidental and casual reads, not a forecaster set on hiding them.
 - `src/i86/`: graph loading, response checks, samplers, simulator, pooling, report, runners and audit.
 - `tests/`: property-based tests of the samplers and simulator invariants; differential tests of the
   decisive-ballot formula against its closed form and of the weighted conditionals against plain
-  filtering; audit cases, including every bypass found in review, and the audit against bash and zsh
-  on generated programs; and the staging and pooling rules. `test_review_r3_*.py` to
+  filtering; audit cases, including every bypass found in review, the shell model against bash and zsh
+  on generated programs, and the exact subset against bash, zsh, sh, dash and Claude Code's shell;
+  and the staging and pooling rules. `test_review_r3_*.py` to
   `test_review_r6_*.py` are the independent reviews' probes, kept as regression tests. Test responses
   are labelled MOCK.
 

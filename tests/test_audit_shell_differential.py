@@ -239,7 +239,7 @@ def test_audit_agrees_with_bash_and_zsh(case):
                     mock.patch.object(audit, "protected_roots", lambda: roots), \
                     mock.patch.object(audit, "HOME", top / "home"):
                 model = audit._shell(program, work)
-                verdict, why = audit.check_call("shell", {"command": program}, work, roots)
+                verdict, why = audit.model_call("shell", {"command": program}, work, roots)
             places = {w.cwd for w in model.worlds}
             label = f"{shell[0]}: {program!r} -> cwd {cwd}, read {read}, audit {verdict} ({why}), worlds {model.worlds}"
             if read:

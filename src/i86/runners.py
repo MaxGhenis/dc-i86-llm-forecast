@@ -21,8 +21,14 @@ file beside the staging directory while they check and change runs, so no run ca
 collect's check and its copy. The lock is reentrant within one thread; other threads and other
 processes wait for it, and so does a process forked while it is held or while a thread waits for
 it: the child lets go of the lock file descriptors it inherits, so it waits for the lock like any other
-process and cannot keep it held after its parent exits. Every change to a run's
-metadata reads it afresh under the lock. Whatever a run's backend reports after it is abandoned (a
+process and cannot keep it held after its parent exits. That includes a child a signal handler forks
+as its thread waits. A handler that raises once in a use of the lock (as Ctrl-C's KeyboardInterrupt
+does) leaves no descriptor on the lock file open, wherever it lands, unless it lands as the thread
+waits for another thread to open or close one; a second raise in the same use can leave one open
+and holding the lock. A handler must not take the lock or fork: one
+that interrupts its thread while the thread opens or closes a lock descriptor waits for itself
+forever. i86 installs no signal handler. Every change to a run's metadata reads it afresh under the
+lock. Whatever a run's backend reports after it is abandoned (a
 Claude process that returns, a subfleet job that finishes, a manual answer saved late) is recorded as
 `backend_state`, never as its state.
 
@@ -83,8 +89,10 @@ def _forget_lock_after_fork() -> None:
     # like any other process. Its copies of the parent's lock descriptors share the parent's lock, or
     # the lock a parent thread is still waiting for; otherwise the lock would outlive a parent that
     # exits while the child still runs, and the child, waiting for it through a new descriptor, would
-    # wait forever. Fork waits for _fd_guard, so no descriptor can be open but not yet in _lock_fds,
-    # or out of _lock_fds but not yet closed.
+    # wait forever. Fork waits for _fd_guard, so no descriptor can be open but not yet in _lock_fds
+    # (save one two exceptions in one use kept from being registered or closed), or out of
+    # _lock_fds but not yet closed. A signal handler that forks while its own thread holds
+    # _fd_guard waits for it forever.
     #
     # The locks are replaced first, so a failure below cannot leave the child's copies held. A copy
     # opened by another thread's frame is closed: that thread does not survive the fork, so its frame
@@ -135,6 +143,27 @@ os.register_at_fork(before=_before_fork, after_in_parent=_after_fork_in_parent,
                     after_in_child=_forget_lock_after_fork)
 
 
+def _close_strays(path: Path) -> None:
+    """Close this process's descriptors on the lock file that are not in _lock_fds. Called with
+    _fd_guard held, under which every other descriptor on it is in _lock_fds, so these are the ones
+    an exception kept from being registered or closed. Each use of the lock ends with this sweep, so
+    such descriptors do not pile up."""
+    try:
+        target = os.stat(path)
+    except OSError:
+        return
+    for name in os.listdir("/dev/fd"):
+        fd = int(name)
+        if fd in _lock_fds:
+            continue
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            continue
+        if (st.st_dev, st.st_ino) == (target.st_dev, target.st_ino):
+            os.close(fd)
+
+
 @contextmanager
 def bookkeeping_lock():
     """Hold the runs' lock file. Reentrant within a thread; other threads and processes wait."""
@@ -151,14 +180,24 @@ def bookkeeping_lock():
         path.parent.mkdir(parents=True, exist_ok=True)
         # The descriptor is registered before this thread waits on it: a process forked while it
         # waits lets go of it too, so the lock this thread then takes cannot live on in the child.
-        token = object()
-        with _fd_guard:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-            fds = _lock_fds
-            fds[fd] = (token, threading.get_ident())
-        owner = os.getpid()
+        token, owner, me = object(), os.getpid(), threading.get_ident()
+        fds, fd = _lock_fds, None
         try:
+            with _fd_guard:
+                fds = _lock_fds
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+                fds[fd] = (token, me)
             fcntl.flock(fd, fcntl.LOCK_EX)
+            while os.getpid() != owner:
+                # A signal handler forked as this thread waited: the child's copy now points at
+                # /dev/null (or is closed), which the wait then took at once. The child waits anew.
+                with _fd_guard:
+                    if _closed_in_child.pop(token, None) is None:
+                        os.close(fd)
+                    token, owner, fds, fd = object(), os.getpid(), _lock_fds, None
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+                    fds[fd] = (token, me)
+                fcntl.flock(fd, fcntl.LOCK_EX)
             held.depth = 1
             try:
                 yield
@@ -168,12 +207,17 @@ def bookkeeping_lock():
                     fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             with _fd_guard:
-                if os.getpid() == owner:
-                    fds.pop(fd, None)
-                    os.close(fd)
-                elif _closed_in_child.pop(token, None) is None:
-                    os.close(fd)  # this process's copy, pointed at /dev/null when it forked
-                # else already closed when the process forked; the number may now be another file's
+                try:
+                    if fd is not None and (os.getpid() == owner or _closed_in_child.pop(token, None) is None):
+                        os.close(fd)  # in a forked child, its copy, pointed at /dev/null when it forked
+                    # else none was opened, or the fork closed it and the number may be another file's
+                finally:
+                    # An exception that cut this short leaves no lock-file descriptor open: fd leaves
+                    # _lock_fds (in a child, the parent's old table), so if it is still open, the
+                    # sweep closes it, with any whose number an exception lost as os.open returned.
+                    if fd is not None:
+                        fds.pop(fd, None)
+                    _close_strays(path)
 
 
 def run_dirs() -> list[Path]:

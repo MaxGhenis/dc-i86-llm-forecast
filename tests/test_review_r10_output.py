@@ -27,7 +27,7 @@ def real_and_model(shell, code, work):
                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
     wrapped = shell + " -c " + shlex.quote(code)
     model = audit._shell(wrapped, work)
-    verdict, why = audit.check_call("shell", {"command": wrapped}, work, audit.protected_roots())
+    verdict, why = audit.model_call("shell", {"command": wrapped}, work, audit.protected_roots())
     return proc, model, verdict, why
 
 

@@ -34,7 +34,7 @@ def test_parameter_error_diagnostic_expansion_matches_real_shell(review_area, sh
     assert real.returncode != 0 and "MOCK reached" not in real.stdout
     # Bash expands the error message before exiting; zsh prints its source literally.
     assert ("MOCK OTHER ANSWER" in real.stderr) == (dialect == "posix"), real
-    verdict, why = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(program)},
+    verdict, why = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(program)},
                                     review_area, audit.protected_roots())
     assert verdict == ("violation" if dialect == "posix" else "local"), why
     assert not model(program, review_area, dialect).worlds
@@ -97,7 +97,7 @@ def test_braces_with_repeated_side_effects_are_suspect(review_area, shell, diale
     program = 'i=0; set -- {a,b}$((i++)); printf "MOCK %s\\n" "$i"'
     real = run_shell(shell, program, review_area)
     assert real.returncode == 0 and "MOCK" in real.stdout
-    category, reason = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(program)},
+    category, reason = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(program)},
                                       review_area, audit.protected_roots())
     assert category == "suspect" and "brace" in reason
 
@@ -108,6 +108,6 @@ def test_protected_glob_survives_removed_audit_time_matches(review_area, shell, 
     real = run_shell(shell, program, review_area)
     assert real.returncode == 0 and "MOCK OTHER ANSWER" in real.stdout
     (review_area.parent / "opus-2" / "draft.json").unlink()
-    category, reason = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(program)},
+    category, reason = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(program)},
                                       review_area, audit.protected_roots())
     assert category == "violation", reason

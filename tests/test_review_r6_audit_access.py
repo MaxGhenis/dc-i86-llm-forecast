@@ -60,7 +60,7 @@ def _assert_real_read(review_area, shell, command):
                           capture_output=True, text=True, timeout=10, env=env)
     assert proc.returncode == 0 and "MOCK OTHER ANSWER" in proc.stdout, proc
     call = shell + " -c " + shlex.quote(command)
-    category, reason = audit.check_call("shell", {"command": call}, review_area, audit.protected_roots())
+    category, reason = audit.model_call("shell", {"command": call}, review_area, audit.protected_roots())
     assert category == "violation", (category, reason)
 
 
@@ -73,7 +73,7 @@ def test_unknown_dialect_pwd_read(tmp_path, review_area):
             assert proc.returncode == 0 and proc.stdout == "MOCK OTHER ANSWER\n", proc
         else:
             assert proc.returncode != 0 and not proc.stdout, proc
-    category, reason = audit.check_call("shell", {"command": command}, review_area, audit.protected_roots())
+    category, reason = audit.model_call("shell", {"command": command}, review_area, audit.protected_roots())
     assert category == "violation", (category, reason)
 
 
@@ -93,6 +93,6 @@ def test_prior_directory_cap_close_control(tmp_path, review_area, shell):
     proc = subprocess.run([shell, "-c", command], cwd=review_area,
                           capture_output=True, text=True, timeout=10)
     assert proc.returncode == 0 and proc.stdout == "MOCK OTHER ANSWER\n", proc
-    category, reason = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(command)},
+    category, reason = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(command)},
                                         review_area, audit.protected_roots())
     assert category == "suspect", (category, reason)

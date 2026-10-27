@@ -527,6 +527,16 @@ READS = [
      {'bash', 'dash', 'sh', 'zsh'}),
     ('( echo ../opus-2/draft.json > f; : ${X?}; echo x > f ) 2>/dev/null; cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
     ('set -eu 2>/dev/null; [ $# = 0 ] && cat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    # In an external command's or a subshell's redirections, it fails only that command and the
+    # shell goes on (bash, sh, zsh); dash expands a here-document in a child for any command, and
+    # zsh an external command's prefix assignments. A builtin's or a group's end the shell.
+    ('cat < "${X?}" 2>/dev/null; cat ../opus-2/draft.json', {'bash', 'sh', 'zsh'}),
+    ('(:) < "${X?}" 2>/dev/null; cat ../opus-2/draft.json', {'bash', 'sh', 'zsh'}),
+    ('cat 2>/dev/null <<E\n${X?}\nE\ncat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('read v 2>/dev/null <<E\n${X?}\nE\ncat ../opus-2/draft.json', {'dash'}),
+    ('y=${X?} /bin/echo 2>/dev/null; cat ../opus-2/draft.json', {'zsh'}),
+    ('echo < "${X?}" 2>/dev/null; cat ../opus-2/draft.json', set()),
+    ('{ cat; } < "${X?}" 2>/dev/null; cat ../opus-2/draft.json', set()),
     # A variable set in some branches only may be unset; the forms with a default or `+`, and a
     # positional parameter that is set, do not end the shell.
     ('( set -u; printf ../opus-2 > f; [ -z "${X-}" ] || y=1; : "$y"; printf x > f ); cat "$(cat f)/draft.json"',
@@ -622,6 +632,9 @@ OVER = [
     ("readonly z=1; x=$(readonly z=2; echo .) || cat \"$x./opus-2/draft.json\"", set()),
     # the grammar misreads an assignment with only a redirection, which the audit then notes
     ("command readonly y=1 2>/dev/null; y=2 2>/dev/null; cat ../opus-2/draft.json", {"zsh"}),
+    # after a parameter `set -u` finds unset, the audit goes on in every world, also where dash ends
+    # (see `may_end`); bash, sh and zsh fail only the external command here
+    ('set -u; cat < "$X" 2>/dev/null || cat ../opus-2/draft.json', {"bash", "sh", "zsh"}),
     # zsh does not run the EXIT trap after the error ends it
     ("readonly z=1; trap 'cat ../opus-2/draft.json' EXIT; z=2 2>/dev/null", {"bash", "dash", "sh"}),
     ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -u; [ -z "${X-}" ] || y=1; : "$y"; n=1',
@@ -757,7 +770,7 @@ def flagged(code: str, name: str) -> tuple[bool, bool, str]:
                 mock.patch.object(audit, "protected_roots", lambda: roots), \
                 mock.patch.object(audit, "HOME", top / "home"):
             command = " ".join([*map(shlex.quote, shell[:-1]), "-c", shlex.quote(code)])
-            verdict, why = audit.check_call("shell", {"command": command}, work, roots)
+            verdict, why = audit.model_call("shell", {"command": command}, work, roots)
     return ANSWER in proc.stdout, verdict in {"violation", "suspect"}, f"{proc.stdout}{proc.stderr}{why}"
 
 
