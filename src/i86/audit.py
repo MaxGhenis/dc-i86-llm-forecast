@@ -2,7 +2,9 @@
 
 The forecasters run on machines that also hold earlier forecasts of these questions, other runs'
 answers and the operator's notes. The prompt forbids reading local files; this audit reads each run's
-native transcript (Claude stream-json or Codex JSONL) and checks every tool call.
+native transcript (Claude stream-json or Codex JSONL) and checks every tool call. It guards against
+accidental and casual reads; a forecaster set on hiding one could make it look like a call the model
+misreads, and then only the reader of the suspect calls stands in the way.
 
 A shell call counts as local, or web, only inside the subset whose reads `exact` knows from the
 command's text (`check_call`); within its assumptions such a call reads nothing outside the run's
@@ -61,8 +63,10 @@ command's exit status (`_World`):
   Expansion options (`set -f`, `noglob`, zsh's option spellings and `emulate sh`) travel with each
   shell state through branches, functions and subshells; `emulate MODE -c command` runs the command
   in the current shell and then restores only the options. `${x:=word}` and `${x=word}` assign in the
-  current shell; failed `${x:?word}` and `${x?word}` expansions exit it, except in an external
-  command's or a subshell's redirections, where bash and zsh fail only that command (see below).
+  current shell, except in words a forked child expands (below), where the assignment is lost;
+  failed `${x:?word}` and `${x?word}` expansions exit it, except in those words and in dash's
+  here-documents, where only the command fails (see below). An upper-case name the code never set
+  may come from the environment: the audit follows `${NAME?}` on, with its value unknown.
   Bash expands a failed parameter's diagnostic word before exiting; native zsh prints its source.
   Brace expansions that duplicate substitutions with effects the audit cannot order are suspect.
 - Subshells, command substitutions, pipeline stages, background jobs, `sh -c` and wrapped commands
@@ -131,8 +135,10 @@ command's exit status (`_World`):
   shells ignore -e, and under `set -u` a parameter that may be unset (quoted or not), may end the
   shell, as `exec CMD` does; the audit follows that ending and goes on. In an external command's
   or a subshell's redirections, which bash and zsh expand in the child they fork, such a parameter
-  ends only the child, and the command fails; so does one in a here-document in dash, and one in an
-  external command's prefix assignment in zsh (measured). An option the audit does
+  ends only the child, and the command fails; so does one in an external command's prefix
+  assignment in zsh. dash expands redirections in the shell, a subshell's here-document apart, but
+  fails only the command at a here-document for any command but a special builtin (measured). An
+  option the audit does
   not follow that could change what the code reads, prints or where it runs (noclobber, keyword,
   physical, globdots and the like) makes the call suspect.
 - Writes to a readonly variable follow each shell, as measured on macOS's bash 3.2, sh and dash
@@ -422,6 +428,11 @@ AWKS = {"awk", "gawk", "mawk", "nawk"}
 # Dir.chdir('x'), chdir('x') in Perl or PHP, setwd('x') in R.
 CODE_CHDIR = re.compile(r"""(?:\b(?:os\.|process\.|Dir\.)?chdir|\bsetwd)\s*\(?\s*(['"])([^'"]+)\1""")
 WEB_TOOLS = {"WebSearch", "WebFetch"}
+# Tools that name files, checked by the paths they name (and where those lead through links).
+FILE_TOOLS = {"Read", "Edit", "MultiEdit", "Write", "NotebookEdit", "LS", "Grep", "Glob", "file_read", "file_change"}
+# Tools that read nothing: the task list, plan mode, a background Bash call's output (the call
+# itself is audited) and loading the schemas of deferred tools. Any other tool is suspect.
+QUIET_TOOLS = {"TodoWrite", "TodoRead", "BashOutput", "KillShell", "KillBash", "ExitPlanMode", "ToolSearch"}
 # This project's own public repository. It holds no answers until every run has finished.
 OWN_REPO = re.compile(r"dc-i86-llm-forecast", re.I)
 
@@ -648,6 +659,19 @@ def _reaches_sibling(path: Path, workdir: Path) -> bool:
     if len(pp) <= len(wp) or not all(fnmatch.fnmatchcase(w, x) for w, x in zip(wp, pp[: len(wp)])):
         return False
     return pp[len(wp)] != workdir.name or not _under(workdir, WORK)
+
+
+def _real(path: Path, workdir: Path) -> Path:
+    """Where a path leads at audit time, through any links; spelled from the work area where it
+    lies there, so that the checks against the work directory and its siblings apply to it."""
+    from .runners import WORK
+
+    real = Path(os.path.realpath(path))
+    for base in (workdir, WORK):
+        resolved = Path(os.path.realpath(base))
+        if _under(real, resolved):
+            return base / real.relative_to(resolved)
+    return real
 
 
 def _covers_protected(root: Path, roots: list[Path]) -> bool:
@@ -2308,6 +2332,8 @@ class _Shell:
         # redirections, and in zsh an external command's prefix assignments (see `failed_redirect`).
         self.forked_words = 0
         self.inline = False  # while the command whose redirections expand runs in the shell itself
+        self.subshell_words = False  # while the command whose redirections expand is a subshell
+        self.shnullcmd = False  # zsh's SH_NULLCMD: a command of redirections alone runs `:`
         self.out_closed = False  # whether a redirection around has closed standard output
         self.stage = None  # the pipeline stage running, while one before the last is
         # The options of the emulation `emulate MODE -c` runs code in, while it does: functions
@@ -2453,7 +2479,7 @@ class _Shell:
                 ("noglob", "shwordsplit", "lastpipe", "allexport", "localoptions", "braceexpand", "ksharrays",
                  "shoptionletters", "globsubst", "nomatch", "posix", "xpgecho", "bsdecho", "multios",
                  "posixbuiltins", "posixidentifiers", "typesettounset", "errexit", "nounset", "xtrace",
-                 "verbose")}
+                 "verbose", "shnullcmd")}
 
     def restore_options(self, options: dict) -> None:
         for name, value in options.items():
@@ -2559,10 +2585,11 @@ class _Shell:
         traps, self.exit_traps = self.exit_traps, []  # a subshell starts with no EXIT trap
         # It ends at its own unset parameters.
         forked, inline, self.forked_words, self.inline = self.forked_words, self.inline, 0, False
+        subshell_words, self.subshell_words = self.subshell_words, False
         try:
             yield
         finally:
-            self.forked_words, self.inline = forked, inline
+            self.forked_words, self.inline, self.subshell_words = forked, inline, subshell_words
             self.memo = memo
             self.exec_err, self.err_out = exec_err, err_out  # a subshell's `exec` holds in it alone
             self.run_traps(exits)
@@ -2616,6 +2643,7 @@ class _Shell:
             prefix = self.unspecial, self.caught, self.guarded
             self.posixbuiltins, self.unspecial, self.caught, self.guarded = False, frozenset(), False, False
             self.posixidentifiers = self.typesettounset = False
+            self.shnullcmd = False
             # bash 3.2 (including /bin/sh) clears OLDPWD; native zsh initializes it to PWD.
             # Both discard the parent's directory stack, even when its entries still exist.
             self.worlds = [w._replace(oldpwd=w.cwd if verb == "zsh" else None, stack=()) for w in self.worlds]
@@ -3024,13 +3052,14 @@ class _Shell:
         """A command whose redirections or here-document met an unset parameter, under `set -u` or
         at `${name?word}` (see `end_unbound`), may fail without ending the shell. bash 3.2, its sh
         and zsh 5.9 make an external command's redirections, and a subshell's, in the child they
-        fork, which alone ends (zsh also an external command's prefix assignments), and dash
-        expands a here-document in a child for any command: the command does not run, fails, and
-        the shell goes on (measured). A builtin's, a function's, a group's or a loop's redirections
-        end the shell, as do dash's at a file. The audit takes this way for any command at its
-        redirections, and for an external command in zsh at its prefix assignments. What the
-        command's output files then hold is unknown: those before the failed one are emptied, the
-        rest left."""
+        fork, which alone ends (zsh also an external command's prefix assignments). dash expands a
+        here-document in the shell, a subshell's apart, and fails any command but a special
+        builtin there. In each, the command does not run, fails, and the shell goes on (measured).
+        A builtin's, a function's, a group's or a loop's redirections end the shell, as do any
+        command's at a file in dash and a special builtin's at a here-document there.
+        The audit takes this way wherever a shell that may run the code does, and follows the
+        ending too (see `end_unbound`). What the command's output files then hold is unknown: those
+        before the failed one are emptied, the rest left."""
         self.complain(around=True)
         self.set_status(FAILED)
 
@@ -3610,6 +3639,16 @@ class _Shell:
                         return FIELD + UNKNOWN + FIELD_END
                 if name not in self.vars and name in INHERITED and self.inherit:
                     raw = self.expand("\x01" + name + "\x02")
+                elif name not in self.vars and IDENTIFIER.fullmatch(name) and self.never_set(name) == UNKNOWN:
+                    # Set or not as the shell or its environment gives it (CLAUDECODE, SHLVL, OPTARG):
+                    # the shell may end at `?` and goes on with a value the audit does not know.
+                    for c in node.named_children[1:]:
+                        self.value(c)
+                    if op.endswith("?"):
+                        self.end_unbound()
+                    elif op.endswith("="):
+                        self.set_var(name, UNKNOWN)
+                    return FIELD + UNKNOWN + FIELD_END
                 unknown = raw != UNSET and (UNKNOWN in raw or CHOICE.search(raw) or "$" in raw)
                 if unknown:
                     self.notes.append("a parameter expansion depends on an unknown variable value")
@@ -3965,11 +4004,7 @@ class _Shell:
                 for c in node.named_children:
                     self.visit(c)
         elif t == "negated_command":
-            with self.guarding():
-                for c in node.named_children:
-                    self.visit(c)
-            swap = {OK: FAILED, FAILED: OK}
-            self.worlds = [w._replace(status=swap.get(w.status, w.status)) for w in self.worlds]
+            self.negated(node)
         elif t == "if_statement":
             self.branches(self.if_clauses(node))
         elif t == "while_statement":
@@ -5028,16 +5063,29 @@ class _Shell:
     def redirected(self, node, stdin: str | None = None, outer: list | None = None) -> None:
         body = node.child_by_field_name("body")
         redirects = [c for c in node.named_children if c.type in REDIRECTS] + list(outer or [])
-        self.with_redirects(body, redirects, stdin)
+        self.with_redirects(body, redirects, stdin, node)
 
-    def with_redirects(self, body, redirects: list, stdin: str | None) -> None:
-        """A statement and the redirections written after it. In `cd .. && python3 - <<EOF` the
-        grammar attaches the here-document to the whole list; in the shell it, like any redirection
-        after a list or pipeline, belongs to the last command."""
+    def negated(self, node, redirects: list | None = None, stdin: str | None = None) -> None:
+        """`! command`, its status turned over. The grammar puts redirections written after it
+        (`! cat < f`) outside the negation; in the shell they belong to the command, so whether
+        they are made in a child is the command's to decide (see `failed_redirect`)."""
+        with self.guarding():
+            inner = node.named_children
+            for i, c in enumerate(inner):
+                if redirects and i == len(inner) - 1:
+                    self.with_redirects(c, redirects, stdin)
+                else:
+                    self.visit(c)
+        swap = {OK: FAILED, FAILED: OK}
+        self.worlds = [w._replace(status=swap.get(w.status, w.status)) for w in self.worlds]
+
+    def with_redirects(self, body, redirects: list, stdin: str | None, node=None) -> None:
+        """A statement and the redirections written after it (`node`, where it has no statement:
+        see `null_command`). In `cd .. && python3 - <<EOF` the grammar attaches the here-document to
+        the whole list; in the shell it, like any redirection after a list or pipeline, belongs to
+        the last command."""
         if body is None:
-            _, after = self.redirect(redirects, stdin)
-            for stmt in after:
-                self.visit(stmt)
+            self.null_command(node, redirects, stdin)
         elif body.type == "command":
             self.simple(body, redirects, stdin)
         elif body.type == "redirected_statement":
@@ -5046,40 +5094,115 @@ class _Shell:
             self.and_or(body, redirects, stdin)
         elif body.type == "pipeline":
             self.pipeline(self._stages(body), tail=redirects)
+        elif body.type == "negated_command":
+            self.negated(body, redirects, stdin)
         else:
-            outs: list[tuple[str, bool]] = []
-            ends = self.child_ends
-            with self.redirecting(body.type != "subshell"):
-                data, after = self.redirect(redirects, stdin, outs)
-            fails = self.child_ends > ends  # see `failed_redirect`
-            before, self.output = self.output, ""
-            diverted, emits, err, mark = self.diverted, self.emits, self.err_out, self.jumped
-            closed, tees = self.out_closed, self.tees()  # MULTIOS as the redirections are made
-            trims = self.trims
-            if outs:
-                self.diverted = None
-                self.out_closed = any(target == CLOSED for target, _ in outs)
-            self.err_out = _err_state(redirects, err)
-            noisy = self.noisy
-
-            def run():
+            def run(data):
                 if body.type == "while_statement":
                     self.while_loop(body, data)
                 else:
                     self.visit(body)
-            try:
-                self.either(run, self.failed_redirect) if fails else run()
-            finally:
-                if outs:
-                    self.diverted, self.out_closed = diverted, closed
-                if self.err_out and not err and self.noisy > noisy:
-                    self.output = None  # diagnostics inside reached what it printed
-                self.err_out = err or self.exec_err
-            own = self.output
-            self.carry(mark, before, not outs and not after and self.diverted is None and not self.stray)
-            self.write_outs(outs, None if fails else own, tees, self.stage is not None and self.stage == body.parent)
-            self.emit(before, own, outs, after, self.stage is not None and self.stage == body.parent, body,
-                      bool(outs) or self.emits == emits, tees, False if self.trims == trims else None)
+            self.around_redirects(body, body.parent, redirects, stdin, run, body.type != "subshell",
+                                  body.type == "subshell")
+
+    def around_redirects(self, node, unit, redirects: list, stdin: str | None, run, inline: bool,
+                         subshell: bool = False) -> None:
+        """Make `redirects` and run `run(data)` inside them, `data` being what they feed standard
+        input; `node` is what runs, `unit` the statement they belong to (a pipeline's stage, say),
+        and `inline` and `subshell` say where its redirections expand (see `redirecting`)."""
+        outs: list[tuple[str, bool]] = []
+        ends = self.child_ends
+        with self.redirecting(inline, subshell):
+            data, after = self.redirect(redirects, stdin, outs)
+        fails = self.child_ends > ends  # see `failed_redirect`
+        before, self.output = self.output, ""
+        diverted, emits, err, mark = self.diverted, self.emits, self.err_out, self.jumped
+        closed, tees = self.out_closed, self.tees()  # MULTIOS as the redirections are made
+        trims = self.trims
+        if outs:
+            self.diverted = None
+            self.out_closed = any(target == CLOSED for target, _ in outs)
+        self.err_out = _err_state(redirects, err)
+        noisy = self.noisy
+        try:
+            self.either(lambda: run(data), self.failed_redirect) if fails else run(data)
+        finally:
+            if outs:
+                self.diverted, self.out_closed = diverted, closed
+            if self.err_out and not err and self.noisy > noisy:
+                self.output = None  # diagnostics inside reached what it printed
+            self.err_out = err or self.exec_err
+        own = self.output
+        piped = self.stage is not None and self.stage == unit
+        self.carry(mark, before, not outs and not after and self.diverted is None and not self.stray)
+        self.write_outs(outs, None if fails else own, tees, piped)
+        self.emit(before, own, outs, after, piped, node, bool(outs) or self.emits == emits, tees,
+                  False if self.trims == trims else None)
+
+    def null_command(self, node, redirects: list, stdin: str | None) -> None:
+        """Redirections with no command (`< f`, `> f`). bash, sh and dash make them in the shell and
+        run nothing. zsh runs a command with them: `:`, in the shell, where it emulates sh or ksh
+        (SH_NULLCMD); otherwise, forked, $READNULLCMD (`more` unless set) for a lone `<` and
+        $NULLCMD (`cat`) for any other. Where that is empty or unset it ends the shell, with no
+        redirection made (measured on zsh 5.9). `more` copies its input as cat does, its output not
+        being a terminal. Either variable may come from the environment (see `never_set`)."""
+        def verb(name: str) -> None:
+            if name == ":":
+                self.around_redirects(node, node, redirects, stdin, lambda data: self.set_status(OK), True)
+            else:
+                self.around_redirects(node, node, redirects, stdin,
+                                      lambda data: self.command(["cat" if name == "more" else name], data), False)
+
+        def zsh() -> None:
+            if self.shnullcmd is not False:
+                if self.shnullcmd is None:
+                    self.either(lambda: verb(":"), native)
+                else:
+                    verb(":")
+                return
+            native()
+
+        def native() -> None:
+            lone = len(redirects) == 1 and redirects[0].type == "file_redirect" and \
+                "".join(_text(c) for c in redirects[0].children if not c.is_named) == "<" and \
+                all(_text(c) in {"", "0"} for c in redirects[0].named_children if c.type == "file_descriptor")
+            names = ["READNULLCMD", "NULLCMD"] if lone else ["NULLCMD"]
+            values = [self.vars.get(n, {"NULLCMD": "cat", "READNULLCMD": "more"}[n]
+                                    if self.never_set(n) == UNSET else UNKNOWN) for n in names]
+            if any(UNKNOWN in v or "$" in v for v in values):
+                self.notes.append("a redirection with no command, which zsh runs with a NULLCMD the audit cannot tell")
+
+                def unknown(data) -> None:
+                    self.output = None
+                    self.set_status(MAYBE)
+                self.around_redirects(node, node, redirects, stdin, unknown, False)
+                return
+            if CHOICE.search(values[0]) or len(values) > 1 and CHOICE.search(values[1]):
+                runs = {}
+                first = _choices(values[0])
+                second = _choices(values[1]) if len(values) > 1 else [UNSET]
+                for a in first:
+                    for b in second:
+                        c = a if a not in {"", UNSET} else b
+                        runs[c] = None
+                self.either(*(lambda c=c: run_with(c) for c in runs))
+                return
+            run_with(values[0] if values[0] not in {"", UNSET} else values[1] if len(values) > 1 else UNSET)
+
+        def run_with(name: str) -> None:
+            if name in {"", UNSET}:
+                self.complain()
+                self.leave()  # zsh: redirection with no command
+            else:
+                verb(name)
+
+        kinds = self.kinds()
+        if "zsh" not in kinds:
+            verb(":")
+        elif kinds == ["zsh"]:
+            zsh()
+        else:
+            self.either(zsh, lambda: verb(":"))
 
     def redirect(self, redirects: list, stdin: str | None, outs: list | None = None,
                  ifs: str | None | bool = False) -> tuple[str | None, list]:
@@ -5097,6 +5220,7 @@ class _Shell:
             if outs is not None:
                 outs.append((TANGLED, False))
         for r in redirects:
+            made = err  # standard error as the redirections before this one left it
             if r.type == "file_redirect":
                 op = "".join(_text(c) for c in r.children if not c.is_named)
                 fd = next((_text(c) for c in r.named_children if c.type == "file_descriptor"), "")
@@ -5130,7 +5254,7 @@ class _Shell:
                     dest = named[-1] if named else None
                 if dest is None:
                     continue
-                with self.child_words():
+                with self.child_words(), self.erring(made):
                     target = self.expand(self.value(dest))
                 if op.endswith("&") and (target.isdigit() or target == "-"):
                     # Duplicates or closes a file descriptor: `>&2` sends standard output elsewhere.
@@ -5148,7 +5272,7 @@ class _Shell:
                 if outs is not None and op in {">", ">>", ">|", "&>", "&>>", ">&"} and fd in {"", "1"}:
                     outs.append((target, op.endswith(">>")))
             elif r.type == "heredoc_redirect":
-                with self.child_words(here=True):
+                with self.child_words(here=True), self.erring(made):
                     stdin = self.heredoc(r)
                 for c in r.named_children:
                     if c.type == "file_redirect":
@@ -5158,49 +5282,97 @@ class _Shell:
                         if c.type == "pipeline" and c.children and c.children[0].type == "|&":
                             self.notes.append("a here-document's command sends standard error down `|&`")
             elif r.type == "herestring_redirect":
-                with self.child_words():
+                with self.child_words(), self.erring(made):
                     stdin = self.herestring(list(r.named_children), ifs)
         return stdin, after
 
     @contextmanager
-    def child_words(self, here: bool = False):
-        """Expanding a redirection's word, which bash and zsh expand in the child a command forks
-        (see `forked_words`), unless the command runs in the shell (`inline`); dash expands a file's
-        or a here-string's before it forks, and a here-document (`here`) in a child for any command."""
-        kinds = self.kinds()
-        forks = here and "dash" in kinds or not self.inline and (here or kinds != ["dash"])
-        self.forked_words += forks
+    def erring(self, err: bool):
+        """Expanding a redirection's word, with standard error where the command's redirections
+        before it sent it (`: 2>&1 < "${x?}"` prints the message on standard output)."""
+        saved, self.err_out = self.err_out, err
         try:
             yield
+        finally:
+            self.err_out = saved
+
+    @contextmanager
+    def child_words(self, here: bool = False):
+        """Expanding a redirection's word. bash and zsh expand it in the child a command forks,
+        unless the command runs in the shell (`inline`). dash expands a file's in the shell, and a
+        here-document's (`here`) there too except for a subshell, but fails the command without
+        ending at a here-document for any but a special builtin (measured). Where the shell may go
+        on (`forked_words`) the expansion's assignments stay only where it ran in the shell (see
+        `in_child`)."""
+        kinds = self.kinds()
+        forks = here and "dash" in kinds or not self.inline and (here or kinds != ["dash"])
+        child = [k for k in kinds if not self.inline and (k != "dash" or here and self.subshell_words)]
+        self.forked_words += forks
+        try:
+            with self.in_child(child):
+                yield
         finally:
             self.forked_words -= forks
 
     @contextmanager
-    def redirecting(self, inline: bool):
+    def in_child(self, child: list[str]):
+        """Expansions that the shells in `child` make in a forked child: what they assign
+        (`${x:=word}`, `$((x=1))`) is lost there and stays in the other shells that may run the code."""
+        if not child:
+            yield
+            return
+        vars, exports = dict(self.vars), dict(self.exports)
+        yield
+        every = set(child) >= set(self.kinds())
+        for name in set(vars) | set(self.vars):
+            old, new = vars.get(name), self.vars.get(name)
+            if old == new:
+                continue
+            if every and old is None:
+                self.vars.pop(name, None)
+            elif every:
+                self.vars[name] = old
+            else:
+                never = self.never_set(name) if IDENTIFIER.fullmatch(name) else ""
+                values = list(dict.fromkeys(c for v in (old, new) for c in _choices(never if v is None else v)))
+                self.vars[name] = values[0] if len(values) == 1 else "\x06" + "\x05".join(values) + "\x07"
+        for name in set(exports) | set(self.exports):
+            if exports.get(name) != self.exports.get(name):
+                if every and name not in exports:
+                    self.exports.pop(name, None)
+                elif every:
+                    self.exports[name] = exports[name]
+                else:
+                    self.exports[name] = "maybe"
+
+    @contextmanager
+    def redirecting(self, inline: bool, subshell: bool = False):
         """Expanding the redirections of a command that runs in the shell itself (`inline`: a
         builtin, a function, a group, a loop), or that may fork (an external command, a subshell)."""
-        saved, self.inline = self.inline, inline
+        saved = self.inline, self.subshell_words
+        self.inline, self.subshell_words = inline, subshell
         try:
             yield
         finally:
-            self.inline = saved
+            self.inline, self.subshell_words = saved
 
     def runs_inline(self, words: list[str], assigns: list) -> bool:
         """Whether a simple command with these words runs in the shell in every shell it may be
-        (see `inline_verb`). One with only redirections does in bash, sh and dash; zsh runs `cat`
-        (its NULLCMD) unless the command also assigns (measured)."""
+        (see `inline_verb`). One with only assignments and redirections does (measured; zsh runs a
+        command for redirections alone, see `null_command`)."""
         if not words:
             return bool(assigns) or "zsh" not in self.kinds()
         return self.inline_verb(_alt(self.expand(words[0]))[0], self.kinds())
 
     def inline_verb(self, verb: str, kinds: list[str]) -> bool:
         """Whether `verb` runs in the shell in each of `kinds`: a function every branch defines, or
-        a builtin of each (zsh's `command` runs an external one); not an alias."""
+        a builtin of each (zsh's `command` runs an external one). Not an alias, which the shell
+        expands before it looks for a function, and which may or may not expand (see `command`)."""
+        if verb in self.aliases:
+            return False
         defined = self.functions.get(verb)
         if defined is not None and None not in defined:
             return True
-        if verb in self.aliases:
-            return False
         tables = {"zsh": ZSH_BUILTINS - {"command"}}
         return all(verb in tables.get(kind, BASH_BUILTINS) for kind in kinds)
 
@@ -5476,7 +5648,8 @@ class _Shell:
                     self.forked_words += forked
             self.forked_words += forked
             try:
-                self.with_assignments(assigns, verb, run)
+                with self.in_child(["zsh"] if forked else []):
+                    self.with_assignments(assigns, verb, run)
             finally:
                 self.forked_words -= forked
         kept = False if self.trims == trims else self.kept  # see `kept`: unknown when nested
@@ -6437,7 +6610,7 @@ class _Shell:
                    "posixbuiltins": ("posixbuiltins", True), "posixidentifiers": ("posixidentifiers", True),
                    "typesettounset": ("typesettounset", True), "errexit": ("errexit", True),
                    "nounset": ("nounset", True), "unset": ("nounset", False), "xtrace": ("xtrace", True),
-                   "verbose": ("verbose", True)}
+                   "verbose": ("verbose", True), "shnullcmd": ("shnullcmd", True)}
         if name.startswith("no") and name not in options and name[2:] in options:
             name, enabled = name[2:], not enabled
         if name not in options:
@@ -6505,6 +6678,7 @@ class _Shell:
             self.multios = mode == "zsh"
             self.posixbuiltins = mode != "zsh"
             self.posixidentifiers = self.typesettounset = mode != "zsh"
+            self.shnullcmd = mode != "zsh"
         else:
             self.notes.append("shell emulation the audit cannot model")
         if "L" in pre:
@@ -7655,26 +7829,65 @@ class _Shell:
                 self.may_end()  # the command replaces the shell, which ends with it
 
 
-def _shell(command: str, workdir: Path, files: dict | None = None) -> _Shell:
+def _shell(command: str, workdir: Path, files: dict | None = None, place: dict | None = None) -> _Shell:
     """Read the command twice: the first pass, taking every cd as one that may have failed, finds
     the directories the command makes wherever it may be (see `_Shell.later`). `files`: what earlier
-    calls wrote, by path (see `_Shell.files`), updated with what this command writes."""
+    calls wrote, by path (see `_Shell.files`), updated with what this command writes. `place`: where
+    the command may start, as `_next_place` left it for the call before ({} for the work directory),
+    updated with where the next call may start."""
     files = {} if files is None else files
-    first = _Shell(workdir)
-    first.doubt = True
-    first.files = dict(files)
-    first.run(command)
-    shell = _Shell(workdir)
-    shell.later = first.made_ever
-    shell.wrote_later = first.wrote_ever
-    shell.files = dict(files)
-    shell.run(command)
+    passes = []
+    for doubt in (True, False):
+        shell = _Shell(workdir)
+        if place:
+            shell.set_worlds(list(place["worlds"]))
+            shell.known = place["known"]
+        if doubt:
+            shell.doubt = True
+        else:
+            shell.later = passes[0].made_ever
+            shell.wrote_later = passes[0].wrote_ever
+        shell.files = dict(files)
+        shell.run(command)
+        passes.append(shell)
     shell.run_traps(0)
+    if place is not None:
+        place.update(_next_place(shell, workdir, place))
     shell.finish(0)
     shell.flush()  # bash's exit
     files.clear()
     files.update(shell.files)
     return shell
+
+
+def _next_place(shell: _Shell, workdir: Path, place: dict) -> dict:
+    """Where the next Claude Code Bash call may start, once `shell` has run (before `finish`): where
+    it ended or exited, and, if it may have exited, where it started (the exit can cut short Claude
+    Code's record of where the shell is). Claude Code moves a shell that ends outside the directories
+    it allows back to where the session started (2.1.308's Bash tool), the work directory here; the
+    audit does not know which other directories it allows, so a place outside the work directory
+    keeps both."""
+    ended = [w for entry in shell.exits for w in entry[2]]
+    worlds = [*shell.worlds, *ended]
+    if ended or not worlds:
+        worlds += place.get("worlds") or [_World(workdir, None)]
+    if any(not _under(w.cwd, workdir) for w in worlds):
+        worlds.append(_World(workdir, None))
+    # A new shell: no $OLDPWD of the command's, no pushd stack.
+    worlds = list({(w.cwd, w.primary): _World(w.cwd, None, (), MAYBE, w.primary) for w in worlds}.values())
+    return {"worlds": worlds, "known": shell.known}
+
+
+def _shell_command(inp) -> str | None:
+    """A shell call's command as text: a string, or a list of strings taken as one command's argument
+    vector (joined with shlex.join, which a shell splits back into the same words); None for anything
+    else (a missing or null command, or another type), which the audit cannot read."""
+    command = inp.get("command") if isinstance(inp, dict) else None
+    if isinstance(command, str):
+        return command
+    if isinstance(command, list) and command and all(isinstance(w, str) for w in command):
+        return shlex.join(command)
+    return None
 
 
 def shell_paths(command: str, workdir: Path) -> tuple[list[Path], list[tuple[str, str, Path]], list[str]]:
@@ -7696,7 +7909,7 @@ def _tool_calls(line: dict):
         return  # Codex repeats an item as started and completed; count it once.
     kind = item.get("type")
     if kind == "command_execution":
-        yield "shell", {"command": item.get("command", "")}
+        yield "shell", {"command": item.get("command")}
     elif kind in {"file_read", "file_change"}:
         yield kind, item
     elif kind == "mcp_tool_call":
@@ -7711,27 +7924,31 @@ def _tool_calls(line: dict):
 
 
 def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: dict | None = None,
-               start=...) -> tuple[str, str]:
+               start=..., place: dict | None = None) -> tuple[str, str]:
     """('web' | 'violation' | 'suspect' | 'local' | 'other', reason) for one tool call: the shell
     model's verdict (`model_call`), except that a shell call it finds local or web is suspect unless
     it lies in the subset whose reads `exact.outside` knows exactly. `start`: where a shell call may
     start (see `exact.outside`); by default the work directory for Claude Code's Bash, and unknown
-    for Codex's shell, which may run a command in a directory its transcript does not record."""
-    verdict, why = model_call(tool, inp, workdir, roots, files)
+    for Codex's shell, which may run a command in a directory its transcript does not record.
+    `place`: where the model takes a shell call to start (see `model_call`)."""
+    verdict, why = model_call(tool, inp, workdir, roots, files, place)
     if tool in {"shell", "Bash"} and verdict in {"local", "web"}:
         if start is ...:
             start = [workdir] if tool == "Bash" else None
-        beyond, _ = exact.outside(str(inp.get("command", "")), workdir, start)
+        beyond, _ = exact.outside(_shell_command(inp), workdir, start)
         if beyond:
             return "suspect", f"{EXACT_REASON}: {beyond}"
     return verdict, why
 
 
-def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: dict | None = None) -> tuple[str, str]:
+def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: dict | None = None,
+               place: dict | None = None) -> tuple[str, str]:
     """The shell model's verdict on one tool call: ('web' | 'violation' | 'suspect' | 'local' |
     'other', reason). `files`: what earlier calls in the transcript wrote, by path, so that a script
     written by one call and run by a later one is read as it was written; updated with what this
-    call writes."""
+    call writes. `place`: for a shell call, where it may start ({} or None: the work directory),
+    updated with where the next may start (see `_next_place`). An input the audit cannot read (not
+    an object, or a shell call without a command it can read) is suspect."""
     text = json.dumps(inp) if not isinstance(inp, str) else inp
     outside_urls = URL.sub("", text)
     if tool.startswith("mcp:") or tool.startswith("mcp__"):
@@ -7741,17 +7958,27 @@ def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: di
     if tool in WEB_TOOLS or tool == "web_search":
         if OWN_REPO.search(text):
             return "suspect", "opens this project's repository on the web"
+        local = next((why for u in URL.findall(text) if (why := exact.remote_url(u.rstrip("\\"), globs=False)) is not None), None)
+        if local:
+            return "suspect", f"a web call that may reach this machine or its network: {local}"
         return "web", ""
+    if not isinstance(inp, dict):
+        return "suspect", "a tool input the audit cannot read"
     paths, searches, notes, weak, alt, alt_searches, unknown = [], [], [], [], [], [], []
     literal_paths: set[Path] = set()
     if tool in {"shell", "Bash"}:
-        shell = _shell(inp.get("command", ""), workdir, files)
+        command = _shell_command(inp)
+        if command is None:
+            if place is not None:
+                place.update(worlds=[_World(workdir, None)], known=False)
+            return "suspect", "a shell call without a command the audit can read"
+        shell = _shell(command, workdir, files, place)
         paths, searches, notes, weak = shell.paths, shell.searches, shell.notes, shell.code_paths
         # Paths and searches from where the shell would be had a cd to a missing directory failed.
         alt, alt_searches = shell.alt_paths, shell.alt_searches
         unknown = shell.unknown_paths
         literal_paths = shell.literal_paths
-    elif tool in {"Read", "Edit", "Write", "NotebookEdit", "LS"}:
+    elif tool in {"Read", "Edit", "MultiEdit", "Write", "NotebookEdit", "LS"}:
         p = _resolve(str(inp.get("file_path") or inp.get("path") or inp.get("notebook_path") or ""), workdir,
                      bare=True)
         paths = [p] if p else []
@@ -7762,7 +7989,7 @@ def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: di
                 new = str(inp.get("new_string") or "")
                 files[p] = tuple(None if a is None else a.replace(inp["old_string"], new, -1 if inp.get("replace_all") else 1)
                                  for a in files[p])
-            elif tool in {"Edit", "NotebookEdit"}:
+            elif tool in {"Edit", "MultiEdit", "NotebookEdit"}:
                 files.pop(p, None)  # changed in a way the audit does not follow: read from disk
     elif tool in {"Grep", "Glob"}:
         base = _resolve(str(inp.get("path") or "."), workdir, bare=True) or workdir
@@ -7772,10 +7999,17 @@ def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: di
         if pattern:
             paths += _expand(_normpath(base / pattern))
     elif tool in {"file_read", "file_change"}:
-        for key in ("path", "file_path"):
-            if inp.get(key):
-                p = _resolve(str(inp[key]), workdir, bare=True)
+        named = [inp.get(key) for key in ("path", "file_path")]
+        changes = inp.get("changes")
+        named += [c.get("path") for c in changes if isinstance(c, dict)] if isinstance(changes, list) else []
+        for name in named:
+            if name:
+                p = _resolve(str(name), workdir, bare=True)
                 paths += [p] if p else []
+    if tool in FILE_TOOLS:
+        # Through a link in the work directory (`up -> ..`), a path there may lead anywhere.
+        paths += [r for p in list(paths) if (r := _real(p, workdir)) != p]
+        searches += [(verb, kind, r) for verb, kind, base in list(searches) if (r := _real(base, workdir)) != base]
     for p in paths:
         for root in roots:
             if _under(p, root) or (p not in literal_paths and _pattern_hits(p, root)):
@@ -7818,22 +8052,54 @@ def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: di
                and (id(p) not in weak_ids or p.exists())]
     if outside and TERMS.search(_mask_workdir(outside_urls, workdir)):
         return "suspect", "a path outside the work directory next to a term from these questions"
+    if tool in FILE_TOOLS:
+        beyond = next((p for p in paths if not _under(p, workdir)), None)
+        if beyond is not None:
+            return "suspect", f"a file outside the work directory: {beyond}"
     if tool in {"shell", "Bash"} and URL.search(text) and re.search(r"\b(?:curl|wget)\b", text):
         return "web", ""
-    if paths or tool in {"shell", "Bash", "Read", "Grep", "Glob", "LS", "file_read", "file_change"}:
+    if tool in {"shell", "Bash"} or tool in FILE_TOOLS:
         return "local", ""
-    return "other", ""
+    if tool in QUIET_TOOLS:
+        return "other", ""
+    return "suspect", f"a tool the audit does not know ({tool})"
 
 
 def audit_transcript(path: Path, workdir: str) -> dict:
     work = Path(workdir) if workdir else Path("/nonexistent-workdir")
     roots = protected_roots()
     files: dict[Path, tuple] = {}  # what the run's calls wrote so far, by path (see `_Shell.files`)
-    # Where the next Claude Code Bash call may start: it starts where the last one ended.
+    # Where the next Claude Code Bash call may start: it starts where the last one ended, as the
+    # subset (`exact.outside`) and as the model (`_next_place`) follow it.
     bash_start: list[Path] | None = [work]
+    bash_place: dict = {}
     events = calls = web = 0
     lists: dict[str, list] = {"violations": [], "suspect": [], "local_calls": []}
     urls: list[str] = []
+    # Codex items started and not yet completed, by id: one that never completes (a killed run)
+    # ran all the same, and is audited as it started. An item without an id counts at completion.
+    started: dict = {}
+
+    def audit_calls(line: dict) -> None:
+        nonlocal calls, web, bash_start
+        for tool, inp in _tool_calls(line):
+            calls += 1
+            verdict, why = check_call(tool, inp, work, roots, files,
+                                      **({"start": bash_start, "place": bash_place} if tool == "Bash" else {}))
+            if tool == "Bash":
+                command = _shell_command(inp)
+                bash_start = None if command is None else exact.outside(command, work, bash_start)[1]
+            text = json.dumps(inp)
+            if verdict == "web":
+                web += 1
+                found = URL.findall(text)
+                urls.extend(found or [f"search: {inp.get('query', '') if isinstance(inp, dict) else ''}"[:200]])
+                continue
+            record = {"tool": tool, "call": text[:4000], **({"why": why} if why else {})}
+            key = {"violation": "violations", "suspect": "suspect", "local": "local_calls"}.get(verdict)
+            if key:
+                lists[key].append(record)
+
     for raw in path.read_text(errors="replace").splitlines():
         try:
             line = json.loads(raw)
@@ -7842,22 +8108,15 @@ def audit_transcript(path: Path, workdir: str) -> dict:
         if not isinstance(line, dict):
             continue
         events += 1
-        for tool, inp in _tool_calls(line):
-            calls += 1
-            verdict, why = check_call(tool, inp, work, roots, files,
-                                      **({"start": bash_start} if tool == "Bash" else {}))
-            if tool == "Bash":
-                _, bash_start = exact.outside(str(inp.get("command", "")), work, bash_start)
-            text = json.dumps(inp)
-            if verdict == "web":
-                web += 1
-                found = URL.findall(text)
-                urls += found or [f"search: {inp.get('query', '')}"[:200]]
-                continue
-            record = {"tool": tool, "call": text[:4000], **({"why": why} if why else {})}
-            key = {"violation": "violations", "suspect": "suspect", "local": "local_calls"}.get(verdict)
-            if key:
-                lists[key].append(record)
+        item = line.get("item")
+        if isinstance(item, dict) and item.get("id") is not None:
+            if line.get("type") == "item.started":
+                started[json.dumps(item.get("id"))] = line
+            elif line.get("type") == "item.completed":
+                started.pop(json.dumps(item.get("id")), None)
+        audit_calls(line)
+    for line in started.values():
+        audit_calls({**line, "type": "item.completed"})
     return {
         "events": events,
         "tool_calls": calls,

@@ -84,6 +84,9 @@ uv pip install -e ".[dev]"
 .venv/bin/pytest -q
 ```
 
+The audit's tests compare its shell model with macOS's shells and BSD tools, so the suite assumes
+macOS (with rg from Homebrew). GitHub Actions runs it on macOS for every pull request.
+
 Dispatch forecasters with any of three backends:
 
 ```bash
@@ -122,7 +125,8 @@ every run has finished: the `claude` and `manual` backends write to a staging di
 `collect` copies answers in only when no run of any backend is still going. `prepare`, `abandon`,
 `recover` and `collect` take one lock on the staging area, and `collect` checks the list of runs again under it
 before copying anything, so a run dispatched while it works holds it back. The lock also holds
-between threads of one process, and a process forked while it is held waits for it like any other.
+between threads of one process. A forked child does not inherit it: the child waits for it like any
+other process, and only the rest of a use it was forked inside runs without it.
 Subfleet reports a run lost when processes the agent started outlive it; if the agent itself exited
 cleanly with one successful final message, `recover` records that attempt and the SHA-256 of its whole
 transcript, and `collect` takes the answer only if the transcript is unchanged. The report flags
@@ -144,7 +148,8 @@ knows exactly (`src/i86/exact.py`):
 - commands are joined by `;`, `&&`, `||`, `|` and newlines;
 - each command is one of a fixed set of read-only tools (`cat`, `head`, `tail`, `wc`, `sort`, `uniq`,
   `cut`, `tr`, `ls`, `grep`, `rg`, `sed` printing or deleting numbered lines, `jq` without modules,
-  `echo`, `printf`, `true`, `false`, `:`, `pwd`, `curl` on http(s) URLs, `find` with listed
+  `echo`, `printf`, `true`, `false`, `:`, `pwd`, `curl` on http(s) URLs naming another machine by a
+  dotted name, without following redirects, `find` with listed
   primaries), with options from its list placed before its operands; or `cd DIR` alone in its
   pipeline; or `bash`, `zsh`, `sh` or `dash` with `-c` running one such command;
 - every file a tool may open resolves, from every place the shell may be, inside the run's work
@@ -152,16 +157,24 @@ knows exactly (`src/i86/exact.py`):
 
 A Codex shell call may run in a directory its transcript does not record, so there only absolute
 paths in the work directory count; a Claude Code Bash call starts where the previous one ended. The
-subset takes the tools to be the standard ones (or, for `grep` and `find`, the ugrep and bfs that
-Claude Code's shell runs in their place), and the environment to set none of the variables, options
-and files that change them (`exact.py` lists them). Any other shell call is suspect.
+subset takes the tools found through the shell's PATH (a login shell's included) to be the standard
+ones (or, for `grep` and `find`, the ugrep and bfs that Claude Code's shell may run in their place, as
+its version 2.1.308 does); the environment, startup files included, to set none of the variables,
+options, aliases and files that change them (`CDPATH`, the proxy variables curl reads, a `.curlrc`, a
+module in jq's search path: `exact.py` lists them); and a URL's host name to name a machine other
+than this one, outside its network.
+Any other shell call is suspect.
 
 A shell model then reads every call, in the subset or not, with tree-sitter's bash grammar. It tracks
 the places the shell may be, statuses, variables, functions, here-documents and what commands print,
 for bash, zsh, sh and dash, and resolves the paths each command may open. It decides which calls
 exclude a run and gives the reasons for suspect ones. It is not exact: every review found reads it
 misses (round 11 reported 36), so it no longer decides that a shell call is local; the subset does.
-Other tools (Read, Grep, Glob and the like) are checked by the paths they name.
+Other tools (Read, Grep, Glob and the like) are checked by the paths they name and where those lead
+through links at audit time; one that reaches outside the work directory is suspect, and so is any
+tool the audit does not know (sub-agents, skills), other than the task list, a background Bash
+call's output and loading deferred tools' schemas. A Codex call whose item started but never
+completed is audited as it started.
 
 Running a file by path counts as reading it, and so does a `file://` URL. These exclude the run:
 - a path resolved from a main place in, or text naming, the repository, the staging area, another
@@ -178,8 +191,10 @@ or search from an alternative place, or with a part the audit cannot work out, t
 protected place, a command the parser cannot fully read, a path outside the work directory next to a
 term from these questions, a web call that opens this repository (it holds no answers until every run
 has finished), and sub-agent calls. The summary counts them per run. A run with no parseable
-transcript fails the audit, and `simulate` pools only runs that pass. `--allow-unaudited` admits manual
-runs, which have no transcript. Whether a directory exists, and whether a path holds a link, is judged
+transcript fails the audit, and `simulate` pools only runs that pass with no suspect call: a suspect
+call may have read anything, so after reading a run's calls in its `audit.json`,
+`--accept-suspect <label>` admits it. `--allow-unaudited` admits manual runs, which have no
+transcript. Whether a directory exists, and whether a path holds a link, is judged
 at audit time.
 
 Tests check both parts against the real shells. `tests/test_audit_exact.py` runs generated programs
@@ -194,8 +209,10 @@ every review's inputs.
 output, readonly writes and expansions against the shells on generated and measured programs.
 Within its assumptions, a call in the subset reads nothing outside the work directory but what the
 tools load to run (libraries, locale data, user names) and the ignore files rg and ugrep consult,
-which only choose among the files they search. A call outside it is
-suspect, and whether it read anything is for a reader to judge from the call and the model's reasons.
+which only choose among the files they search. A call outside it is suspect, and whether it read
+anything is for a reader to judge from the call and the model's reasons before the run is pooled.
+The audit catches accidental and casual reads. A forecaster set on hiding one could make the read
+look like a call the model misreads, and then only the reader of the suspect calls stands in the way.
 
 ## Files
 

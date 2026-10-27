@@ -169,9 +169,11 @@ def cmd_audit(args) -> int:
     return worst
 
 
-def accepted_runs(g, prompt_sha: str, allow_unaudited: bool = False, accept_prior: set[str] = frozenset()) -> dict:
-    """Runs with a parsed response, the current prompt's hash, a passing audit and no prior context
-    about these questions (unless the operator read it and listed the run in `accept_prior`)."""
+def accepted_runs(g, prompt_sha: str, allow_unaudited: bool = False, accept_prior: set[str] = frozenset(),
+                  accept_suspect: set[str] = frozenset()) -> dict:
+    """Runs with a parsed response, the current prompt's hash, a passing audit with no suspect calls
+    and no prior context about these questions. The operator may read a run's suspect calls, or its
+    prior context, and list it in `accept_suspect` or `accept_prior` to pool it anyway."""
     runs = {}
     for d in run_dirs():
         resp = d / "response.json"
@@ -191,6 +193,11 @@ def accepted_runs(g, prompt_sha: str, allow_unaudited: bool = False, accept_prio
         if result is not None and not result.get("passed"):
             print(f"excluding {d.name}: audit failed", file=sys.stderr)
             continue
+        suspect = result.get("suspect", []) if result is not None else []
+        if suspect and d.name not in accept_suspect:
+            print(f"excluding {d.name}: {len(suspect)} suspect call(s) (read them in runs/{d.name}/audit.json; "
+                  f"--accept-suspect {d.name} to include)", file=sys.stderr)
+            continue
         fc = parse(g, json.loads(resp.read_text()))
         disclosed = str(fc.forecaster.get("prior_context") or "")
         if discloses(disclosed) and d.name not in accept_prior:
@@ -203,7 +210,7 @@ def accepted_runs(g, prompt_sha: str, allow_unaudited: bool = False, accept_prio
 
 def cmd_simulate(args) -> int:
     g = graph_mod.load()
-    runs = accepted_runs(g, _prompt_sha(), args.allow_unaudited, set(args.accept_prior))
+    runs = accepted_runs(g, _prompt_sha(), args.allow_unaudited, set(args.accept_prior), set(args.accept_suspect))
     if not runs:
         raise SystemExit("no accepted runs: dispatch, collect and check first")
     result = pool(g, runs, n=args.n, seed=args.seed)
@@ -264,6 +271,8 @@ def main(argv=None) -> int:
                    help="pool manual runs, which have no transcript to audit")
     s.add_argument("--accept-prior", action="append", default=[], metavar="LABEL",
                    help="pool this run although its prior_context mentions these questions (read it first)")
+    s.add_argument("--accept-suspect", action="append", default=[], metavar="LABEL",
+                   help="pool this run although its audit lists suspect calls (read them first)")
     pr = sub.add_parser("prereg")
     pr.add_argument("--no-stamp", action="store_true")
     args = ap.parse_args(argv)

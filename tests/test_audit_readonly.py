@@ -520,30 +520,30 @@ READS = [
     ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -e; ! { true; }; n=1', set()),
     ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -e; ! { false; }; n=1', set()),
     ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -e; ( ! true ); n=1', {'bash', 'dash', 'sh', 'zsh'}),
-    # `set -u`: expanding an unset parameter ends the shell, quoted or not; so does `${X?}`.
+    # `set -u`: expanding an unset parameter ends the shell, quoted or not; so does `${x?}`.
     ('( set -u; echo ../opus-2/draft.json > f; : "$X"; echo x > f ) 2>/dev/null; cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
     ('( set -o nounset; echo ../opus-2/draft.json > f; y=$X; echo x > f ) 2>/dev/null; cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
     ('( set -u; echo ../opus-2/draft.json > f; echo "$1" > /dev/null; echo x > f ) 2>/dev/null; cat "$(cat f)"',
      {'bash', 'dash', 'sh', 'zsh'}),
-    ('( echo ../opus-2/draft.json > f; : ${X?}; echo x > f ) 2>/dev/null; cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( echo ../opus-2/draft.json > f; : ${x?}; echo x > f ) 2>/dev/null; cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
     ('set -eu 2>/dev/null; [ $# = 0 ] && cat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
     # In an external command's or a subshell's redirections, it fails only that command and the
     # shell goes on (bash, sh, zsh); dash expands a here-document in a child for any command, and
     # zsh an external command's prefix assignments. A builtin's or a group's end the shell.
-    ('cat < "${X?}" 2>/dev/null; cat ../opus-2/draft.json', {'bash', 'sh', 'zsh'}),
-    ('(:) < "${X?}" 2>/dev/null; cat ../opus-2/draft.json', {'bash', 'sh', 'zsh'}),
-    ('cat 2>/dev/null <<E\n${X?}\nE\ncat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
-    ('read v 2>/dev/null <<E\n${X?}\nE\ncat ../opus-2/draft.json', {'dash'}),
-    ('y=${X?} /bin/echo 2>/dev/null; cat ../opus-2/draft.json', {'zsh'}),
-    ('echo < "${X?}" 2>/dev/null; cat ../opus-2/draft.json', set()),
-    ('{ cat; } < "${X?}" 2>/dev/null; cat ../opus-2/draft.json', set()),
+    ('cat < "${x?}" 2>/dev/null; cat ../opus-2/draft.json', {'bash', 'sh', 'zsh'}),
+    ('(:) < "${x?}" 2>/dev/null; cat ../opus-2/draft.json', {'bash', 'sh', 'zsh'}),
+    ('cat 2>/dev/null <<E\n${x?}\nE\ncat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('read v 2>/dev/null <<E\n${x?}\nE\ncat ../opus-2/draft.json', {'dash'}),
+    ('y=${x?} /bin/echo 2>/dev/null; cat ../opus-2/draft.json', {'zsh'}),
+    ('echo < "${x?}" 2>/dev/null; cat ../opus-2/draft.json', set()),
+    ('{ cat; } < "${x?}" 2>/dev/null; cat ../opus-2/draft.json', set()),
     # A variable set in some branches only may be unset; the forms with a default or `+`, and a
     # positional parameter that is set, do not end the shell.
-    ('( set -u; printf ../opus-2 > f; [ -z "${X-}" ] || y=1; : "$y"; printf x > f ); cat "$(cat f)/draft.json"',
+    ('( set -u; printf ../opus-2 > f; [ -z "${x-}" ] || y=1; : "$y"; printf x > f ); cat "$(cat f)/draft.json"',
      {'bash', 'dash', 'sh', 'zsh'}),
     ('( set -u; if [ -f g ]; then y=1; fi; printf ../opus-2 > f; : "$y"; printf x > f ); cat "$(cat f)/draft.json"',
      {'bash', 'dash', 'sh', 'zsh'}),
-    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -u; : "${X-}" "${X:+y}"; set -- a; : "$1"; n=1', set()),
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -u; : "${x-}" "${x:+y}"; set -- a; : "$1"; n=1', set()),
     # `exec CMD` ends the shell when CMD ends; so do an assignment to a readonly variable and the
     # other ways out, from a pipeline stage and a background job too.
     ('( echo ../opus-2/draft.json > f; [ -z "$X" ] && exec true; echo x > f ); cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
@@ -637,7 +637,7 @@ OVER = [
     ('set -u; cat < "$X" 2>/dev/null || cat ../opus-2/draft.json', {"bash", "sh", "zsh"}),
     # zsh does not run the EXIT trap after the error ends it
     ("readonly z=1; trap 'cat ../opus-2/draft.json' EXIT; z=2 2>/dev/null", {"bash", "dash", "sh"}),
-    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -u; [ -z "${X-}" ] || y=1; : "$y"; n=1',
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -u; [ -z "${x-}" ] || y=1; : "$y"; n=1',
      {'bash', 'dash', 'sh'}),
     ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -ou pipefail 2>/dev/null; n=1', {'dash'}),
     # a DEBUG trap is noted in every shell (dash has none)

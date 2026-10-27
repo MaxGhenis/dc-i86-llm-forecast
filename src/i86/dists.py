@@ -73,6 +73,16 @@ def share_cdf_at(grid, cdf, floor, ceiling, x) -> np.ndarray:
     return np.interp(x, xs, fs)
 
 
+def share_segments(grid, cdf, floor, ceiling, lo, hi, breaks=()):
+    """The band (lo, hi] cut at the CDF's knots, and at `breaks`, inside it: each segment's ends and
+    the forecaster's probability on it. The CDF is linear between knots, so the share is uniform
+    within a segment. The samplers draw only from segments whose probability is positive."""
+    xs, fs = share_knots(grid, cdf, floor, ceiling)
+    inner = np.concatenate([xs, np.asarray(breaks, dtype=float)])
+    pts = np.unique(np.concatenate([[lo, hi], inner[(inner > lo) & (inner < hi)]]))
+    return pts[:-1], pts[1:], np.diff(np.interp(pts, xs, fs))
+
+
 def sample_share_band(grid, cdf, floor, ceiling, lo, hi, u, defensive: float = 0.0):
     """Shares in (lo, hi] from the forecaster's CDF truncated to the band, and each draw's weight.
 
@@ -83,13 +93,11 @@ def sample_share_band(grid, cdf, floor, ceiling, lo, hi, u, defensive: float = 0
     p/q undoes the mixture: weighted means are exact, and no segment with probability goes unsampled
     however small that probability. With d = 0 every weight is 1.
     """
-    xs, fs = share_knots(grid, cdf, floor, ceiling)
-    pts = np.unique(np.concatenate([[lo, hi], xs[(xs > lo) & (xs < hi)]]))
-    mass = np.diff(np.interp(pts, xs, fs))
+    a, b, mass = share_segments(grid, cdf, floor, ceiling, lo, hi)
     keep = mass > 0
     if not keep.any():
         raise ValueError(f"no probability on Yes shares in ({lo}, {hi}]")
-    a, b, m = pts[:-1][keep], pts[1:][keep], mass[keep]
+    a, b, m = a[keep], b[keep], mass[keep]
     p = m / m.sum()
     q = (1 - defensive) * p + defensive / len(m)
     cq = np.cumsum(q)
@@ -121,11 +129,7 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2
     so it is 0 only if that sum is below about 2.5e-324; the draws are exact all the same. Raises
     ValueError only if no segment has both share mass and tilt.
     """
-    xs, fs = share_knots(grid, cdf, floor, ceiling)
-    inner = np.concatenate([xs, np.asarray(breaks, dtype=float)])
-    pts = np.unique(np.concatenate([[lo, hi], inner[(inner > lo) & (inner < hi)]]))
-    a, b = pts[:-1], pts[1:]
-    mass = np.diff(np.interp(pts, xs, fs))
+    a, b, mass = share_segments(grid, cdf, floor, ceiling, lo, hi, breaks)
     # The tilt's ends on each segment, from two interior points (exact for a linear function, and
     # blind to a jump at either end).
     x1, x2 = a + (b - a) / 3, a + 2 * (b - a) / 3

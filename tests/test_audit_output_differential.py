@@ -279,12 +279,12 @@ AGREE = [
     'set -u; cat <<E\nMOCK-a $X\nE\necho MOCK-after',
     'set -u; y=$X /bin/echo MOCK-hi; echo MOCK-after',
     'set -u; echo MOCK-old > out.txt; cat > out.txt <<< "$X"; cat out.txt; echo MOCK-end',
-    # So does a failed `${X?word}` there, whose message also goes where standard error does.
-    '{ echo "MOCK-a ${X?MOCK-m}"; } 2>&1',
-    'cat <<< "MOCK-a ${X?MOCK-m}"; echo MOCK-after',
-    'cat <<E\nMOCK-a ${X?MOCK-m}\nE\necho MOCK-after',
-    'y=${X?MOCK-m} /bin/echo MOCK-hi; echo MOCK-after',
-    'echo MOCK-hi <<< "${X?MOCK-m}"; echo MOCK-after',
+    # So does a failed `${x?word}` there, whose message also goes where standard error does.
+    '{ echo "MOCK-a ${x?MOCK-m}"; } 2>&1',
+    'cat <<< "MOCK-a ${x?MOCK-m}"; echo MOCK-after',
+    'cat <<E\nMOCK-a ${x?MOCK-m}\nE\necho MOCK-after',
+    'y=${x?MOCK-m} /bin/echo MOCK-hi; echo MOCK-after',
+    'echo MOCK-hi <<< "${x?MOCK-m}"; echo MOCK-after',
 ]
 
 

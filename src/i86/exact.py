@@ -10,28 +10,34 @@ only when it finds nothing. The subset:
   expansion, substitution, glob, redirection, assignment, comment, group, subshell or background
   job, so bash, zsh, sh and dash read the same words.
 - Commands are joined by `;`, `&&`, `||`, `|` and newlines.
-- A command is a tool in TOOLS with options from its list, before its operands; find with the
-  primaries in FIND; or `cd DIR` alone in its pipeline, DIR not starting with `-` or `+`. No listed
-  option makes a tool follow a link, run a program, write a file or open one it is not given, in
-  the GNU or the BSD tool of that name. curl's operands must be http(s) URLs. `bash`, `zsh`, `sh`
-  or `dash` with `-c`, `-lc` or `-l -c` and one more word, as the whole command, runs that word as
-  a command in the subset.
+- A command is a tool in TOOLS with options from its list, before its operands (head's and tail's
+  count the old way only as `-NUM`, digits alone); find with the primaries in FIND; or `cd DIR`
+  alone in its pipeline, DIR not starting with `-` or `+`. No listed option makes a tool follow a
+  link or a redirect, run a program, write a file or open one it is not given, in the GNU or the
+  BSD tool of that name. curl's operands must be http(s) URLs that name their host by a dotted
+  name, with no glob (see `remote_url`); a jq filter loads no module. `bash`, `zsh`, `sh` or `dash`
+  with `-c`, `-lc` or `-l -c` and one more word, as the whole command, runs that word as a command
+  in the subset.
 - The files a tool may open must resolve, from every place the shell may be, inside the work
   directory, part by part with no link on the way and no `..` above it (as the disk is at audit
   time; no command in the subset makes a link). They are its operands other than a pattern, script
   or filter; the current directory, for a tool that searches it when given no path or only `-`
   (ugrep's `-r` searches both standard input and the current directory then); and `find -newer`'s
-  file. `-` (standard input) and `/dev/null` open nothing else to check.
+  file. `-` opens nothing else to check for the tools in STANDARD_INPUT, which read it as standard
+  input; BSD head, tail, wc and sed, ls and find read a file of that name. `/dev/null` opens nothing
+  else to check except for ls and find, which read its times.
 - Where a call starts is a list of places, or None when the transcript does not say: Codex's shell
   tool may run a command in a directory its transcript does not record. From an unknown place a
   relative path is outside. Only `cd` moves the shell, and a `cd` may fail.
 
-It takes the tools the names find to be the standard ones (or, for grep and find, the ugrep and bfs
-that Claude Code's shell runs in their place), and the environment a call starts with, its startup
-files included, to set none of the variables, options, aliases and files that change them (`CDPATH`,
-`GREP_OPTIONS`, `RIPGREP_CONFIG_PATH`, zsh's `cdablevars` and `rcquotes`, a `.curlrc` or `~/.jq`),
-and to move no shell. rg and ugrep also read ignore files, which only choose among the files under
-the paths they search.
+It takes the tools the names find, through whatever PATH the shell starts with (a login shell's
+included), to be the standard ones (or, for grep and find, the ugrep and bfs that Claude Code's
+shell may run in their place); the environment a call starts with, its startup files included, to
+set none of the variables, options, aliases and files that change them (`CDPATH`, `GREP_OPTIONS`,
+`RIPGREP_CONFIG_PATH`, the proxy variables curl reads, zsh's `cdablevars` and `rcquotes`, a `.curlrc`,
+or a module in jq's search path), and to move no shell; and a URL's host name to name a machine
+other than this one, outside its network. rg and ugrep also read ignore files, which only choose among
+the files under the paths they search.
 """
 
 import os
@@ -97,10 +103,15 @@ TOOLS = {
     "echo": Tool(files=False), "printf": Tool(files=False),
     "true": Tool(files=False), "false": Tool(files=False), ":": Tool(files=False),
     "pwd": Tool(flags="LP", operands=0),
-    "curl": Tool(flags="fIiLsSv", valued="Am", long=_long(
-        "compressed fail head include location show-error silent verbose",
+    "curl": Tool(flags="fIisSv", valued="Am", long=_long(
+        "compressed fail head include show-error silent verbose",
         "connect-timeout max-time retry user-agent"), urls=True),
 }
+# The tools that read `-` as standard input in each implementation the subset allows. macOS's head,
+# tail, wc and sed read a file named `-`, as ls does and find's `-newer` does.
+STANDARD_INPUT = {"cat", "sort", "uniq", "cut", "grep", "egrep", "fgrep", "rg", "jq"}
+# ls and find read a file's times, and /dev/null's are the host's.
+READS_TIMES = {"ls", "find"}
 # find's primaries and how many values each takes; `(`, `)` and `!` join them. Of the values, only
 # `-newer`'s names a file it opens (for its time).
 FIND = {**{p: 0 for p in "-a -and -depth -empty -false -ls -not -o -or -print -print0 -prune -true".split()},
@@ -200,6 +211,13 @@ def _options(tool: Tool, words: list[str]) -> tuple[list[str], list[str]] | str:
             continue
         if operands:
             return f"`{w}` after an operand"
+        if tool.digits and w[1:2].isdigit():
+            # A count the old way: BSD tail reads `-NUM` followed by `b`, `c` or `l` (and `f`, `F`
+            # or `r`) as a count with its unit, and GNU head and tail read `-NUMc` as a byte count,
+            # neither taking the next word as a value. Only digits alone are in the subset.
+            if not w[1:].isdigit():
+                return f"`{w}`, a count written the old way with more than digits"
+            continue
         if w == "--":
             ended = True
             continue
@@ -227,7 +245,7 @@ def _options(tool: Tool, words: list[str]) -> tuple[list[str], list[str]] | str:
                 if c == "e":
                     given.append(value)
                 break
-            if c not in tool.flags and not (tool.digits and c.isdigit()):
+            if c not in tool.flags:
                 return f"`{w}`"
     return operands, given
 
@@ -275,15 +293,48 @@ def _opened(name: str, args: list[str]) -> list[str] | str:
         return f"`{name}` with no {tool.first}"
     if name == "sed" and not all(SED_SCRIPT.fullmatch(s) for s in given or operands[:1]):
         return "a sed script other than numbered prints, deletes and quits"
-    if name == "jq" and lead and re.search(r"\b(?:import|include)\b", operands[0]):
-        return "a jq module"
+    if name == "jq" and lead and re.search(r"\b(?:import|include|modulemeta)\b", operands[0]):
+        return "a jq module"  # modulemeta reads a module from jq's search path (~/.jq and others)
     paths = operands[lead:]
     if tool.urls:
-        if not operands or not all(re.fullmatch(r"https?://\S+", w) for w in operands):
-            return f"`{name}` with an operand other than an http(s) URL"
+        if not operands:
+            return f"`{name}` with no URL"
+        for w in operands:
+            why = remote_url(w)
+            if why:
+                return f"`{name}` with {why}"
         return []  # none of these options opens a file
     # A search with no path searches the working directory, and so does ugrep's `-r` with only `-`.
     return paths + (["."] if tool.searches and not [w for w in paths if w != "-"] else [])
+
+
+# Host names that name this machine or its local network.
+LOCAL_SUFFIXES = (".localhost", ".local", ".localdomain", ".internal", ".lan", ".home.arpa", ".test", ".invalid",
+                  ".example")
+HOST = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+")
+
+
+def remote_url(url: str, globs: bool = True) -> str | None:
+    """Why `url` may reach this machine or its network, or a file, rather than a web server elsewhere;
+    None for an http(s) URL with a dotted host name: no IP address in any form curl reads (`127.1`,
+    `0x7f000001`, `2130706433`, `[::1]`), no single-label name (`localhost`, or one the resolver
+    completes), no local suffix, and none of curl's globs (`{a,b}`, `[1-9]`), which expand to other
+    URLs (`globs`: whether the URL is curl's, which globs). A name that resolves to a local address
+    (`localtest.me`) is not caught: the module notes take the names to name other machines."""
+    m = re.fullmatch(r"(?i)https?://([^/?#]*)(?:[/?#]\S*)?", url)
+    if not m:
+        return "an operand other than an http(s) URL"
+    if globs and any(c in url for c in "{}[]\\"):
+        return "a URL glob or escape"
+    host = m.group(1).rpartition("@")[2].lower()
+    host = re.sub(r":\d*$", "", host).rstrip(".")
+    if not HOST.fullmatch(host):
+        return f"a URL host `{host}` other than a dotted name"
+    if re.fullmatch(r"[0-9a-fx.]+", host) or host.rsplit(".", 1)[1].isdigit():
+        return f"a URL host `{host}` that may be an IP address"
+    if host.endswith(LOCAL_SUFFIXES):
+        return f"a URL host `{host}` on the local network"
+    return None
 
 
 def _resolve(word: str, places: list[Path] | None, workdir: Path) -> list[Path] | None:
@@ -363,7 +414,9 @@ def outside(command: str, workdir: Path, start: list[Path] | None, nested: bool 
             if isinstance(opened, str):
                 return opened, None
             for word in opened:
-                if word not in {"-", "/dev/null"} and _resolve(word, places, workdir) is None:
+                if word == "-" and name in STANDARD_INPUT or word == "/dev/null" and name not in READS_TIMES:
+                    continue
+                if _resolve(word, places, workdir) is None:
                     return f"`{word}`, from a place that is unknown or leaves the work directory", None
         ok = _union(moved if moved is not None else places, skipped_ok)
         failed = _union(places, skipped_failed)

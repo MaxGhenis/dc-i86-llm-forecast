@@ -1,0 +1,22 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    # The audit's tests compare its shell model with macOS's /bin/bash, /bin/sh, /bin/dash and zsh
+    # and its BSD tools, the shells and tools the forecasters ran with. Claude Code's ugrep and bfs
+    # are not on the runner, so the tests that need them skip.
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install ripgrep uv
+      - run: uv venv --python 3.13 && uv pip install -e ".[dev]"
+      - run: .venv/bin/pytest -q -rs

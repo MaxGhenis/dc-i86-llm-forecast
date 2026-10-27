@@ -1,9 +1,12 @@
 """Invariants of the band-aware exact tilt. All forecast answers and Yes-share CDFs are MOCK.
 
-The shares simulate may draw under an exact tilt: those in the band as it draws it ([lo, hi], lo
-moved just above 50% when the band excludes it) on a stretch between the Yes-share CDF's knots that
-holds probability, or the whole band when none does (the draws then get weight 0). The CDFs are
-generated with flat stretches.
+The shares simulate may draw under an exact tilt: those on the segments of the band (lo, hi] that
+the sampler gives probability (dists.share_segments, cut at the CDF's knots and the cells), clipped
+as simulate clips its draws, to [lo, hi] with lo moved just above 50% when the band excludes it.
+The clip is applied after the segments are found, so a sliver of probability between lo and the
+next representable share still counts, at that share. The generated bands have probability (simulate
+raises on one without), and their ends include knots and the floats just either side of them; the
+CDFs have flat stretches.
 
 - Reference: at every share simulate may draw, the tilt divided by 2^scale is the chance the node
   takes an allowed value, computed directly from the unscaled answers (node_params and
@@ -16,9 +19,10 @@ generated with flat stretches.
 import math
 
 import numpy as np
-from hypothesis import assume, given, settings
+from hypothesis import assume, example, given, settings
 from hypothesis import strategies as st
 
+from i86 import dists
 from i86 import graph as graph_mod
 from i86.response import Forecasts
 from i86.simulate import _allowed_mass, _Tilt, node_params
@@ -53,23 +57,28 @@ def cases(draw):
     answers = _answers(draw, node, sorted({e.key for e in graph.entries(node)}))
     options = [True, False] if node.kind == "binary" else [*node.options, None]
     allowed = set(draw(st.lists(st.sampled_from(options), min_size=1, unique=True)))
+    marks = [0.5, *graph.cells, *graph.share_grid, graph.share_floor, graph.share_ceiling]
+    near = [float(f(x, d)) for x in marks for f, d in ((np.nextafter, 0.0), (np.nextafter, 1.0))]
     ends = st.one_of(st.floats(graph.share_floor, graph.share_ceiling),
-                     st.sampled_from([0.5, *graph.cells, *graph.share_grid, graph.share_floor, graph.share_ceiling]))
+                     st.sampled_from(marks), st.sampled_from([x for x in near
+                                                              if graph.share_floor <= x <= graph.share_ceiling]))
     lo, hi = sorted([draw(ends), draw(ends)])
     # simulate's bands are (lo, hi] with lo < hi; one starting at 50% or above holds no share at lo.
     assume(lo < hi and (lo < 0.5 or float(np.nextafter(lo, 1.0)) <= hi))
-    return node, answers, allowed, (lo, hi), _cdf(draw, graph)
+    cdf = _cdf(draw, graph)
+    assume(_stretches(graph, cdf, (lo, hi)))  # simulate raises on a band without probability
+    return node, answers, allowed, (lo, hi), cdf
 
 
 def _stretches(graph, cdf, band):
-    """The parts of the band simulate may draw from (see the module notes)."""
+    """The parts of the band simulate may draw from (see the module notes): the sampler's segments
+    with probability, each clipped as simulate clips its draws."""
     lo, hi = band
-    lo = float(np.nextafter(lo, 1.0)) if lo >= 0.5 else lo
-    xs = [graph.share_floor, *graph.share_grid, graph.share_ceiling]
-    fs = [0.0, *cdf, 1.0]
-    out = [(max(a, lo), min(b, hi)) for a, b, fa, fb in zip(xs, xs[1:], fs, fs[1:])
-           if fb > fa and max(a, lo) < min(b, hi)]
-    return out or [(lo, hi)]
+    low = float(np.nextafter(lo, 1.0)) if lo >= 0.5 else lo
+    breaks = sorted({0.5, *graph.cells, *graph.near_cells})
+    a, b, m = dists.share_segments(graph.share_grid, np.asarray(cdf, dtype=float), graph.share_floor,
+                                   graph.share_ceiling, lo, hi, breaks)
+    return [(min(max(float(x), low), hi), min(float(y), hi)) for x, y, mass in zip(a, b, m) if mass > 0]
 
 
 def _points(graph, stretches, extra):
@@ -85,11 +94,23 @@ def _forecasts(node, answers, cdf):
     return Forecasts(values={"yes_share": {"all": cdf}, node.id: answers})
 
 
+def _sliver():
+    """MOCK: every Yes share in (50%, 55%] (the CDF of test_review_r11_tilt), and a band starting one
+    float below 55%, so its only probability lies in that last float's sliver, which simulate draws
+    at 55%: the 72% cell's answer is never read. Even answers, with a first option allowed, so that
+    the irrelevance test's tiny answers keep the allowed chance tiny."""
+    node = GRAPH.nodes["ban_status"]
+    answers = {key: [1 / len(node.options)] * len(node.options) for key in sorted({e.key for e in GRAPH.entries(node)})}
+    cdf = [float(np.clip((x - 0.5) / 0.05, 0.0, 1.0)) for x in GRAPH.share_grid]
+    return node, answers, {"repealed"}, (float(np.nextafter(0.55, 0.0)), 0.97), cdf
+
+
 def test_tilt_matches_unscaled_answers_where_simulate_draws():
     graph = GRAPH
 
     @settings(max_examples=400, deadline=None)
     @given(cases(), st.lists(st.floats(0.0, 1.0), min_size=1, max_size=8))
+    @example(_sliver(), [0.5])
     def check(case, extra):
         node, answers, allowed, band, cdf = case
         fc = _forecasts(node, answers, cdf)
@@ -133,6 +154,7 @@ def test_unread_answers_change_neither_tilt_nor_scale():
 
     @settings(max_examples=400, deadline=None)
     @given(cases(), st.integers(0, 1060), st.lists(st.floats(0.0, 1.0), min_size=1, max_size=8))
+    @example(_sliver(), 1060, [0.5])
     def check(case, k, extra):
         node, answers, allowed, band, cdf = case
         # Tiny answers; certain allowed values in the other set.

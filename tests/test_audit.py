@@ -42,7 +42,7 @@ def test_web_calls_pass_and_are_logged(tmp_path):
     out = run(tmp_path, [
         claude("WebSearch", query="DC Initiative 86 poll"),
         claude("WebFetch", url="https://electionresults.dcboe.org/"),
-        codex("curl -sL https://www.bls.gov/sae/"),
+        codex("curl -s https://www.bls.gov/sae/"),
         {"type": "item.completed", "item": {"type": "web_search", "query": "Denver IO 311"}},
     ])
     assert out["passed"] and out["web_calls"] == 4

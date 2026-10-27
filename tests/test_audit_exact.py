@@ -8,9 +8,13 @@ The properties, each executed:
   call is in the subset and is suspect or a violation where it is not, so it is never less severe;
 - soundness: a program `outside` finds nothing in prints no other run's MOCK answer and no name
   from outside the work directory, under bash, zsh, sh, dash and Claude Code's shell (whose grep
-  and find are ugrep and bfs), and changes no file; run from a place outside the work directory,
-  the same holds for the programs it passes from an unknown start. Generated programs, and every
-  one-step program exhaustively, all of them run ten empty levels inside a temporary directory;
+  and find are ugrep and bfs), and changes no file; and what it prints, and its status, are the
+  same in a second layout where every file outside the work directory holds other bytes and
+  another run's directory holds one more name (so a partial read, a size, a count or a status
+  shows). Run from places outside the work directory (above it, another run's directory, inside
+  the repository), the same holds for the programs it passes from an unknown start. Generated
+  programs, and every one-step program exhaustively, all of them run ten empty levels inside a
+  temporary directory, with every file's time fixed by its name;
 - directories: such a program ends in one of the places `outside` gives;
 - words: the words `_lex` reads are the words each shell passes to a command.
 
@@ -18,11 +22,13 @@ All MOCK. Measured on macOS's bash 3.2, sh, dash, zsh 5.9, BSD grep 2.6.0, sed, 
 Claude Code 2.1.308's ugrep and bfs.
 """
 
+import json
 import os
 import shlex
 import shutil
 import subprocess
 import tempfile
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -77,12 +83,27 @@ def padded(root: Path) -> Path:
     return top
 
 
-def build(root: Path) -> tuple[Path, Path]:
-    """The layout, `padded` in `root`, emptied first: (top, work). The paths are the same each time."""
+def build(root: Path, varied: bool = False) -> tuple[Path, Path]:
+    """The layout, `padded` in `root`, emptied first: (top, work). The paths are the same each time.
+    `varied`: every file outside the work directory holds other bytes, and another run's directory
+    one more name. Every name's time is fixed by its path, the same in both."""
     for child in list(root.iterdir()):
         shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
     top = padded(root)
-    return top, exact_layout(top)
+    work = exact_layout(top)
+    if varied:
+        for parent, dirs, files in os.walk(root):
+            for name in files:
+                path = Path(parent) / name
+                if not path.is_symlink() and not path.is_relative_to(work):
+                    path.write_bytes(path.read_bytes() + b"MOCK varied, longer\n")
+        (top / "work" / "opus-2" / "MOCK-VARIED-NAME").write_text("")
+    for parent, dirs, files in os.walk(root):
+        for name in dirs + files:
+            path = Path(parent) / name
+            when = 1_700_000_000 + zlib.crc32(str(path.relative_to(root)).encode()) % 1_000_000
+            os.utime(path, (when, when), follow_symlinks=False)
+    return top, work
 
 
 def state(root: Path) -> dict[str, str]:
@@ -98,12 +119,25 @@ def state(root: Path) -> dict[str, str]:
 
 def run(name: str, program: str, cwd: Path, top: Path) -> tuple[str, Path | None]:
     """What the shell `name` wrote (standard output and error), and where it ended."""
+    out, end, _, _ = run_status(name, program, cwd, top)
+    return out, end
+
+
+def run_status(name: str, program: str, cwd: Path, top: Path) -> tuple[str, Path | None, int, tuple[str, str]]:
+    """`run`, with the program's status and what it wrote in a form two runs can compare: its standard
+    output, and its standard error's characters sorted, as a pipeline's stages may write errors at once
+    and interleave them. The marks start on a line of their own, as the program's output may end
+    without a newline."""
     shell, prelude = SHELLS[name]
     env = {"PATH": PATH, "HOME": str(top / "home"), "PWD": str(cwd)}
-    proc = subprocess.run([*shell, f"{prelude}{program}\necho PWD=$(pwd -P)"], cwd=cwd, env=env,
-                          stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    marked = f"{prelude}{program}\nmock_status=$?\necho\necho PWD=$(pwd -P)\necho STATUS=$mock_status"
+    proc = subprocess.run([*shell, marked], cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                          text=True, timeout=30)
     marks = [line for line in proc.stdout.splitlines() if line.startswith("PWD=")]
-    return proc.stdout + proc.stderr, Path(marks[-1][4:]) if marks else None
+    status = [line for line in proc.stdout.splitlines() if line.startswith("STATUS=")]
+    heard = proc.stdout, "".join(sorted(proc.stderr))
+    return (proc.stdout + proc.stderr, Path(marks[-1][4:]) if marks else None,
+            int(status[-1][7:]) if status else -1, heard)
 
 
 def leaked(text: str) -> bool:
@@ -121,7 +155,8 @@ def test_outside_table(tmp_path):
         "cat report.txt | sort | uniq -c | head", "echo hi; printf '%s\\n' a", "echo ../opus-2/draft.json",
         "cd scratch && cat ../report.txt", "cd scratch/deep; pwd", "cd scratch || cat report.txt",
         f"cat {work}/report.txt", "/bin/zsh -lc 'cat report.txt'", "bash -c 'cd scratch && ls'",
-        "curl -sSL https://example.com/x", "cat 'r ../x'", "cat -- -n", "cat -",
+        "curl -sS https://example.com/x", "curl -s https://user@www.bls.gov:443/x", "head -5 report.txt",
+        "tail -3 report.txt", "head -qn 1 report.txt", "cat 'r ../x'", "cat -- -n", "cat -",
         "true && false || :", "cat report.txt |\nhead -n 1", "cat ''", "cd ''",
     ]
     outside_rows = [
@@ -141,6 +176,18 @@ def test_outside_table(tmp_path):
         "sh -c 'cd ..'; cat report.txt", "cat f &&", "| cat f", "cat f;; cat g", "cat f\r", "cat 'f",
         'cat "a$b"', 'cat "!x"', "head -5 ../opus-2/draft.json", "tail -f report.txt", "sort -o x report.txt",
         "find . -newer ../opus-2/draft.json",  # it reads the time of another run's file
+        # round 12: a redirect, a host on this machine or its network, a glob, an old count with
+        # more than digits, a jq module
+        "curl -sSL https://example.com/x", "curl -L https://example.com", "curl --location https://example.com",
+        "curl -s http://localhost/", "curl -s http://localhost./", "curl -s http://127.0.0.1/", "curl -s http://127.1/",
+        "curl -s http://0x7f000001/", "curl -s http://2130706433/", "curl -s 'http://[::1]/'", "curl -s http://intranet/",
+        "curl -s http://box.local/", "curl -s http://db.internal/", "curl -s http://10.0.0.1.nip.io.7/",
+        "curl -s 'https://example.com/{a,b}'", "curl -s 'https://example.com/[1-2]'", "curl -s ftp://example.com/",
+        "curl -s file://www.example.com/etc/hosts",
+        "tail -1000c ../opus-2/draft.json report.txt", "head -5c report.txt", "tail -3q report.txt",
+        "jq -n 'include \"x\"; 1'", "jq -n '\"x\" | modulemeta'",
+        # the times of /dev/null, the host's (found by the second layout)
+        "ls -ld /dev/null", "ls /dev/null", "find /dev/null", "find . -newer /dev/null",
     ]
     for code in inside:
         why, ends = exact.outside(code, work, [work])
@@ -148,10 +195,13 @@ def test_outside_table(tmp_path):
     for code in outside_rows:
         assert exact.outside(code, work, [work])[0] is not None, code
     # From an unknown place only absolute paths in the work directory are known.
-    for code in ["echo hi", f"cat {work}/report.txt", f"cd {work} && cat report.txt", f"ls {work}/scratch"]:
+    for code in ["echo hi", f"cat {work}/report.txt", f"cd {work} && cat report.txt", f"ls {work}/scratch",
+                 "cat -", "sort -", "jq . -", "head /dev/null"]:
         assert exact.outside(code, work, None)[0] is None, code
+    # BSD head, tail, wc and sed, ls and find's -newer read a file named `-`, wherever the shell is.
     for code in ["cat report.txt", "ls", "grep -r x", "grep -rh x -", "/bin/zsh -lc 'cat report.txt'", "cd scratch",
-                 "find . -name x", f"cd {work} || cat report.txt"]:
+                 "find . -name x", f"cd {work} || cat report.txt", "head -", "tail -n 1 -", "wc -l -",
+                 "sed -n 1p -", "ls -", f"find {work} -newer -"]:
         assert exact.outside(code, work, None)[0] is not None, code
     # Places: a cd may fail, and the other branches of && and || keep the place.
     assert exact.outside("cd scratch", work, [work])[1] == [work / "scratch", work]
@@ -295,7 +345,15 @@ def test_check_call_is_model_call_inside_the_subset_and_suspect_outside(tmp_path
                 else:
                     assert checked[0] in {"suspect", "violation"}, (tool, code, checked)
                     assert SEVERITY[checked[0]] >= SEVERITY[model[0]], (tool, code)
-                assert checked[0] != "local" or why is None, (tool, code)
+            # The transcript loop lists the call as check_call classes it.
+            path = top / "MOCK-transcript.jsonl"
+            path.write_text(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": code}}]}}) + "\n")
+            out = audit.audit_transcript(path, str(work))
+            verdict = audit.check_call("Bash", {"command": code}, work, roots)[0]
+            listed = {key for key in ("violations", "suspect", "local_calls") if out[key]}
+            assert listed == ({"violation": {"violations"}, "suspect": {"suspect"}, "local": {"local_calls"}}
+                              .get(verdict, set())), (code, verdict, out)
         for code in ROUND11 + [c for c, _ in HOLES]:
             assert audit.check_call("Bash", {"command": code}, work, roots)[0] in {"suspect", "violation"}, code
     finally:
@@ -320,7 +378,16 @@ READERS = ["cat {p}", "head -n 3 {p}", "tail -n 2 {p}", "wc -c {p}", "sort {p}",
            # outside the subset, each a read some of its parts would let through
            "find {p} -follow", "ls -L {p}", "sed '1r ../opus-2/draft.json' {p}", "grep -rh MOCK {p} &",
            "curl -s file://{top}/work/opus-2/draft.json", "cat {p} | cd scratch", "ls -LR {p}",
-           "jq -n 'import \"./up/opus-2/answer\" as $d; $d'", "uniq report.txt {p}"]
+           "jq -n 'import \"./up/opus-2/answer\" as $d; $d'", "uniq report.txt {p}",
+           # counts the old way, valued clusters and attached values, partial reads, sizes, counts and
+           # statuses (which only the varied layout shows), and more jq, sed and find
+           "head -3 {p}", "tail -3 {p}", "tail -1000c {p} report.txt", "head -c 5 {p}", "tail -c 4 {p}",
+           "head -qn 1 {p} report.txt", "tail -rn 1 {p}", "head -n1 {p}", "grep -c MOCK {p}", "grep -q MOCK {p}",
+           "grep -l MOCK {p}", "grep -A 1 MOCK {p}", "grep -m1 MOCK {p}", "grep -e MOCK -c {p}", "wc -l {p}",
+           "ls -s {p}", "ls -ld {p}", "cut -d , -f 1 {p}", "sort -k 1 {p}", "sort -t , -k 2 {p}", "uniq -f 1 {p}",
+           "rg -m 1 --no-config MOCK {p}", "rg -A1 --no-config MOCK {p}", "jq -R length {p}", "jq -Rs . {p}",
+           "jq -r . {p}", "jq -n input {p}", "sed -n 2,3p {p}", "sed 1d {p}", "find {p} -type f",
+           "find {p} -maxdepth 1 -name '*.json'", "find {p} -size +0", "find {p} -empty"]
 STEPS = st.one_of(st.builds(lambda p: f"cd {p}", st.sampled_from(PATHS)),
                   st.builds(lambda r, p: r.replace("{p}", p), st.sampled_from(READERS), st.sampled_from(PATHS)))
 OPS = st.sampled_from(["; ", " && ", " || ", " | ", "\n"])
@@ -347,19 +414,25 @@ def test_subset_reads_only_the_work_directory(program):
 
 def check_program(program: str, root: Path) -> None:
     """Run `program` in every shell from the work directory and, if the subset passes it from an
-    unknown start, from above it (the shell may be anywhere). A program the subset passes prints no
-    MOCK answer or marker, changes no file, and from the work directory ends in one of its places.
-    Claude Code's shell differs from zsh only in grep and find. The layout is built afresh in `root`,
-    and again after a program outside the subset changes it."""
+    unknown start, from above it, from another run's directory and from the repository (the shell
+    may be anywhere). A program the subset passes prints no MOCK answer or marker, changes no file,
+    from the work directory ends in one of its places, and prints and exits as before in a second
+    layout where every file outside the work directory holds other bytes. Claude Code's shell differs
+    from zsh only in grep and find. The layout is built afresh in `root`, and again after a program
+    outside the subset changes it."""
     top, work = build(root)
     code = program.replace("{work}", str(work)).replace("{top}", str(top))
     shells = [name for name in SHELLS if name != "claude" or "grep" in code or "find" in code]
     why, ends = exact.outside(code, work, [work])
     unknown = exact.outside(code, work, None)[0] is None
     before = state(root)
-    for name, cwd in [(name, work) for name in shells] + [(name, top) for name in shells if unknown]:
+    away = [top, top / "work" / "opus-2", top / "repository"]  # places an unknown start may be
+    runs = [(name, work) for name in shells] + [(name, cwd) for name in shells for cwd in away if unknown]
+    seen = {}
+    for name, cwd in runs:
         passed = why is None if cwd == work else unknown
-        out, end = run(name, code, cwd, top)
+        out, end, status, heard = run_status(name, code, cwd, top)
+        seen[name, cwd] = heard, status
         if leaked(out):
             assert not passed, (name, code, cwd, out)
         if passed and cwd == work:
@@ -367,16 +440,20 @@ def check_program(program: str, root: Path) -> None:
         if state(root) != before:
             assert not passed, (name, code, cwd, "changed a file")
             build(root)
+    passing = [(name, cwd) for name, cwd in runs if (why is None if cwd == work else unknown)]
+    if passing:
+        build(root, varied=True)
+        for name, cwd in passing:
+            _, _, status, heard = run_status(name, code, cwd, top)
+            assert (heard, status) == seen[name, cwd], (name, code, cwd, seen[name, cwd], (heard, status))
 
 
 # Every reader on every path and every `cd`, alone; the generator samples longer programs.
-SINGLE = sorted({r.replace("{p}", p) for r in READERS for p in PATHS} | {f"cd {p}" for p in PATHS})
-
-
-def test_every_one_step_program():
+@pytest.mark.parametrize("reader", sorted(set(READERS)) + ["cd {p}"])
+def test_every_one_step_program(reader):
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp).resolve()
-        for program in SINGLE:
+        for program in sorted({reader.replace("{p}", p) for p in PATHS}):
             check_program(program, root)
 
 
