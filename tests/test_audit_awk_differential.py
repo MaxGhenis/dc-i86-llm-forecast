@@ -1,10 +1,12 @@
 """The audit's awk model against the real awk, on generated MOCK programs.
 
 Each program gives awk -v values, a BEGIN block, a record action and an END block, built from
-getline (from the main input, into $0 or a variable, and from a file named by $0 or a variable),
-assignments and prints. Its main input is standard input (a here-string or a printf pipe, with
-zero to three lines) or a file operand. Lines and values name this run's MOCK file, another run's
-MOCK answer or nothing that exists. Properties, under bash and zsh:
+getline (from the main input, into $0 or a variable, from a file named by $0 or a variable, and
+from standard input by another name), assignments, prints, `next`, `exit`, a changed record
+separator and a changed ARGV. Its main input is standard input (a here-string, a here-document, a
+printf pipe or a read loop, with zero to three lines) or a file operand, which may come after an
+`RS=` operand. Lines and values name this run's MOCK file, another run's MOCK answer or nothing that
+exists. Properties, under bash and zsh:
 
 - soundness: if awk printed the other run's MOCK answer, the audit reports a violation or a suspect;
 - precision: if awk ran to the end without printing it, the audit reports no violation.
@@ -25,10 +27,11 @@ from test_audit_shell_differential import ANSWER, SHELLS, layout
 
 NAMES = ["MOCK.txt", "../opus-2/draft.json", "MOCK-missing.txt"]
 BEGIN = ["getline", "getline p", "getline q", "getline line < p; print line", "getline line < q; print line",
-         'p = "MOCK.txt"', "q = p", 'print "MOCK"']
+         'p = "MOCK.txt"', "q = p", 'print "MOCK"', 'RS = "/"', 'getline < "/dev/stdin"', 'getline q < "-"',
+         "ARGV[1] = p; ARGC = 2", "exit"]
 RECORD = ["getline line < $0; print line", "getline line < p; print line", "getline line < q; print line",
-          "getline", "getline q", "q = $0", "print"]
-END = ["getline line < p; print line", "getline line < q; print line", 'print "MOCK end"']
+          "getline", "getline q", "q = $0", "print", "next", "exit"]
+END = ["getline line < p; print line", "getline line < q; print line", 'print "MOCK end"', "getline; print"]
 
 
 def block(name, statements):
@@ -41,7 +44,8 @@ programs = st.fixed_dictionaries({
     "record": st.lists(st.sampled_from(RECORD), max_size=3),
     "end": st.lists(st.sampled_from(END), max_size=2),
     "lines": st.lists(st.sampled_from(NAMES), max_size=3),
-    "feed": st.sampled_from(["here", "printf", "file", "dash"]),
+    "feed": st.sampled_from(["here", "heredoc", "printf", "read", "file", "dash"]),
+    "operand_rs": st.booleans(),
 })
 
 
@@ -49,13 +53,17 @@ def command(case) -> str:
     code = " ".join(b for b in [block("BEGIN", case["begin"]), block("", case["record"]),
                                 block("END", case["end"])] if b) or "BEGIN {}"
     awk = f"awk -vp={shlex.quote(case['p'])} -vq={shlex.quote(case['q'])} {shlex.quote(code)}"
-    lines = case["lines"]
+    lines, rs = case["lines"], " RS=/" if case["operand_rs"] else ""
     if case["feed"] == "here" and len(lines) == 1:
         return f"{awk} <<< {shlex.quote(lines[0])}"
+    if case["feed"] == "heredoc":
+        return f"{awk} <<'DATA'\n" + "".join(line + "\n" for line in lines) + "DATA"
     printed = "printf '%s\\n' " + " ".join(map(shlex.quote, lines)) if lines else "printf '%s' ''"
+    if case["feed"] == "read":
+        printed = f"{printed} | while IFS= read -r f; do printf '%s\\n' \"$f\"; done"
     if case["feed"] == "file":
-        return f"{printed} > MOCK-lines.txt; {awk} MOCK-lines.txt < /dev/null"
-    return f"{printed} | {awk}" + (" -" if case["feed"] == "dash" else "")
+        return f"{printed} > MOCK-lines.txt; {awk}{rs} MOCK-lines.txt < /dev/null"
+    return f"{printed} | {awk}" + (f"{rs} -" if case["feed"] == "dash" else "")
 
 
 @settings(max_examples=int(os.environ.get("I86_DIFFERENTIAL_EXAMPLES", "300")), deadline=None,

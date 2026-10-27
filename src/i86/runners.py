@@ -62,7 +62,11 @@ FINISHED = {"succeeded", "failed", "cancelled", "canceled", "lost", "killed", "e
 _mutex = threading.RLock()
 _held = threading.local()
 _lock_fds: set[int] = set()  # this process's descriptors on the lock file, held or waited on
-_fd_guard = threading.Lock()  # held from opening a descriptor until it is in _lock_fds, and by fork
+_fd_guard = threading.Lock()  # held from opening a descriptor until it is in _lock_fds, from taking it
+# out of _lock_fds until it is closed, and by fork
+_spare_null = os.open(os.devnull, os.O_RDONLY)  # what a forked child points inherited lock descriptors at
+_spare_id = (os.fstat(_spare_null).st_dev, os.fstat(_spare_null).st_ino)
+_closed_in_child: set[int] = set()  # lock descriptors a forked child had to close outright
 
 
 def _before_fork() -> None:
@@ -79,13 +83,41 @@ def _forget_lock_after_fork() -> None:
     # the lock a parent thread is still waiting for, so they are pointed at /dev/null; otherwise the
     # lock would outlive a parent that exits while the child still runs, and the child, waiting for it
     # through a new descriptor, would wait forever. Fork waits for _fd_guard, so no descriptor can be
-    # open but not yet in _lock_fds.
+    # open but not yet in _lock_fds, or out of _lock_fds but not yet closed.
+    #
+    # The locks are replaced first, so a failure below cannot leave the child's copies held. The
+    # descriptors are pointed at a /dev/null descriptor opened at import, which needs no free
+    # descriptor; failing that (the spare closed, or its number now another file's), at a newly
+    # opened one; failing that (no descriptor free), they are closed, and recorded so the frame that
+    # opened one leaves the number alone.
     global _mutex, _held, _lock_fds, _fd_guard
-    for fd in _lock_fds:
-        null = os.open(os.devnull, os.O_RDONLY)
-        os.dup2(null, fd)
-        os.close(null)
+    inherited = _lock_fds
     _mutex, _held, _lock_fds, _fd_guard = threading.RLock(), threading.local(), set(), threading.Lock()
+    for fd in inherited:
+        try:
+            spare = os.fstat(_spare_null)
+            if (spare.st_dev, spare.st_ino) == _spare_id:
+                os.dup2(_spare_null, fd, inheritable=False)
+                continue
+        except OSError:
+            pass
+        try:
+            null = os.open(os.devnull, os.O_RDONLY)
+        except OSError:
+            null = None
+        if null is not None:
+            try:
+                os.dup2(null, fd, inheritable=False)
+                continue
+            except OSError:
+                pass
+            finally:
+                os.close(null)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        _closed_in_child.add(fd)
 
 
 os.register_at_fork(before=_before_fork, after_in_parent=_after_fork_in_parent,
@@ -123,9 +155,14 @@ def bookkeeping_lock():
                 if os.getpid() == owner:  # a forked child must not release its parent's lock
                     fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
-            if os.getpid() == owner:
-                fds.discard(fd)
-            os.close(fd)
+            with _fd_guard:
+                if os.getpid() == owner:
+                    fds.discard(fd)
+                    os.close(fd)
+                elif fd not in _closed_in_child:
+                    os.close(fd)  # this process's copy, pointed at /dev/null when it forked
+                else:
+                    _closed_in_child.discard(fd)  # already closed; the number may now be another file's
 
 
 def run_dirs() -> list[Path]:

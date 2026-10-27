@@ -153,6 +153,30 @@ def _allowed_mass(node: Node, params: np.ndarray, exists: np.ndarray, allowed) -
     return np.where(exists, (params * keep[None, :]).sum(axis=1), 1.0 if None in allowed else 0.0)
 
 
+def _used_answers(graph: Graph, node: Node, answers: dict, lo: float, hi: float) -> set[str]:
+    """The keys of the answers that node_params interpolates from for some share in [lo, hi]: on
+    each side of 50% the band reaches, the cells bracketing the band's part there. A key without an
+    answer stands for the filler row (see _table)."""
+    if node.cells_mode == "none":
+        keys = {Entry(None, None).key}
+    else:
+        half = float(np.nextafter(0.5, 1.0))
+        if node.cells_mode == "all":
+            sides = [(graph.pass_cells, max(lo, half), hi), (graph.fail_cells, lo, min(hi, 0.5))]
+        elif node.cells_mode == "near":
+            sides = [(graph.near_cells[1:], max(lo, half), hi), (graph.near_cells[:1], lo, min(hi, 0.5))]
+        else:
+            sides = [(graph.pass_cells, lo, hi)]  # the passing cells' answers serve every share
+        keys = set()
+        for cells, a, b in sides:
+            if a <= b:
+                j0, j1, _ = _cell_weights(cells, np.array([a, b]))
+                keys |= {Entry(c, None).key for c in cells[int(j0[0]):int(j1[1]) + 1]}
+    if keys - set(answers):
+        keys.add(next(iter(answers)))
+    return keys & set(answers)
+
+
 class _Tilt:
     """The chance that a node takes an allowed value, as a function of the share, times 2^scale.
 
@@ -163,9 +187,15 @@ class _Tilt:
     chance rising from 0 to 5e-324 between two cells would round to 0 over half the segment, where the
     sampler, taking the tilt as linear, still draws. Scaled first, the tilt is positive wherever its
     exact value is at least 2^-1022, against a largest value of at least 1/2.
+
+    Only what the shares in `band` ((lo, hi], as simulate draws them, by default the whole range) can
+    use sets the scale: the answers they interpolate from, and absence where the node may not exist
+    there. The other answers are set to 0, which shares in the band never read and which cannot
+    overflow, so an answer of 1 at a cell the band never reaches leaves a tiny tilt its precision.
     """
 
-    def __init__(self, graph: Graph, node: Node, fc: Forecasts, allowed):
+    def __init__(self, graph: Graph, node: Node, fc: Forecasts, allowed,
+                 band: tuple[float, float] | None = None):
         self.graph, self.node = graph, node
         answers = fc.values[node.id]
         if node.kind == "binary":
@@ -177,8 +207,13 @@ class _Tilt:
             keep = np.array([o in allowed for o in node.options])
             rows = {key: np.where(keep, np.asarray(p, dtype=float), 0.0) for key, p in answers.items()}
             self.absent = 1.0 if None in allowed else 0.0
-        if node.exists_if is None:
-            self.absent = 0.0  # never used: the node always exists
+        lo, hi = band if band is not None else (graph.share_floor, graph.share_ceiling)
+        lo = float(np.nextafter(lo, 1.0)) if lo >= 0.5 else float(lo)  # simulate's draws lie in [lo, hi]
+        used = _used_answers(graph, node, answers, lo, hi)
+        rows = {key: r if key in used else np.zeros_like(r) for key, r in rows.items()}
+        ends = np.array([v for v, side in ((lo, lo <= 0.5), (hi, hi > 0.5)) if side])
+        if node.exists_if is None or self.exists(ends).all():
+            self.absent = 0.0  # never used: the node exists at every share in the band
         top = max(float(np.sum(r)) for r in [*rows.values(), self.absent])
         self.scale = max(0, -math.frexp(top)[1]) if top > 0 else 0
         scaled = {key: np.ldexp(r, self.scale).tolist() for key, r in rows.items()}
@@ -197,11 +232,9 @@ class _Tilt:
         return np.where(self.exists(v), self.params(v).sum(axis=1), math.ldexp(self.absent, self.scale))
 
 
-def exact_tilt(graph: Graph, fc: Forecasts, restrict: dict | None):
-    """(node id, tilt, breaks) when a restriction can be met by drawing the share exactly: one
-    binary or categorical node with no states whose `exists_if`, if any, mentions only `passes`.
-    `tilt(v)` (a _Tilt) is the chance the node takes an allowed value at share v, times
-    2^tilt.scale, linear between `breaks`."""
+def _tilted(graph: Graph, restrict: dict | None):
+    """(node id, allowed values) when a restriction can be met by drawing the share exactly: one
+    binary or categorical node with no states whose `exists_if`, if any, mentions only `passes`."""
     if not restrict or len(restrict) != 1:
         return None
     (nid, allowed), = restrict.items()
@@ -210,8 +243,19 @@ def exact_tilt(graph: Graph, fc: Forecasts, restrict: dict | None):
         return None
     if node.exists_if is not None and set(node.exists_if.names) - {"passes"}:
         return None
+    return nid, allowed
+
+
+def exact_tilt(graph: Graph, fc: Forecasts, restrict: dict | None, band: tuple[float, float] | None = None):
+    """(node id, tilt, breaks) when a restriction can be met by drawing the share exactly (see
+    `_tilted`). `tilt(v)` (a _Tilt) is the chance the node takes an allowed value at share v in
+    `band`, times 2^tilt.scale, linear between `breaks`."""
+    tilted = _tilted(graph, restrict)
+    if tilted is None:
+        return None
+    nid, allowed = tilted
     breaks = sorted({0.5, *graph.cells, *graph.near_cells})
-    return nid, _Tilt(graph, node, fc, allowed), breaks
+    return nid, _Tilt(graph, graph.nodes[nid], fc, allowed, band), breaks
 
 
 def band_mass(graph: Graph, fc: Forecasts, band: tuple[float, float]) -> float:
@@ -240,9 +284,10 @@ def simulate(graph: Graph, fc: Forecasts, n: int, seed, fixed_share: float | Non
     cdf = np.asarray(fc.values["yes_share"]["all"], dtype=float)
     u_share = rng.random(n)
     weight = np.ones(n)
-    tilt = exact_tilt(graph, fc, restrict) if fixed_share is None else None
-    if fixed_share is None and share_band is None and (defensive or tilt is not None):
+    exact = fixed_share is None and _tilted(graph, restrict) is not None
+    if fixed_share is None and share_band is None and (defensive or exact):
         share_band = (graph.share_floor, graph.share_ceiling)
+    tilt = exact_tilt(graph, fc, restrict, share_band) if exact else None
     if fixed_share is not None:
         v = np.full(n, float(fixed_share))
     elif tilt is not None:

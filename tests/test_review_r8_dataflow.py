@@ -65,15 +65,18 @@ ECHO_FORMS = [["x"], ["-n", "x"], ["-e", "a\\nb"], ["-E", "a\\nb"], ["a\\nb"], [
 @pytest.mark.parametrize("shell", ["bash", "zsh", "sh"])
 def test_echo_output_is_exact_or_unknown(shell):
     # Piped into awk, xargs or read, echo's output decides which lines exist; a wrong line is worse
-    # than none. The model's output (for the named shell, and for the transcript's own, bash or zsh)
-    # must be what the shell prints, or unknown.
+    # than none. For the named shell (sh starting in bash's POSIX mode) the model's output must be
+    # what the shell prints, or unknown; for the transcript's own shell, bash or zsh, one of the texts
+    # it gives must be.
     for args in ECHO_FORMS:
         command = "echo " + " ".join(map(shlex.quote, args))
         real = subprocess.run(["/bin/" + shell, "-c", command], capture_output=True, text=True,
                               env={"PATH": "/usr/bin:/bin"}, timeout=20).stdout
-        for named in [shell] + ([None] if shell != "sh" else []):
-            got = audit._echo(args, named, lambda a: a)
-            assert got is None or got == real, (shell, named, args, real, got)
+        got = audit._echo(args, shell, lambda a: a, posix=shell == "sh")
+        assert got is None or got == real, (shell, args, real, got)
+        if shell != "sh":
+            got = audit._echo(args, None, lambda a: a)
+            assert got is None or real in audit._choices(got), (shell, args, real, got)
 
 
 @pytest.mark.parametrize("program,category", [

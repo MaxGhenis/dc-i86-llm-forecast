@@ -181,8 +181,11 @@ local for programs that only print or transform it. Awk `-v` values follow their
 operations, command execution and `ARGV`; a literal `system()` command is audited as shell code
 without turning unrelated values into reads. Awk's actions are followed in the order awk runs them:
 a `getline` in a straight-line BEGIN block reads the next known input line, and record actions with
-no line left never run. The output of `echo` and `printf '%s\n'` is known exactly or not at all,
-since the shells' `echo`s differ on options and backslashes.
+no line left never run. What commands print is known as one text, a choice of texts where branches
+or the shells differ (their `echo`s differ on options and backslashes), or not at all; closed
+standard output (bash 3.2 writes later what a builtin wrote there), `exec`'s redirections and zsh's
+MULTIOS are followed. Writes to readonly variables fail, or end the line, the `eval` or the shell
+they are in, as each shell does.
 Known input also reaches a child shell's `while read` loop, a shell script or an awk shell command;
 when several commands share input and its consumption is unresolved, possible filename uses are
 suspect. Protected glob patterns remain checked when their matches are absent at audit time.
@@ -206,7 +209,10 @@ runs, which have no transcript. Whether a directory exists is judged at audit ti
 same command makes or removes. A generated-program test (`tests/test_audit_shell_differential.py`)
 runs each program under bash and zsh and checks that every program that reads a MOCK answer is
 reported, that the audit's possible places include where the shell ended, and that where the audit
-has one place it is that one. `tests/test_audit_shell_semantics.py` checks the arithmetic, `read`,
+has one place it is that one. `tests/test_audit_output_differential.py` checks the audit's model of
+what commands print against both shells on generated programs, and `tests/test_audit_readonly.py`
+checks writes to readonly variables and to a closed standard output, and that the audit flags
+exactly the reads each shell makes. `tests/test_audit_shell_semantics.py` checks the arithmetic, `read`,
 field splitting, here-strings, directory tildes, brace lists and ranges, arrays, assigning and error
 parameters, shell options, locals and exported child environments against both shells on generated
 inputs. Boundary tests also check failed parameter diagnostics, unset arrays, live exported shell

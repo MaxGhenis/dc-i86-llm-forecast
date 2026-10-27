@@ -1,14 +1,15 @@
 """The audit's shell model against the real shells, on generated MOCK programs.
 
-Each program mixes directory changes (to directories present, missing or made on the way),
-statuses, && and ||, if, case, loops (while, until, for, C-style, with counters), break, continue
-and return, arithmetic, file tests, functions (with arguments and locals), subshells, background
-jobs, pipelines (whose last stage zsh runs in the current shell), sh, bash and zsh -c (with
-positional parameters), exported and unexported variables, env -i, eval, read (with IFS), set --
-and shift, unset, variables, pushd/popd/dirs with stack rotations, and scripts written and then
-sourced or run, then prints its directory and reads a relative path, in one of several ways, that
-may reach another run's MOCK answer or a protected place. It runs under bash and zsh (no startup files) in a fresh temporary layout, and the
-audit then reads it. Properties, for every program and both shells:
+Each program mixes directory changes (to directories present, missing or made on the way), statuses
+(writes to readonly variables and to a closed standard output among them), && and ||, if, case,
+loops (while, until, for, C-style, with counters), break, continue and return, arithmetic, file
+tests, functions (with arguments and locals), subshells, background jobs, pipelines (whose last
+stage zsh runs in the current shell), sh, bash and zsh -c (with positional parameters), exported and
+unexported variables, env -i, eval, read (with IFS), set -- and shift, unset, variables,
+pushd/popd/dirs with stack rotations, and scripts written and then sourced or run, then prints its
+directory and reads a relative path, in one of several ways, that may reach another run's MOCK
+answer or a protected place. It runs under bash and zsh (no startup files) in a fresh temporary
+layout, and the audit then reads it. Properties, for every program and both shells:
 
 - soundness: if the shell printed a MOCK answer, the audit reports a violation or a suspect call;
 - the directory the shell ended in is one of the audit's possible working directories (unless the
@@ -62,7 +63,12 @@ atoms = st.one_of(
                      ": ${x:=..}", ": ${x=scratch}", ": ${x:?MOCK}", ": ${x?MOCK}",
                      "export IFS=:; export x=scratch:..; bash -c 'cd $x'",
                      # scripts written, then sourced or run
-                     "echo 'cd ..' > s.sh", "echo 'cd scratch' > s.sh", ". ./s.sh 2>/dev/null", "sh s.sh"]),
+                     "echo 'cd ..' > s.sh", "echo 'cd scratch' > s.sh", ". ./s.sh 2>/dev/null", "sh s.sh",
+                     # writes to a readonly variable, and to a closed standard output: statuses and exits
+                     "readonly r=1", "r=2", "r=2 true", "r=2 /bin/echo MOCK 2>/dev/null", "readonly r=2 2>/dev/null",
+                     "unset r 2>/dev/null", "for r in 1; do :; done 2>/dev/null", "eval 'r=3' 2>/dev/null",
+                     "read r < /dev/null 2>/dev/null", "echo x >&- 2>/dev/null", "printf x >&- 2>/dev/null",
+                     "{ echo x; } >&- 2>/dev/null", "pwd >&- 2>/dev/null"]),
     st.sampled_from(DIRS).map(lambda d: f"pushd {d} >/dev/null 2>&1"),
     st.sampled_from(DIRS).map(lambda d: f"cd {d} | cat"),
     st.sampled_from(DIRS).map(lambda d: f"eval {shlex.quote('cd ' + d)}"),
