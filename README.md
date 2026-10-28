@@ -58,7 +58,8 @@ distribution, and in a stretch at most 1,024 floats wide, by drawing among its f
 proportion to its tilted probability, so that no draw lands where the chance is 0 (a wider stretch
 where the chance rounds to 0 over many floats is first cut to where it is positive, and a draw that
 still lands where the computed chance is 0, as the sum of options' chances that each round to 0 can
-be, moves to the nearest float where it is positive). Every draw then
+be, moves to a float where it is positive: the nearest within 1,024 floats, or else one found by
+bisection). Every draw then
 counts fully, with weight 1 (the condition's probability is kept apart), and a forecaster that gives
 the condition 1 in 10,000 counts as much as one that gives it 9 in 10; only one that gives it zero
 is left out, and the report says so. For a condition this cannot handle (one on a node that also

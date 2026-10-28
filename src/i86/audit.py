@@ -8545,39 +8545,156 @@ def _next_place(shell: _Shell, workdir: Path, place: dict, slow: bool = True) ->
 
 
 # Builtins that return at once on arguments of the size a command line holds (see `_may_outlast`
-# for the arguments that make printf and the typeset family slow, and the expansions that do).
+# for the arguments that make printf, the typeset family and the others slow, and the expansions
+# that do). `let` is not among them: its every argument is arithmetic, which may evaluate variables.
 QUICK_BUILTINS = {"cd", "chdir", "pushd", "popd", "dirs", "pwd", "true", "false", ":", "echo", "printf",
                   "export", "unset", "set", "setopt", "unsetopt", "shopt", "shift", "local", "declare", "typeset",
-                  "readonly", "test", "[", "let", "umask", "return", "exit"}
+                  "readonly", "test", "[", "umask", "return", "exit"}
 # A timeout, in milliseconds, that a call of quick builtins finishes within, with a wide margin
 # (measured here: `cd` with a 1 ms timeout was moved to the background, and with 10 ms it finished).
 QUICK_TIMEOUT_MS = 1000
 # A printf format with a width or a precision, which can print far more than the command holds.
 PRINTF_WIDTH = re.compile(r"%[-+ #0']*[0-9*.]")
+# A printf conversion and its letter (length modifiers skipped), in a format with `%%` removed.
+PRINTF_CONVERSION = re.compile(r"%[^A-Za-z%]*[hlLqjzt]*([A-Za-z])")
 # A word that brace expansion may multiply: `{a,b}`, `{1..9}`.
 BRACES = re.compile(r"\{[^{}]*(,|\.\.)")
+# A number written plainly, which no shell's arithmetic reads as a variable.
+PLAIN_NUMBER = re.compile(r"[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?")
+# `[[ ]]`'s operators that evaluate both sides as arithmetic in bash, sh and zsh (`[` and test do
+# not: they reject a word that is not a number, measured here).
+ARITHMETIC_TESTS = {"-eq", "-ne", "-lt", "-le", "-gt", "-ge"}
+# The nodes an arithmetic expression of numbers alone is made of.
+ARITHMETIC_OF_NUMBERS = {"number", "binary_expression", "unary_expression", "parenthesized_expression",
+                         "ternary_expression"}
+# The typeset family's options that make a call slow: zsh's padding (-L, -R, -Z pad the value to
+# the width given), and the integer and float attributes (-i, -E, -F), under which an assignment's
+# value is arithmetic (bash and zsh; zsh's export and readonly take them too, measured here).
+SLOW_TYPESET_OPTIONS = set("LRZiEF")
 
 
 def _literal_word(node) -> bool:
     return node.type in {"word", "raw_string", "string"} and all(c.type == "string_content" for c in node.named_children)
 
 
+def _word_value(node) -> str | None:
+    """A literal word's value, once the shell removes its quotes and backslashes, or None for a
+    word that expands anything. A backslash in an unquoted word escapes the next character, and in
+    double quotes only `$`, `` ` ``, `"`, `\\` and a newline; a backslash-newline is removed."""
+    if node.type == "number" and not node.named_children:
+        return _text(node)
+    if not _literal_word(node):
+        return None
+    text = _text(node)
+    if node.type == "raw_string":
+        return text[1:-1]
+    if node.type == "string":
+        return re.sub(r'\\([$`"\\\n])', lambda m: "" if m.group(1) == "\n" else m.group(1), text[1:-1])
+    return re.sub(r"\\(.)", lambda m: "" if m.group(1) == "\n" else m.group(1), text, flags=re.S)
+
+
 def _printf_formats(args: list) -> set[int]:
-    """Where printf's format may be among its arguments: the first (zsh reads `-vNAME` and `-q` as
-    the format), after bash's options (`-v NAME`, `-vNAME`, then `--`), and after zsh's (`-v NAME`,
-    then `--`). Measured on bash 3.2, sh, dash and zsh 5.9; dash takes only `--`."""
-    words = [_text(a).strip("'\"") if _literal_word(a) else None for a in args]
+    """Every place printf's format may be among its arguments: the first, and after each option a
+    shell may read. bash and sh take `-v NAME`, `-vNAME` and then `--`; zsh takes `-v NAME`, `--`,
+    and a word whose letters are all its options (`-vv`) before the format, but reads `-vMOCK` and
+    `-q` as the format; dash takes `--` alone, and bash and dash reject any other option at once
+    (all measured on bash 3.2, sh, dash and zsh 5.9). So after a word that is `--` the next may be
+    the format, and after one starting `-v` either of the next two; each word is read as its value,
+    with its quotes and backslashes removed (`\\-\\-` is `--`). A word that is not literal may be
+    either, so it is a place too, and the caller takes the call as slow."""
+    reach, i = {0}, 0
+    while i < len(args):
+        if i in reach:
+            value = _word_value(args[i])
+            if value == "--":
+                reach.add(i + 1)
+            elif value is not None and value.startswith("-v"):
+                reach.update((i + 1, i + 2))
+        i += 1
+    return {i for i in reach if i < len(args)}
+
+
+def _printf_slow(args: list) -> bool:
+    """Whether a printf call may print far more than it holds or run on: a word that may be its
+    format is not literal or has a width or precision; a format with a numeric conversion is
+    followed by a word that is not a plain number (zsh evaluates each as arithmetic, which may
+    evaluate variables holding expressions: `printf %d x1` prints 2 where x1 is `x0+x0`, measured
+    here); or `-v` names an array element, whose subscript is arithmetic."""
+    for i in sorted(_printf_formats(args)):
+        value = _word_value(args[i])
+        if value is None or PRINTF_WIDTH.search(value):
+            return True
+        if any(m.group(1) in "diouxXeEfFgGaA" for m in PRINTF_CONVERSION.finditer(value.replace("%%", ""))):
+            if not all((v := _word_value(a)) is not None and PLAIN_NUMBER.fullmatch(v) for a in args[i + 1:]):
+                return True
+        if value.startswith("-v"):
+            name = value[2:] if len(value) > 2 else (_word_value(args[i + 1]) if i + 1 < len(args) else "")
+            if name is None or "[" in name:
+                return True
+    return False
+
+
+def _glob_chars(text: str) -> bool:
+    """Whether an unquoted word's text holds a character that pathname expansion reads, unescaped:
+    `*`, `?` or `[`, or zsh's EXTENDED_GLOB `^`, `#` and a `~` after the first character."""
     i = 0
-    while i < len(words) and words[i] is not None and words[i].startswith("-") and words[i] != "-":
-        if words[i] == "--":
-            i += 1
-            break
-        if not words[i].startswith("-v"):
-            break  # an option bash rejects at once
-        i += 2 if words[i] == "-v" else 1
-    j = 2 if words[:1] == ["-v"] else 0
-    j += 1 if j < len(words) and words[j] == "--" else 0
-    return {0, i, j}
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] in "*?[^#" or text[i] == "~" and i > 0:
+            return True
+        i += 1
+    return False
+
+
+def _may_glob(node) -> bool:
+    """Whether an expansion's result may undergo pathname expansion, which may walk a whole tree
+    (`x='/*/*/*'; echo $x` in bash, sh and dash, and in zsh under GLOB_SUBST): an expansion that is
+    unquoted, in a word of a command, of `[` or of the typeset family, and not an assignment's value
+    (`local x=*` and `export z=*` do not expand the pattern, measured on bash 3.2 and zsh 5.9), a
+    part of `[[ ]]`, a here-string or part of an enclosing `${...}` (which is checked itself)."""
+    parent = node.parent
+    while parent is not None:
+        if parent.type in {"string", "heredoc_body", "variable_assignment", "arithmetic_expansion", "subscript",
+                           "expansion", "herestring_redirect"}:
+            return False
+        if parent.type == "test_command":
+            return _text(parent.children[0]) != "[["
+        if parent.type in {"command", "declaration_command", "unset_command", "file_redirect"}:
+            return True
+        parent = parent.parent
+    return False
+
+
+def _arithmetic_slow(node) -> bool:
+    """Whether a node evaluates arithmetic that may run on: an arithmetic expansion or `(( ))` of
+    anything but numbers (a name may hold an expression, evaluated in turn: `x20` built by doubling
+    `x0=1; x1='x0+x0'` took 9 s on bash and 24 s on zsh, measured in round 14e), or with `**`
+    (`$((3**4000000000))` took 3.8 s on bash and 4.6 s on zsh, measured here); a subscript other
+    than a number, `@` or `*`; a `${x:offset:length}` whose offset or length is not a number; and
+    `[[ ]]`'s arithmetic comparisons of anything but numbers."""
+    if node.type == "arithmetic_expansion" or node.type == "compound_statement" and _text(node.children[0]) == "((":
+        return "**" in _text(node) or any(c.type not in ARITHMETIC_OF_NUMBERS for c in _walk(node)
+                                          if c.is_named and c is not node)
+    if node.type == "subscript":
+        index = [c for c in node.named_children[1:]]
+        return not (len(index) == 1 and (index[0].type == "number" or _text(index[0]) in {"@", "*"}))
+    if node.type == "expansion":
+        after = False
+        for c in node.children:
+            if not c.is_named and _text(c) == ":":
+                after = True
+            elif after and c.is_named and c.type != "number":
+                return True
+        return False
+    if node.type == "binary_expression" and any(_text(c) in ARITHMETIC_TESTS for c in node.children):
+        test = node.parent
+        while test is not None and test.type != "test_command":
+            test = test.parent
+        return (test is not None and _text(test.children[0]) == "[["
+                and any(c.is_named and c.type not in {"number", "test_operator"} for c in node.children))
+    return False
 
 
 def _may_outlast(command: str, timeout=MISSING) -> bool:
@@ -8586,13 +8703,17 @@ def _may_outlast(command: str, timeout=MISSING) -> bool:
     builtins, under a timeout left at its default (120 s) or set to a number of at least
     QUICK_TIMEOUT_MS. A call of quick builtins runs only literal QUICK_BUILTINS names, in every
     branch and substitution, with no loop, no function defined, no `case` or other pattern match
-    (`[[ x == pattern ]]`, `=~`), no brace expansion, no `${...}` the grammar cannot read (zsh's
-    flags, as in `${(l:9:)x}`), at most 8 parameter expansions in all (so that no value doubles its
-    way to gigabytes), printf only with literal words up to its format, and no width or precision in
-    any word a shell may take for the format (see `_printf_formats`), the typeset
-    family with no padding option (zsh's -L, -R, -Z), and no redirection that opens a file other than
-    /dev/null (opening a FIFO waits for its other end). It takes `cd` and `test` to return at once, as
-    they do on a local file system."""
+    (`[[ x == pattern ]]`, `=~`, `${x#pattern}`), no brace expansion, no `${...}` the grammar cannot
+    read (zsh's flags, as in `${(l:9:)x}`), at most 8 parameter expansions in all (so that no value
+    doubles its way to gigabytes), printf only as `_printf_slow` allows, the typeset family with no
+    option in SLOW_TYPESET_OPTIONS and no name that is not literal or names an array element, no
+    arithmetic that `_arithmetic_slow` finds, zsh's shift, return and exit with plain integers alone
+    (zsh evaluates their arguments as arithmetic, measured here), no pathname expansion (no
+    unescaped glob character in an unquoted word, and no unquoted expansion where `_may_glob` says
+    the shell expands its result), no zsh subscript after a parameter in double quotes (`"$a[x]"`),
+    no xtrace turned on (PS4 is expanded for each command traced), and no redirection that opens a
+    file other than /dev/null (opening a FIFO waits for its other end). It takes `cd` and `test` to
+    return at once, as they do on a local file system."""
     if timeout is not MISSING and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
                                    or not timeout >= QUICK_TIMEOUT_MS):
         return True
@@ -8604,15 +8725,39 @@ def _may_outlast(command: str, timeout=MISSING) -> bool:
         if node.type in {"while_statement", "for_statement", "c_style_for_statement", "function_definition",
                          "case_statement", "brace_expression", "regex", "extglob_pattern"}:
             return True
-        if node.type in {"simple_expansion", "expansion"}:
-            expansions += 1
-            if expansions > 8:
+        if _arithmetic_slow(node):
+            return True
+        if node.type in {"simple_expansion", "expansion", "command_substitution"}:
+            if node.type != "command_substitution":
+                expansions += 1
+                if expansions > 8:
+                    return True
+            special = (node.type == "simple_expansion" and node.named_children
+                       and node.named_children[0].type == "special_variable_name"
+                       and _text(node.named_children[0]) in {"#", "?", "$", "!", "-"}
+                       or node.type == "expansion" and len(node.children) > 1 and _text(node.children[1]) == "#")
+            if not special and _may_glob(node):
                 return True
         if node.type in {"word", "concatenation"} and BRACES.search(_text(node)):
             return True
-        if node.type == "test_command" and any(c.type in {"word", "concatenation"} and set(_text(c)) & set("*?[(")
-                                               for c in _walk(node)):
+        if node.type == "word" and node.parent is not None and node.parent.type not in {"variable_assignment", "subscript"} \
+                and _glob_chars(_text(node)):
             return True
+        if node.type in {"string", "heredoc_body"} and any(
+                a.type == "simple_expansion" and _text(b).startswith("[")
+                for a, b in zip(node.children, node.children[1:])):
+            return True
+        if node.type == "test_command":
+            if any(c.type in {"word", "concatenation"} and set(_text(c)) & set("*?[(") for c in _walk(node)):
+                return True
+            for c in _walk(node):
+                if c.type == "binary_expression" and any(not k.is_named and _text(k) in {"==", "=", "!="}
+                                                         for k in c.children):
+                    if c.named_children and c.named_children[-1].type not in {"string", "raw_string", "word", "number"}:
+                        return True
+                if c.type == "unary_expression" and any(_text(k) == "-v" for k in c.children) and any(
+                        (v := _word_value(k)) is None or "[" in v for k in c.named_children if k.type != "test_operator"):
+                    return True
         if node.type == "command":
             name = node.child_by_field_name("name")
             if (name is None or len(name.named_children) != 1 or name.named_children[0].type != "word"
@@ -8620,13 +8765,29 @@ def _may_outlast(command: str, timeout=MISSING) -> bool:
                 return True
             args = [c for c in node.children if c.is_named and c.type != "command_name"
                     and not c.type.endswith("redirect")]
-            if _text(name) == "printf" and any(
-                    i < len(args) and (not all(_literal_word(w) for w in args[:i + 1])
-                                       or PRINTF_WIDTH.search(_text(args[i])))
-                    for i in _printf_formats(args)):
+            values = [_word_value(a) for a in args]
+            if _text(name) == "printf" and _printf_slow(args):
                 return True
-        if node.type == "declaration_command" and any(
-                c.type == "word" and _text(c)[:1] in "-+" and set(_text(c)[1:]) & set("LRZ") for c in node.children):
+            if _text(name) in {"shift", "return", "exit"} and not all(
+                    v is not None and re.fullmatch(r"[-+]?\d+", v) for v in values):
+                return True
+            if _text(name) in {"set", "setopt", "unsetopt", "shopt"} and any(
+                    v is None or "xtrace" in v.lower().replace("_", "") or v[:1] == "-" and "x" in v[1:]
+                    for v in values):
+                return True
+        if node.type == "variable_assignment":
+            target = node.named_children[0] if node.named_children else None
+            if target is not None and _text(target) == "PS4":
+                return True
+        if node.type == "declaration_command":
+            for c in node.named_children:
+                if c.type in {"variable_assignment", "variable_name"}:
+                    continue
+                value = _word_value(c)
+                if value is None or value[:1] in "-+" and set(value[1:]) & SLOW_TYPESET_OPTIONS or "[" in value:
+                    return True
+        if node.type == "unset_command" and any(
+                c.type != "variable_name" and ((v := _word_value(c)) is None or "[" in v) for c in node.named_children):
             return True
         if node.type == "file_redirect":
             op = "".join(_text(c) for c in node.children if not c.is_named)
@@ -8986,18 +9147,32 @@ def _id_key(value):
     """A Codex item's id as a key: numbers alike only when equal (1 and 1.0), compared exactly as
     written (2^53 and 2^53 + 1 differ, and so do 1e400 and 2e400; see _JSONFloat and
     `_exact_number`), lists and objects by their parts' keys (so `[1e400]` and `[2e400]` differ
-    too), anything else by its JSON text."""
-    if isinstance(value, _JSONFloat):
-        return ("number", _exact_number(value.text))
-    if not isinstance(value, bool) and isinstance(value, int):
-        return ("number", _exact_number(str(value)))
-    if isinstance(value, float) and math.isfinite(value):  # a float not read from JSON text
-        return ("number", _exact_number(format(Decimal(value), "f")))
-    if isinstance(value, list):
-        return ("list", tuple(_id_key(v) for v in value))
-    if isinstance(value, dict):
-        return ("object", tuple(sorted((k, _id_key(v)) for k, v in value.items())))
-    return ("json", json.dumps(value, sort_keys=True, default=str))
+    too), anything else by its JSON text. The key is the id's tokens in order, an object's keys
+    sorted, built with a stack of its own so that an id nested as deep as json.loads reads (past
+    5,000 levels) has one: recursion in Python stops near 1,000."""
+    tokens, todo = [], [(False, value)]
+    while todo:
+        done, part = todo.pop()
+        if done:
+            tokens.append(part)
+        elif isinstance(part, list):
+            tokens.append("[")
+            todo.append((True, "]"))
+            todo.extend((False, v) for v in reversed(part))
+        elif isinstance(part, dict):
+            tokens.append("{")
+            todo.append((True, "}"))
+            for k, v in sorted(part.items(), key=lambda kv: kv[0], reverse=True):
+                todo.extend([(False, v), (True, ("key", k))])
+        elif isinstance(part, _JSONFloat):
+            tokens.append(("number", _exact_number(part.text)))
+        elif not isinstance(part, bool) and isinstance(part, int):
+            tokens.append(("number", _exact_number(str(part))))
+        elif isinstance(part, float) and math.isfinite(part):  # a float not read from JSON text
+            tokens.append(("number", _exact_number(format(Decimal(part), "f"))))
+        else:
+            tokens.append(("json", json.dumps(part, sort_keys=True, default=str)))
+    return tuple(tokens)
 
 
 def _covers(done: list, begun: list) -> bool:
@@ -9086,6 +9261,7 @@ def audit_transcript(path: Path, workdir: str) -> dict:
             lose_place()
             for part in line:
                 audit_line(part, raw)
+            lose_place()  # a Bash call among the parts does not set the next start
             return
         if not isinstance(line, dict):
             lists["suspect"].append({"tool": "?", "call": raw[:4000], "why": "a transcript line that is not an event"})
@@ -9119,9 +9295,10 @@ def audit_transcript(path: Path, workdir: str) -> dict:
         audit_calls(line)
 
     # Lines end at a newline alone: JSON text may hold U+2028 and the other characters that
-    # str.splitlines also splits at.
+    # str.splitlines also splits at. Only a line of JSON's own whitespace is no line at all; one of
+    # other whitespace (U+00A0, U+3000, a vertical tab), which json.loads rejects, is suspect.
     for raw in path.read_text(errors="replace").split("\n"):
-        if not raw.strip():
+        if not raw.strip(" \t\r\n"):
             continue
         try:
             line = json.loads(raw, parse_float=_JSONFloat)

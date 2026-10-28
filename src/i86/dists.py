@@ -232,8 +232,10 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2
     is 0 on two or more floats at an end is first cut to the floats where it is positive (see
     `_cut_zero_ends`), so the clip at its ends has only one float to keep off. A wide segment's draw
     that still lands where the computed tilt is 0 (below 2^-1022 a sum of rounded chances can be 0
-    at a float inside a segment where the exact tilt is positive) moves to the nearest float of its
-    segment where it is positive (see `_off_zero`). Every draw is then where the computed tilt is
+    at a float inside a segment where the exact tilt is positive) moves to a float of its segment
+    where it is positive: the nearest within NARROW_FLOATS floats, or else one found by bisection
+    towards a float where the sampler read the tilt as positive, which need not be the nearest (see
+    `_off_zero`). Every draw is then where the computed tilt is
     positive; so near 0, the draws follow the linear tilt only up to its rounding.
 
     Each segment's tilted mass is held as a mantissa and a power of two (frexp), so no product
