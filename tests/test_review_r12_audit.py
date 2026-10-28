@@ -64,12 +64,9 @@ def test_the_model_starts_a_bash_call_where_the_last_one_started_after_an_exit_o
     assert "../opus-10/draft.json" in out["violations"][-1]["call"], out
 
 
-def test_a_cd_inside_the_work_directory_keeps_later_reads_local(tmp_path):
-    (WORK / "MOCK-sub").mkdir(parents=True, exist_ok=True)
-    try:
-        out = run(tmp_path, [claude("Bash", command="cd MOCK-sub"), claude("Bash", command="cat draft.json")])
-    finally:
-        (WORK / "MOCK-sub").rmdir()
+def test_a_cd_inside_the_work_directory_keeps_later_reads_local(area, tmp_path):
+    (area / "MOCK-sub").mkdir()
+    out = audit_events(area, tmp_path, [claude("Bash", command="cd MOCK-sub"), claude("Bash", command="cat draft.json")])
     assert not out["violations"] and out["passed"], out
 
 

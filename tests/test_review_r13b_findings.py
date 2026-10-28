@@ -113,7 +113,6 @@ def test_a_line_holding_a_call_is_not_skipped(area, tmp_path, kind):
 R = "cat ../opus-2/draft.json"
 
 
-@pytest.mark.xfail(strict=True, reason="FINDINGS m6: regressions from 5fc7b11, which flagged each")
 @pytest.mark.parametrize("code", [
     '"nocorrect" : < "${x:=/dev/null}" 2>/dev/null; [ "${x-unset}" = unset ] && ' + R,
     'nocorrect < "${x:=/dev/null}" 2>/dev/null; [ "${x-unset}" = unset ] && ' + R,
@@ -126,7 +125,6 @@ def test_zsh_precommand_regressions_are_flagged(code):
     assert flag, ("miss", seen)
 
 
-@pytest.mark.xfail(strict=True, reason="FINDINGS m7: MULTIOS join missing for these stages")
 @pytest.mark.parametrize("code", [
     "printf '../opus-2/draft.json\\n' | while read l; do cat \"$l\"; done < /dev/null",
     "cat <<E | xargs cat < /dev/null 2>/dev/null\n../opus-2/draft.json\nE",
@@ -138,7 +136,6 @@ def test_zsh_multios_stages_are_flagged(code):
     assert flag, ("miss", seen)
 
 
-@pytest.mark.xfail(strict=True, reason="FINDINGS m7: the outer statement's redirections come first in `simple`")
 @pytest.mark.parametrize("name", ["bash", "zsh"])
 def test_a_herestring_before_a_file_redirection_reads_in_order(name):
     from test_audit_output_differential import matches
