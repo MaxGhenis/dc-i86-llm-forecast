@@ -1,7 +1,8 @@
 """Round-12 probes: a band's last positive CDF sliver must survive lower-end clipping.
 
 All responses are invented MOCK forecasts. The last supported share is 55%; the
-band starts one representable float below it, so simulate clips every draw to 55%.
+band starts one representable float below it, so 55% is the band's only float with probability,
+and every draw is 55%.
 The 72% answer cannot affect those draws or the scale needed for their tiny tilt.
 """
 

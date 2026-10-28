@@ -5,7 +5,8 @@ where FILE says; it reads FILE only for a call in the foreground, and a missing 
 as it was (read from its binary). Measured here on 2.1.308 and by the review on 2.1.284: after
 `cd src; false` and `cd src; exit 0` the next call started where they had started, after
 `cd src; true` it started in src, and after a call run in the background it started where that one
-had started. A call that outlives its timeout is moved to the background. All transcripts are MOCK,
+had started. A call that outlasts its timeout is moved to the background: measured here, after
+`cd tsub && cat fifo` with a 3 s timeout, the next call started where that one had. All transcripts are MOCK,
 in the work area test_audit uses."""
 
 import pytest
@@ -23,7 +24,7 @@ def bash(command, **flags):
 @pytest.mark.parametrize("first", [
     bash("cd .. && echo MOCK", run_in_background=True),
     bash("cd ..", run_in_background="yes"),  # a flag the audit cannot read: either way
-    bash("cd ..; while :; do :; done"),  # never ends: killed or moved to the background
+    bash("cd ..; while :; do :; done"),  # never ends: moved to the background at its timeout
     bash("trap 'cd ..' EXIT; true"),  # the trap runs after Claude Code has read where the shell is
 ])
 def test_the_next_call_starts_where_this_one_started(tmp_path, first):

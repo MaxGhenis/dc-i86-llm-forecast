@@ -171,8 +171,8 @@ def cmd_audit(args) -> int:
 
 def _audit_record(result) -> bool:
     """Whether an audit.json holds what `audit_transcript` writes: whether the run passed, and its
-    violations and suspect calls as lists. A record without them (damaged, or an older audit's)
-    keeps its run out of the pool, as no audit does."""
+    violations and suspect calls as lists. A record without them (damaged, cut short so that it is
+    not JSON, or an older audit's) keeps its run out of the pool, as no audit does."""
     return (isinstance(result, dict) and isinstance(result.get("passed"), bool)
             and isinstance(result.get("violations"), list) and isinstance(result.get("suspect"), list))
 
@@ -193,7 +193,10 @@ def accepted_runs(g, prompt_sha: str, allow_unaudited: bool = False, accept_prio
                   file=sys.stderr)
             continue
         audit_path = d / "audit.json"
-        result = json.loads(audit_path.read_text()) if audit_path.exists() else None
+        try:
+            result = json.loads(audit_path.read_text()) if audit_path.exists() else None
+        except (ValueError, RecursionError):
+            result = "unreadable"  # not an audit record (below)
         if result is None and not (allow_unaudited and meta.get("backend") == "manual"):
             print(f"excluding {d.name}: no audit (run `i86 audit`; manual runs need --allow-unaudited)",
                   file=sys.stderr)

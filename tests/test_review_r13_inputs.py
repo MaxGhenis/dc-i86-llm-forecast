@@ -1,7 +1,7 @@
 """Round-13 findings on the audit's inputs (the review's Opus lane): inputs of every shape a
 transcript can hold, URL spellings a web tool reads as this machine's, Codex items started and
 completed under any id, Claude Code's MCP resource tools and TaskStop, and an audit record pooling
-cannot read. Each test failed on e564f83. All transcripts and files are MOCK, in a temporary MOCK
+cannot read. Each test failed on e564f83, but for the remote URLs that 8d777d5 added as controls. All transcripts and files are MOCK, in a temporary MOCK
 work area (runners.WORK monkeypatched), as in tests/test_review_r12_audit.py."""
 
 import json

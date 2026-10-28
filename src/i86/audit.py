@@ -248,10 +248,12 @@ import functools
 import glob as globlib
 import itertools
 import json
+import math
 import os
 import re
 import shlex
 from contextlib import contextmanager, nullcontext
+from fractions import Fraction
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import unquote
@@ -7994,7 +7996,7 @@ def _shell(command: str, workdir: Path, files: dict | None = None, place: dict |
         shell.run(command)
         passes.append(shell)
     if place is not None:
-        place.update(_next_place(shell, workdir, place))
+        place.update(_next_place(shell, workdir, place, slow=_may_outlast(command)))
     shell.run_traps(0)
     shell.finish(0)
     shell.flush()  # bash's exit
@@ -8003,26 +8005,62 @@ def _shell(command: str, workdir: Path, files: dict | None = None, place: dict |
     return shell
 
 
-def _next_place(shell: _Shell, workdir: Path, place: dict) -> dict:
+def _next_place(shell: _Shell, workdir: Path, place: dict, slow: bool = True) -> dict:
     """Where the next Claude Code Bash call may start, once `shell` has run (before its EXIT trap,
     which the shell runs after Claude Code has read where it is, and before `finish`). Claude Code
     2.1.308 runs a call as `eval CMD && pwd -P >| FILE` and starts the next where FILE says, so where
     this one ended only if it ran to its end with status 0; after an exit, a failing status, or a
-    call killed or moved to the background at its timeout, the next starts where this one started
-    (measured on 2.1.284 and 2.1.308). So a place where the shell ended with status 0 for certain
-    (a builtin's, as `cd sub; echo` ends) is the only one; where it may have failed, the start is
-    one too. Claude Code moves a shell that ends outside the directories it allows back to where
+    call moved to the background at its timeout, the next starts where this one started (measured
+    on 2.1.284 and 2.1.308). So a place where the shell ended with status 0 for certain
+    (a builtin's, as `cd sub; echo` ends) is the only one only if the call cannot outlast its
+    timeout (`slow`, see `_may_outlast`); where it may have failed or run on, the start is one too.
+    A `pwd` the call made a function or an alias prints what it likes, so the next start is then
+    unknown. Claude Code moves a shell that ends outside the directories it allows back to where
     the session started, the work directory here; the audit does not know which other directories
     it allows, so a place outside the work directory keeps both."""
     began = place.get("worlds") or [_World(workdir, None)]
     worlds = [w for w in shell.worlds if w.status != FAILED]
-    if shell.exits or not worlds or len(worlds) < len(shell.worlds) or any(w.status != OK for w in worlds):
+    if (slow or shell.exits or not worlds or len(worlds) < len(shell.worlds)
+            or any(w.status != OK for w in worlds)):
         worlds += began
     if any(not _under(w.cwd, workdir) for w in worlds):
         worlds.append(_World(workdir, None))
     # A new shell: no $OLDPWD of the command's, no pushd stack.
     worlds = list({(w.cwd, w.primary): _World(w.cwd, None, (), MAYBE, w.primary) for w in worlds}.values())
-    return {"worlds": worlds, "known": shell.known}
+    return {"worlds": worlds, "known": shell.known and "pwd" not in shell.functions and "pwd" not in shell.aliases}
+
+
+# Builtins that return at once whatever their arguments: a call of only these, with no loop, no
+# function and no redirection other than to /dev/null or a descriptor, cannot outlast its timeout.
+QUICK_BUILTINS = {"cd", "chdir", "pushd", "popd", "dirs", "pwd", "true", "false", ":", "echo", "printf", "print",
+                  "export", "unset", "set", "setopt", "unsetopt", "shopt", "shift", "local", "declare", "typeset",
+                  "readonly", "test", "[", "let", "umask", "return", "exit"}
+
+
+def _may_outlast(command: str) -> bool:
+    """Whether a Bash call may run longer than Claude Code's timeout (which moves it to the
+    background, so that the next call starts where this one started): anything but a call
+    whose every command, in any branch and any substitution, is a literal QUICK_BUILTINS name, with
+    no loop, no function or alias defined, and no redirection that opens a file other than
+    /dev/null (opening a FIFO waits for its other end)."""
+    root = _BASH.parse(command.encode()).root_node
+    if root.has_error:
+        return True
+    for node in _walk(root):
+        if node.type in {"while_statement", "for_statement", "c_style_for_statement", "function_definition"}:
+            return True
+        if node.type == "command":
+            name = node.child_by_field_name("name")
+            if (name is None or len(name.named_children) != 1 or name.named_children[0].type != "word"
+                    or _text(name) not in QUICK_BUILTINS):
+                return True
+        if node.type == "file_redirect":
+            op = "".join(_text(c) for c in node.children if not c.is_named)
+            dest = node.child_by_field_name("destination")
+            target = _text(dest) if dest is not None else ""
+            if not (target == "/dev/null" or op.endswith("&") and (target.isdigit() or target == "-")):
+                return True
+    return False
 
 
 def _unwritable(value) -> bool:
@@ -8041,11 +8079,58 @@ def _unwritable(value) -> bool:
     return False
 
 
-def _url_as_parsed(url: str) -> str:
-    """A URL as the WHATWG parser reads an http(s) one: the scheme in lower case, any run of slashes
-    and backslashes after it as `//`, and a backslash as a slash."""
-    scheme, _, rest = url.partition(":")
-    return scheme.lower() + "://" + rest.lstrip("/\\").replace("\\", "/")
+def _strings(value):
+    """Every string in a JSON value, its keys included."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _strings(k)
+            yield from _strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _strings(v)
+
+
+# What ends a URL's host for the WHATWG parser in an http(s) URL, and the code points it rejects in
+# a host (a space, `<`, `^`, a control...): a reading with one names no host, since the parser fails.
+HOST_END = re.compile(r"[/\\?#]")
+HOST_FAILS = re.compile(r"[\x00-\x20<>\[\]^|\x7f]")
+C0_OR_SPACE = "".join(map(chr, range(0x21)))
+
+
+def _web_hosts(text: str):
+    """The hosts the WHATWG URL parser, which Node's fetch uses, reads in the http(s) URLs a text may
+    hold: from each `http:` or `https:` (in any case, after any character) to the end of the text,
+    and to the first space or quote, each with its tabs and newlines removed as the parser removes
+    them. The parser skips any slashes and backslashes after the scheme, ends the host at a slash,
+    backslash, `?` or `#`, takes it after the last `@` (`http://example.org @127.0.0.1/` is
+    127.0.0.1's) and before a port. An IPv6 host (`[::1]`) is yielded whole."""
+    for m in re.finditer(r"(?i)https?:", text):
+        rest = text[m.end():]
+        # The parser strips spaces and controls at the ends of what it reads.
+        for reading in (rest.rstrip(C0_OR_SPACE), re.split(r"[\s'\"<>)`]", rest, maxsplit=1)[0]):
+            reading = re.sub(r"[\t\n\r]", "", reading).lstrip("/\\")
+            host = HOST_END.split(reading, maxsplit=1)[0].rpartition("@")[2]
+            if host.startswith("[") and "]" in host:
+                host = host[: host.index("]") + 1]
+            else:
+                host = host.split(":", 1)[0]
+                if not host or HOST_FAILS.search(host):
+                    continue
+            yield host
+
+
+def _scrubbed(value):
+    """A tool input with each NUL and lone surrogate replaced by U+FFFD, which every path and
+    argument can hold."""
+    if isinstance(value, str):
+        return re.sub(r"[\x00\ud800-\udfff]", "�", value)
+    if isinstance(value, dict):
+        return {_scrubbed(k): _scrubbed(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrubbed(v) for v in value]
+    return value
 
 
 def _shell_command(inp) -> str | None:
@@ -8075,23 +8160,33 @@ def _tool_calls(line: dict):
         if isinstance(part, dict) and part.get("type") == "tool_use":
             yield part.get("name", "?"), part.get("input", {})
     item = line.get("item")
-    if item is None or line.get("type") not in {None, "item.completed"}:
-        return  # Codex repeats an item as started and completed; `audit_transcript` counts it once.
-    if not isinstance(item, dict):
-        yield "codex_item", item
+    event = line.get("type")
+    if item is None or event == "item.started" or event == "item.updated":
+        return  # Codex repeats an item as started, updated and completed; `audit_transcript` counts it once.
+    if not isinstance(item, dict) or not (event is None or event == "item.completed"):
+        yield "codex_item", item  # an item the audit cannot read, or in an event it does not know
         return
     kind = item.get("type")
-    if kind == "command_execution":
+    if not isinstance(kind, str):
+        yield "codex_item", item
+    elif kind == "command_execution":
         yield "shell", {"command": item.get("command")}
     elif kind in {"file_read", "file_change"}:
-        yield kind, item
+        # What the item names; not its status, which changes from start to completion.
+        yield kind, {k: item[k] for k in ("path", "file_path", "changes") if k in item}
     elif kind == "mcp_tool_call":
         yield f"mcp:{item.get('server', '?')}/{item.get('tool', '?')}", item.get("arguments") or {}
     elif kind == "web_search":
-        # The query, and the page it opened (an open_page action has a URL and may have no query).
-        action = item.get("action") if isinstance(item.get("action"), dict) else {}
-        yield "web_search", {"query": item.get("query", ""),
-                             **({"url": str(action["url"])} if action.get("url") else {})}
+        # The query, the page it opened (an open_page action has a URL and may have no query) and
+        # the rest of the action (a search's queries), whose URLs are read as a fetch would read them.
+        # A search starts with an action that names only its kind (`{"type": "other"}`); with no
+        # colon it holds no URL, and kept it would stop the completed item from covering its start.
+        action = item.get("action")
+        if isinstance(action, dict) and set(action) <= {"type"} and ":" not in str(action.get("type", "")):
+            action = None
+        url = action.get("url") if isinstance(action, dict) else None
+        yield "web_search", {"query": item.get("query", ""), **({"url": str(url)} if url else {}),
+                             **({"action": action} if action not in (None, "", [], {}) else {})}
     elif kind == "collab_tool_call":
         yield "collab", item
     elif kind not in CODEX_NOT_CALLS:
@@ -8127,6 +8222,17 @@ def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: di
     if not isinstance(tool, str):
         return "suspect", "a tool call without a name the audit can read"
     if _unwritable(inp):
+        # Read as if each NUL and lone surrogate were another character, for what it reaches: such
+        # a call is suspect, and excludes the run where it names a protected place or is an MCP
+        # call. Where the next Bash call starts is either way (the call may not have run).
+        before = dict(place) if place is not None else None
+        verdict, why = model_call(tool, _scrubbed(inp), workdir, roots, files, place)
+        if place is not None:
+            place.update(worlds=list({(w.cwd, w.primary): w for w in [
+                *(before.get("worlds") or [_World(workdir, None)]), *(place.get("worlds") or [_World(workdir, None)])]}.values()),
+                known=before.get("known", True) and place.get("known", True))
+        if verdict == "violation":
+            return verdict, why
         return "suspect", "an input with text no file name can hold (a NUL, or a lone surrogate)"
     text = json.dumps(inp) if not isinstance(inp, str) else inp
     outside_urls = URL.sub("", text)
@@ -8142,11 +8248,11 @@ def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: di
         if OWN_REPO.search(text):
             return "suspect", "opens this project's repository on the web"
         # The URL WebFetch fetches, or the page Codex's search opened, read exactly; a URL elsewhere
-        # in the input (a query, a prompt) as a URL parser would read it.
+        # in the input (a query, a prompt) as the WHATWG parser would read it (`_web_hosts`).
         fetched = [inp.get("url")] if tool == "WebFetch" or "url" in inp else []
         local = next((why for u in fetched if (why := exact.web_url(u)) is not None), None)
-        local = local or next((why for u in URLISH.findall(text)
-                               if (why := exact.remote_url(_url_as_parsed(u), globs=False)) is not None), None)
+        local = local or next((why for s in _strings(inp) for host in _web_hosts(s)
+                               if (why := exact.remote_url(f"http://{host}/", globs=False)) is not None), None)
         if local:
             return "suspect", f"a web call that may reach this machine or its network: {local}"
         return "web", ""
@@ -8260,16 +8366,17 @@ def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: di
 
 
 def _id_key(value):
-    """A Codex item's id as a key: numbers that are equal (1 and 1.0) alike, anything else by its
-    JSON text."""
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return ("number", float(value))
+    """A Codex item's id as a key: numbers that are equal (1 and 1.0) alike, compared exactly
+    (2^53 and 2^53 + 1 differ, and an integer of any size is read), anything else by its JSON text."""
+    if not isinstance(value, bool) and (isinstance(value, int) or isinstance(value, float) and math.isfinite(value)):
+        return ("number", Fraction(value))
     return ("json", json.dumps(value, sort_keys=True, default=str))
 
 
 def _covers(done: list, begun: list) -> bool:
     """Whether a completed Codex item's calls cover a started one's: the same tools, each input the
-    same where the started one gave a value (a search starts with an empty query)."""
+    same where the started one gave a value (a search starts with an empty query), apart from an
+    item's status, which changes from start to completion."""
     if [t for t, _ in done] != [t for t, _ in begun]:
         return False
     for (_, a), (_, b) in zip(done, begun):
@@ -8277,7 +8384,7 @@ def _covers(done: list, begun: list) -> bool:
             if a != b:
                 return False
             continue
-        if any(v not in (None, "", [], {}) and a.get(k) != v for k, v in b.items()):
+        if any(k != "status" and v not in (None, "", [], {}) and a.get(k) != v for k, v in b.items()):
             return False
     return True
 
@@ -8299,16 +8406,23 @@ def audit_transcript(path: Path, workdir: str) -> dict:
     # or, without an id, one whose calls it covers (see `_covers`); any other stays to be audited.
     started: list[tuple] = []
 
+    def lose_place() -> None:
+        """The next Bash call may start anywhere the audit can tell (a call it could not follow)."""
+        nonlocal bash_start
+        bash_start = None
+        bash_place.update(worlds=[_World(work, None)], known=False)
+
     def audit_calls(line: dict) -> None:
         nonlocal calls, web, bash_start
         for tool, inp in _tool_calls(line):
             calls += 1
-            text = json.dumps(inp, default=str)
             # A call run in the background leaves the next where it found it (Claude Code reads no
-            # place back from one); one whose flag the audit cannot read may have done either.
-            background = inp.get("run_in_background") if tool == "Bash" and isinstance(inp, dict) else None
-            place = dict(bash_place) if background not in (None, False) else bash_place
+            # place back from one). The flag is read as JSON's true or false (false if absent); a
+            # call whose flag is anything else (null, 1, "yes") may have done either.
+            background = inp.get("run_in_background", False) if tool == "Bash" and isinstance(inp, dict) else False
+            place = bash_place if background is False else dict(bash_place)
             try:
+                text = json.dumps(inp, default=str)
                 verdict, why = check_call(tool, inp, work, roots, files,
                                           **({"start": bash_start, "place": place} if tool == "Bash" else {}))
                 if tool == "Bash":
@@ -8316,15 +8430,15 @@ def audit_transcript(path: Path, workdir: str) -> dict:
                     ended = None if command is None else exact.outside(command, work, bash_start)[1]
                     if background is not True:
                         bash_start = ended  # what `outside` returns holds where the call started
-                    if background not in (None, False, True):
+                    if background is not True and background is not False:
                         bash_place.update(worlds=list({(w.cwd, w.primary): w for w in [
                             *(bash_place.get("worlds") or [_World(work, None)]), *place.get("worlds", [])]}.values()),
                             known=bash_place.get("known", True) and place.get("known", True))
             except Exception as e:  # noqa: BLE001 - a call the audit cannot follow is suspect, never skipped
                 verdict, why = "suspect", f"the audit could not follow this call ({type(e).__name__})"
-                if tool == "Bash":
-                    bash_start = None
-                    bash_place.update(worlds=[_World(work, None)], known=False)
+                text = repr(inp)
+                if tool == "Bash" and background is not True:
+                    lose_place()
             if verdict == "web":
                 web += 1
                 found = URLISH.findall(text)
@@ -8336,32 +8450,63 @@ def audit_transcript(path: Path, workdir: str) -> dict:
             if key:
                 lists[key].append(record)
 
-    for raw in path.read_text(errors="replace").splitlines():
-        try:
-            line = json.loads(raw)
-        except (json.JSONDecodeError, RecursionError) as e:
-            # A line the audit cannot read (damaged, or nested deeper than Python's parser goes) may
-            # hold a call; it is not an event, so a transcript of nothing else still fails.
-            if raw.strip():
-                lists["suspect"].append({"tool": "?", "call": raw[:4000],
-                                         "why": f"a transcript line the audit cannot read ({type(e).__name__})"})
-            continue
+    def audit_line(line, raw: str) -> None:
+        nonlocal events
+        if isinstance(line, list):
+            # A line holding a list (no transcript writes one) is read as the events in it.
+            for part in line:
+                audit_line(part, raw)
+            return
         if not isinstance(line, dict):
-            continue
+            lists["suspect"].append({"tool": "?", "call": raw[:4000], "why": "a transcript line that is not an event"})
+            return
         events += 1
         item = line.get("item")
-        if line.get("type") == "item.started" and item is not None:
-            started.append((_id_key(item.get("id")) if isinstance(item, dict) and "id" in item else None,
-                            list(_tool_calls({**line, "type": "item.completed"})), line))
-        elif line.get("type") == "item.completed" and item is not None:
+        event = line.get("type")
+        if (event == "item.started" or event == "item.updated") and item is not None:
+            key = _id_key(item.get("id")) if isinstance(item, dict) and "id" in item else None
+            begun = list(_tool_calls({**line, "type": "item.completed"}))
+            # An update stands for the item started (or updated) before whose calls it covers, and
+            # is a start of its own otherwise.
+            same = [i for i, (k, earlier, _) in enumerate(started) if k == key and _covers(begun, earlier)]
+            if event == "item.updated" and same:
+                started[same[0]] = (key, begun, line)
+            else:
+                started.append((key, begun, line))
+        elif event == "item.completed" and item is not None:
             key = _id_key(item.get("id")) if isinstance(item, dict) and "id" in item else None
             done = list(_tool_calls(line))
             same = [i for i, (k, begun, _) in enumerate(started) if k == key and _covers(done, begun)]
             if same:
                 started.pop(same[0])
         audit_calls(line)
+
+    # Lines end at a newline alone: JSON text may hold U+2028 and the other characters that
+    # str.splitlines also splits at.
+    for raw in path.read_text(errors="replace").split("\n"):
+        if not raw.strip():
+            continue
+        try:
+            line = json.loads(raw)
+        except (ValueError, RecursionError) as e:
+            # A line the audit cannot read (damaged, nested deeper than Python's parser goes, or with
+            # an integer longer than it converts) may hold a call; it is not an event, so a
+            # transcript of nothing else still fails.
+            lists["suspect"].append({"tool": "?", "call": raw[:4000],
+                                     "why": f"a transcript line the audit cannot read ({type(e).__name__})"})
+            continue
+        try:
+            audit_line(line, raw)
+        except Exception as e:  # noqa: BLE001 - a line the audit cannot follow is suspect, never skipped
+            lists["suspect"].append({"tool": "?", "call": raw[:4000],
+                                     "why": f"a transcript line the audit cannot follow ({type(e).__name__})"})
+            lose_place()
     for _, _, line in started:
-        audit_calls({**line, "type": "item.completed"})
+        try:
+            audit_calls({**line, "type": "item.completed"})
+        except Exception as e:  # noqa: BLE001
+            lists["suspect"].append({"tool": "?", "call": repr(line)[:4000],
+                                     "why": f"a transcript line the audit cannot follow ({type(e).__name__})"})
     return {
         "events": events,
         "tool_calls": calls,

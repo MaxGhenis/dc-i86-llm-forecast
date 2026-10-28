@@ -330,14 +330,12 @@ def simulate(graph: Graph, fc: Forecasts, n: int, seed, fixed_share: float | Non
             v, _ = dists.sample_share_band(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling,
                                            lo, hi, u_share)
             z, feasible = 0.0, False
-        v = np.clip(v, np.nextafter(lo, 1.0) if lo >= 0.5 else lo, hi)
         weight = np.full(n, 1.0 if feasible else 0.0)
     elif share_band is not None:
         # The forecaster's Yes-share distribution truncated to (lo, hi].
         lo, hi = share_band
         v, weight = dists.sample_share_band(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling,
                                             lo, hi, u_share, defensive=0.5 if defensive else 0.0)
-        v = np.clip(v, np.nextafter(lo, 1.0) if lo >= 0.5 else lo, hi)
     else:
         v = dists.sample_share(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling, u_share)
     draws: dict[str, np.ndarray] = {"yes_share": v, "passes": v > 0.5}

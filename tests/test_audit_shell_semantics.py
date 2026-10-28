@@ -551,7 +551,8 @@ def test_codex_open_page_url_is_checked():
                                                "action": {"type": "open_page",
                                                           "url": "https://github.com/MaxGhenis/dc-i86-llm-forecast"}}}
     calls = list(audit._tool_calls(line))
-    assert calls == [("web_search", {"query": "", "url": "https://github.com/MaxGhenis/dc-i86-llm-forecast"})]
+    url = "https://github.com/MaxGhenis/dc-i86-llm-forecast"
+    assert calls == [("web_search", {"query": "", "url": url, "action": {"type": "open_page", "url": url}})]
     verdict, _ = audit.model_call(*calls[0], audit.Path("/nonexistent"), [])
     assert verdict == "suspect"  # MOCK event: this project's own repository, opened on the web
 

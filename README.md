@@ -52,11 +52,14 @@ under a condition (the ban standing, say) report both the conditional probabilit
 The conditional comes from a further simulation. When the condition turns on one node (the ban's
 status), that node is drawn only from the values that satisfy it. The ban's status depends on nothing
 but the Yes share, so the chance that a draw meets the condition is linear in the share between the
-forecast cells, and the share is drawn exactly from the forecaster's distribution tilted by that
-chance. Every draw then counts fully, with weight 1 (the condition's probability is kept apart), and a
-forecaster that gives the condition 1 in 10,000 counts as much as one that gives it 9 in 10; only one
-that gives it zero is left out, and the report says so. For a condition this cannot handle (one on a
-node that also depends on other nodes, or on more than one node; the current map has none), each draw
+forecast cells, and the share is drawn from the forecaster's distribution tilted by that chance:
+within each stretch where the density is constant and the chance linear, by inverting the tilted
+distribution, and in a stretch at most 1,024 floats wide, by drawing among its floats, each in
+proportion to its tilted probability, so that no draw lands where the chance is 0. Every draw then
+counts fully, with weight 1 (the condition's probability is kept apart), and a forecaster that gives
+the condition 1 in 10,000 counts as much as one that gives it 9 in 10; only one that gives it zero
+is left out, and the report says so. For a condition this cannot handle (one on a node that also
+depends on other nodes, or on more than one node; the current map has none), each draw
 is weighted by its probability of the condition, or the draws where it holds are kept, and the Yes
 share comes from a defensive mixture: half from the forecaster's own distribution and half spread
 evenly over the stretches of share it gives any probability, each draw weighted to undo the mixture.
@@ -159,7 +162,11 @@ knows exactly (`src/i86/exact.py`):
 A Codex shell call may run in a directory its transcript does not record, so there only absolute
 paths in the work directory count. A Claude Code Bash call starts where the previous one ended if
 that one ran to its end in the foreground with status 0, and otherwise where the previous one started
-(Claude Code 2.1.308 runs a call as `eval CMD && pwd -P` and reads the directory back from that). The
+(Claude Code 2.1.308 runs a call as `eval CMD && pwd -P` and reads the directory back from that; a
+call that outlasts its timeout is moved to the background). The subset takes the next call to start
+in either place. The shell model does too, unless the previous call ran only builtins that return at
+once; where that call made `pwd` a function or an alias, which prints what it likes, the next start is
+unknown, and a `run_in_background` that is neither true nor false counts both ways. The
 subset takes the tools found through the shell's PATH (a login shell's included) to be the standard
 ones (or, for `grep` and `find`, the ugrep and bfs that Claude Code's shell may run in their place, as
 its version 2.1.308 does); the environment, startup files included, to set none of the variables,
@@ -179,11 +186,15 @@ tool the audit does not know (sub-agents, skills), other than the task list, a b
 call's output and loading deferred tools' schemas. A web call (WebFetch, WebSearch, Codex's web
 search) counts as web only where the URL it fetches is written `http(s)://host/...` with a dotted
 host name that is no IP address (the WHATWG parser Node's fetch uses also reads `http:127.0.0.1` and
-backslashes as slashes), and every URL in its input, read as that parser reads it, names another
-machine; any other web call is suspect. So is a call whose input is not an object, or holds text no
-file name can hold (a NUL, a lone surrogate), one the audit cannot follow, and a transcript
-line it cannot read (cut short, or nested deeper than Python's parser goes). A Codex call whose
-item started but never completed is audited as it started.
+backslashes as slashes), and every URL in its input names another machine. The audit reads a URL
+from each `http:` or `https:`, in any case and after any character, as that parser reads it, both to
+the end of the text and to the first space or quote; any other web call is suspect. So is a call
+whose input is not an object, or holds text no file name can hold (a NUL, a lone surrogate; such a
+call excludes the run where it would with that text replaced), one the audit cannot follow, a
+transcript line it cannot read (cut short, or nested deeper than Python's parser goes) or that is not
+an event, and a Codex event of a type it does not know. A Codex item started, updated and completed
+is one call (ids alike only when equal, numbers by value); one that never completed is audited as it
+was last started or updated.
 
 Running a file by path counts as reading it, and so does a `file://` URL. These exclude the run:
 - a path resolved from a main place in, or text naming, the repository, the staging area, another

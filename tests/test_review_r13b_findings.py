@@ -26,7 +26,6 @@ def bash(command, **flags):
 
 # --- M1: text no file name can hold outranks a violation ---------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="FINDINGS M1: _unwritable is checked before the MCP and path checks")
 @pytest.mark.parametrize("call", [
     ("Bash", {"command": f"cat {OTHER}", "description": "MOCK\u0000"}),
     ("Read", {"file_path": "{other}", "MOCK": "\ud800"}),
@@ -41,7 +40,6 @@ def test_unwritable_text_does_not_hide_a_violation(area, tmp_path, call):
 
 # --- M2 and m5: where the next Bash call starts -------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="FINDINGS M2: _next_place ignores Claude Code's timeout")
 @pytest.mark.parametrize("first", [bash("cd MOCK-sub; sleep 300; true"),
                                    bash("cd MOCK-sub; sleep 300; true", timeout=1000)])
 def test_a_call_that_outlives_its_timeout_keeps_the_start(area, tmp_path, first):
@@ -51,7 +49,6 @@ def test_a_call_that_outlives_its_timeout_keeps_the_start(area, tmp_path, first)
     assert out["violations"] and not out["passed"], out
 
 
-@pytest.mark.xfail(strict=True, reason="FINDINGS m5: a builtin whose redirection fails counts as status 0")
 @pytest.mark.parametrize("first", ["cd MOCK-sub; echo MOCK > missing/out.txt", "cd MOCK-sub; true < missing.txt"])
 def test_a_builtin_whose_redirection_fails_keeps_the_start(area, tmp_path, first):
     """bash, sh, dash and zsh give status 1 or 2 here, so `pwd -P` does not run."""
@@ -59,14 +56,12 @@ def test_a_builtin_whose_redirection_fails_keeps_the_start(area, tmp_path, first
     assert out["violations"] and not out["passed"], out
 
 
-@pytest.mark.xfail(strict=True, reason="FINDINGS m4: run_in_background is compared by equality (0 == False)")
 @pytest.mark.parametrize("flag", [0, 0.0])
 def test_a_flag_that_is_not_a_boolean_gives_both_from_the_start(area, tmp_path, flag):
     out = audit_lines(area, tmp_path, [bash("cd MOCK-sub", run_in_background=flag), bash(f"cat {OTHER}")])
     assert out["violations"] and not out["passed"], out
 
 
-@pytest.mark.xfail(strict=True, reason="FINDINGS m4: run_in_background is compared by equality (1 == True)")
 @pytest.mark.parametrize("flag", [1, 1.0])
 def test_a_flag_that_is_not_a_boolean_gives_both_from_the_end(area, tmp_path, flag):
     """From MOCK-sub, ../../opus-2 is another run's directory; from the work directory it is not."""
@@ -77,7 +72,6 @@ def test_a_flag_that_is_not_a_boolean_gives_both_from_the_end(area, tmp_path, fl
 
 # --- m1: URLs elsewhere in a web call's input --------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="FINDINGS m1: URLISH runs on JSON-escaped text and stops before `@`")
 @pytest.mark.parametrize("query", ["MOCK\nhttp://127.0.0.1/", "MOCK\thttp://127.0.0.1/",
                                    "http://example.org\t@127.0.0.1/", "http://example.org @127.0.0.1/",
                                    "http://example.org'@127.0.0.1/"])
@@ -89,7 +83,6 @@ def test_a_url_in_a_web_input_is_read_as_whatwg_reads_it(area, tmp_path, query):
 
 # --- m2 and m3: lines that crash the audit or are skipped ----------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="FINDINGS m2: these lines still crash audit_transcript")
 @pytest.mark.parametrize("line", [
     json.dumps({"type": [], "item": {"type": "agent_message"}}),
     json.dumps({"type": "item.completed", "item": {"type": []}}),
@@ -101,7 +94,6 @@ def test_a_line_that_still_crashes_the_audit(area, tmp_path, line):
     assert held(out), out
 
 
-@pytest.mark.xfail(strict=True, reason="FINDINGS m3: lines whose calls are skipped or not read as one event")
 @pytest.mark.parametrize("kind", ["array", "item.updated", "u2028"])
 def test_a_line_holding_a_call_is_not_skipped(area, tmp_path, kind):
     other = str(area.parent / "opus-2" / "draft.json")
