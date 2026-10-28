@@ -23,9 +23,9 @@ def test_rs_close_variants(review_area, shell, options, program, tail):
         feed = ""
     command = f"{feed}awk -vp=../opus-2/draft.json {options} {shlex.quote(program)} {tail}"
     proc = subprocess.run(["/bin/" + shell, "-c", command], cwd=review_area,
-                          capture_output=True, text=True, timeout=5)
+                          capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0 and "MOCK OTHER ANSWER" in proc.stdout
-    verdict, why = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(command)},
+    verdict, why = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(command)},
                                     review_area, audit.protected_roots())
     assert verdict in {"violation", "suspect"}, (verdict, why)
 
@@ -41,8 +41,8 @@ def test_rs_close_variants(review_area, shell, options, program, tail):
 def test_unread_close_variants(review_area, shell, program, tail):
     command = f"printf 'unused\\n' | awk -vp=../opus-2/draft.json {shlex.quote(program)} {tail}"
     proc = subprocess.run(["/bin/" + shell, "-c", command], cwd=review_area,
-                          capture_output=True, text=True, timeout=5)
+                          capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0 and "MOCK OTHER ANSWER" not in proc.stdout
-    verdict, why = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(command)},
+    verdict, why = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(command)},
                                     review_area, audit.protected_roots())
     assert verdict != "violation", (verdict, why)

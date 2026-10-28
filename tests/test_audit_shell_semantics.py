@@ -15,6 +15,7 @@ from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
 from i86 import audit
+from test_review_r4_audit import model_suspects
 
 BASH, ZSH = "/bin/bash", "/bin/zsh"
 EXAMPLES = int(os.environ.get("I86_DIFFERENTIAL_EXAMPLES", "300"))
@@ -22,7 +23,7 @@ EXAMPLES = int(os.environ.get("I86_DIFFERENTIAL_EXAMPLES", "300"))
 
 def sh(shell: str, code: str, cwd=None) -> subprocess.CompletedProcess:
     args = [shell, "-f", "-c", code] if shell == ZSH else [shell, "--norc", "--noprofile", "-c", code]
-    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=20,
+    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=60,
                           env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent-home"})
 
 
@@ -130,7 +131,7 @@ def test_field_splitting_matches_bash_and_zsh(review_area, ifs, y, words):
 def test_field_splitting_ends_where_the_shell_ends(review_area, monkeypatch, program, shell, dialect):
     monkeypatch.setattr(audit, "HOME", review_area / "scratch" / "deep")
     proc = subprocess.run([shell, "-f" if shell == ZSH else "--norc", "-c", program + "; pwd -P"], cwd=review_area,
-                          capture_output=True, text=True, timeout=20,
+                          capture_output=True, text=True, timeout=60,
                           env={"PATH": "/usr/bin:/bin", "HOME": str(review_area / "scratch" / "deep")})
     real = audit.Path(proc.stdout.strip().splitlines()[-1])
     model = _model(program, review_area, dialect)
@@ -165,8 +166,8 @@ def test_a_split_herestring_that_reaches_another_run_is_caught(review_area):
     command = 'IFS=: read -r a <<< ..:x; IFS=" "; cd $a; cat opus-2/draft.json'
     proc = sh(BASH, command, cwd=review_area)
     assert "MOCK OTHER ANSWER" in proc.stdout
-    assert audit.check_call("shell", {"command": command}, review_area, audit.protected_roots())[0] != "local"
-    assert audit.check_call("shell", {"command": f"bash -c {shlex.quote(command)}"}, review_area,
+    assert audit.model_call("shell", {"command": command}, review_area, audit.protected_roots())[0] != "local"
+    assert audit.model_call("shell", {"command": f"bash -c {shlex.quote(command)}"}, review_area,
                             audit.protected_roots())[0] == "violation"
 
 
@@ -181,8 +182,8 @@ def test_split_words_that_reach_another_run_are_caught(review_area, monkeypatch,
     proc = subprocess.run([BASH, "--norc", "-c", command], cwd=review_area, capture_output=True, text=True,
                           env={"PATH": "/usr/bin:/bin", "HOME": str(review_area / "scratch" / "deep")})
     assert "MOCK OTHER ANSWER" in proc.stdout, proc
-    assert audit.check_call("shell", {"command": command}, review_area, audit.protected_roots())[0] == "violation"
-    assert audit.check_call("shell", {"command": f"bash -c {shlex.quote(command)}"}, review_area,
+    assert audit.model_call("shell", {"command": command}, review_area, audit.protected_roots())[0] == "violation"
+    assert audit.model_call("shell", {"command": f"bash -c {shlex.quote(command)}"}, review_area,
                             audit.protected_roots())[0] == "violation"
 
 
@@ -225,7 +226,7 @@ def test_a_counting_loop_without_a_directory_change_stays_known(review_area):
     model = audit._shell("i=0; while [ $i -lt 1000 ]; do curl -s https://example.org/$i; i=$((i+1)); done; cat notes.md",
                          review_area)
     assert model.known and {w.cwd for w in model.worlds} == {review_area}
-    verdict, why = audit.check_call("shell", {"command": "i=0; while [ $i -lt 1000 ]; do i=$((i+1)); done; cat notes.md"},
+    verdict, why = audit.model_call("shell", {"command": "i=0; while [ $i -lt 1000 ]; do i=$((i+1)); done; cat notes.md"},
                                     review_area, audit.protected_roots())
     assert verdict == "local", why
 
@@ -257,7 +258,7 @@ def test_zsh_cd_from_the_stack(review_area):
     proc = sh(ZSH, program + "; pwd -P", cwd=review_area)
     model = audit._shell(f"zsh -f -c {shlex.quote(program + '; cat ../opus-2/draft.json')}", review_area)
     assert audit.Path(proc.stdout.strip()) == review_area
-    assert audit.check_call("shell", {"command": f"zsh -c {shlex.quote(program + '; cat ../opus-2/draft.json')}"},
+    assert audit.model_call("shell", {"command": f"zsh -c {shlex.quote(program + '; cat ../opus-2/draft.json')}"},
                             review_area, audit.protected_roots())[0] == "violation"
     assert model.known
 
@@ -279,7 +280,7 @@ def test_child_shells_see_exported_variables_only(review_area, program, moves):
     proc = sh(BASH, program, cwd=review_area)
     assert (audit.Path(proc.stdout.strip()) == review_area / "scratch") == moves, proc
     read = program.replace("pwd -P", "cat ../../opus-2/draft.json")
-    verdict, _ = audit.check_call("shell", {"command": read}, review_area, audit.protected_roots())
+    verdict, _ = audit.model_call("shell", {"command": read}, review_area, audit.protected_roots())
     assert (verdict == "violation") == moves, (program, verdict)
 
 
@@ -486,7 +487,7 @@ def test_zsh_field_splitting_option_state_matches_real_shell(review_area, option
     ("timeout -k5 10 curl -s https://example.org", "web"),
 ])
 def test_interpreter_and_wrapper_options(review_area, command, verdict):
-    got, why = audit.check_call("shell", {"command": command}, review_area, audit.protected_roots())
+    got, why = audit.model_call("shell", {"command": command}, review_area, audit.protected_roots())
     assert got == verdict, (command, got, why)
 
 
@@ -494,11 +495,11 @@ def test_interpreter_and_wrapper_options(review_area, command, verdict):
 
 def test_pwd_expands_from_every_possible_place(review_area):
     # zsh runs the last pipeline stage in this shell, bash does not; the audit cannot tell which.
-    got, _ = audit.check_call("shell", {"command": 'true | cd scratch; cat "$PWD/../../opus-2/draft.json"'},
+    got, _ = audit.model_call("shell", {"command": 'true | cd scratch; cat "$PWD/../../opus-2/draft.json"'},
                               review_area, audit.protected_roots())
     assert got == "violation"
     # From an alternative place only (a cd to a directory missing at audit time that may have failed).
-    got, why = audit.check_call("shell", {"command": 'cd gone; cat "$PWD/../opus-2/draft.json"'},
+    got, why = audit.model_call("shell", {"command": 'cd gone; cat "$PWD/../opus-2/draft.json"'},
                                 review_area, audit.protected_roots())
     assert got in {"suspect", "violation"}, why
 
@@ -540,7 +541,7 @@ def test_an_honest_script_stays_local(tmp_path, review_area):
                         "content": "curl -s https://example.org > page.html\nwc -l page.html\n"}),
              ("Bash", {"command": "bash fetch.sh"})]
     report = audit.audit_transcript(_claude_transcript(tmp_path, calls), str(review_area))
-    assert report["passed"] and not report["suspect"], report
+    assert report["passed"] and not model_suspects(report), report
 
 
 # Codex web_search items that open a page
@@ -550,8 +551,9 @@ def test_codex_open_page_url_is_checked():
                                                "action": {"type": "open_page",
                                                           "url": "https://github.com/MaxGhenis/dc-i86-llm-forecast"}}}
     calls = list(audit._tool_calls(line))
-    assert calls == [("web_search", {"query": "", "url": "https://github.com/MaxGhenis/dc-i86-llm-forecast"})]
-    verdict, _ = audit.check_call(*calls[0], audit.Path("/nonexistent"), [])
+    url = "https://github.com/MaxGhenis/dc-i86-llm-forecast"
+    assert calls == [("web_search", {"query": "", "url": url, "action": {"type": "open_page", "url": url}})]
+    verdict, _ = audit.model_call(*calls[0], audit.Path("/nonexistent"), [])
     assert verdict == "suspect"  # MOCK event: this project's own repository, opened on the web
 
 
@@ -567,4 +569,4 @@ def test_leading_double_slash_is_root(review_area, command):
     command = command.format(other=other, other_rel=str(other)[1:], protected_rel=str(protected)[1:],
                              other_dir_rel=str(other.parent)[1:])
     assert "MOCK OTHER ANSWER" in sh(BASH, command, cwd=review_area).stdout or command.startswith("ls")
-    assert audit.check_call("shell", {"command": command}, review_area, audit.protected_roots())[0] == "violation", command
+    assert audit.model_call("shell", {"command": command}, review_area, audit.protected_roots())[0] == "violation", command

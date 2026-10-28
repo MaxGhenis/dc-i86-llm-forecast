@@ -395,6 +395,235 @@ READS = [
      {'bash', 'dash', 'sh', 'zsh'}),
     ('/bin/bash -c \'{ echo ../opus-2/draft.json >&2; } >& out.txt > /dev/null; cat "$(cat out.txt)"\'',
      {'bash', 'dash', 'sh', 'zsh'}),
+    # A newline and a backslash start a new command (the grammar folds the line into the one before
+    # it); in a here-document's body a line that starts with a backslash is still part of the body.
+    ('true\n\\cat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('x=1\n\\cd ..\ncat opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('f() { :\n\\cat ../opus-2/draft.json\n}\nf', {'bash', 'dash', 'sh', 'zsh'}),
+    ('true\n\\\\\ncat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('x=$(true\n\\cat ../opus-2/draft.json); echo "$x"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('x=`true\n\\\\cat ../opus-2/draft.json`; echo "$x"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('case x in\n\\x) cat ../opus-2/draft.json;;\nesac', {'bash', 'dash', 'sh', 'zsh'}),
+    ('# note\n\\cat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ("eval 'true\n\\cat ../opus-2/draft.json'", {'bash', 'dash', 'sh', 'zsh'}),
+    ("sh -c 'true\n\\cat ../opus-2/draft.json'", {'bash', 'dash', 'sh', 'zsh'}),
+    ('cat <<EOF | sh\n\\$x\ncat ../opus-2/draft.json\nEOF', {'bash', 'dash', 'sh', 'zsh'}),
+    ('cat <<EOF | xargs cat\n\\../opus-2/draft.json\nEOF', {'bash', 'dash', 'sh', 'zsh'}),
+    ("cat <<'EOF' | sh\n\\cat ../opus-2/draft.json\nEOF", {'bash', 'dash', 'sh', 'zsh'}),
+    ('cat <<A <<B | sh\n\\echo a\nA\n\\cat ../opus-2/draft.json\nB', {'bash', 'dash', 'sh', 'zsh'}),
+    ('cat <<A; cat <<B | sh\n\\echo a\nA\n\\cat ../opus-2/draft.json\nB', {'bash', 'dash', 'sh', 'zsh'}),
+    ('echo "a\n\\$x"; true', set()),
+    # A declaration expands all its words, values included, before it assigns any; `--` ends its
+    # options, after which `-r` is a bad name (bash and sh fail it and still assign the rest).
+    ('p=.; export p=x q=$p; cat "$q./opus-2/draft.json"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('p=.; f() { local p=x q=$p; cat "$q./opus-2/draft.json"; }; f', {'bash', 'dash', 'sh', 'zsh'}),
+    ('p=.; readonly p=x q=$p; cat "$q./opus-2/draft.json"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('p=.; typeset p=x q=$p; cat "$q./opus-2/draft.json"', {'bash', 'sh', 'zsh'}),
+    ('i=0; export p=$((i+=1)) q=$i; [ "$q" = 0 ] && [ "$i" = 1 ] && cat ../opus-2/draft.json', set()),
+    ('i=0; export p=$((i+=1)) q=$i; [ "$q" = 1 ] && [ "$i" = 1 ] && cat ../opus-2/draft.json',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('i=0; f() { local p=$((i+=1)) q=$((i+=1)); [ "$i" = 2 ] && cat ../opus-2/draft.json; }; f',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('export -- -r p=.; cat "$p./opus-2/draft.json"', {'bash', 'sh'}),
+    ('readonly -- -x p=.; cat "$p./opus-2/draft.json"', {'bash', 'sh'}),
+    ('f() { local -- -r p=.; cat "$p./opus-2/draft.json"; }; f', {'bash', 'sh'}),
+    ('command export -- -r p=.; cat "$p./opus-2/draft.json"', {'bash', 'sh'}),
+    # A declaration that fails or ends the shell still runs the command substitutions in its words.
+    ('( readonly z=1; readonly z=2 p=$(cat ../opus-2/draft.json >&2) ) 2>&1', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( readonly z=1; export z=2 p=$(cat ../opus-2/draft.json >&2) ) 2>&1', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( readonly z=1; f(){ local z=2 p=$(cat ../opus-2/draft.json >&2); }; f ) 2>&1',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('( export 1x p=$(cat ../opus-2/draft.json >&2) ) 2>&1', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( export -Q p=$(cat ../opus-2/draft.json >&2) ) 2>&1', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( local p=$(cat ../opus-2/draft.json >&2) ) 2>&1', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( typeset z=2 p=$(cat ../opus-2/draft.json >&2) ) 2>&1', {'bash', 'dash', 'sh', 'zsh'}),
+    # bash 3.2, its sh and dash reject a line with `|&` before any of it runs (bash ends the shell, or
+    # the eval or sourced file; dash exits); zsh pipes standard error too.
+    ('cat ../opus-2/draft.json\ntrue |& true', {'bash', 'dash', 'sh', 'zsh'}),
+    ('true |& true\ncat ../opus-2/draft.json', {'zsh'}),
+    ("eval 'true |& true'; cat ../opus-2/draft.json", {'bash', 'sh', 'zsh'}),
+    ("eval 'true |& true'\ncat ../opus-2/draft.json", {'bash', 'sh', 'zsh'}),
+    ("echo '|&'; cat ../opus-2/draft.json", {'bash', 'dash', 'sh', 'zsh'}),
+    # An EXIT trap's code runs with the variables and functions of the way the shell ended.
+    ('trap \'cat "$p"\' EXIT; p=.; if [ -z "$X" ]; then p=../opus-2/draft.json; exit; fi; p=x',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('trap \'cat "$p"\' EXIT; f() { p=../opus-2/draft.json; exit; }; [ -z "$X" ] && f; p=x',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('trap \'f\' EXIT; f() { :; }; if [ -z "$X" ]; then f() { cat ../opus-2/draft.json; }; exit; fi; f() { :; }',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('( trap \'cat "$p"\' EXIT; p=../opus-2/draft.json; [ -z "$X" ] && exit; p=x )', {'bash', 'dash', 'sh', 'zsh'}),
+    ('trap \'eval "$c"\' EXIT; c=\'cat ../opus-2/draft.json\'; [ -z "$X" ] && exit; c=:', {'bash', 'dash', 'sh', 'zsh'}),
+    ('trap \'cd "$d"; cat opus-2/draft.json\' EXIT; d=..; [ -z "$X" ] && exit; d=/nonexistent',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    # A subshell that exits leaves the files it wrote, as they were where it exited.
+    ('( echo ../opus-2/draft.json > f; [ -z "$X" ] && exit; echo x > f ); cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('sh -c \'echo ../opus-2/draft.json > f; [ -z "$X" ] && exit; echo x > f\'; cat "$(cat f)"',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('( printf ../opus-2/draft.json > f; if [ -z "$X" ]; then exit 1; fi; printf x > f ) ; cat "$(cat f)"',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('f() { echo ../opus-2/draft.json > f; [ -z "$X" ] && exit; echo x > f; }; ( f ); cat "$(cat f)"',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('x=$(echo ../opus-2/draft.json > f; [ -z "$X" ] && exit; echo x > f); cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( echo ../opus-2/draft.json > f; [ -z "$X" ] && exit; rm f ); cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    # A directory counts as made after a subshell only if each way it ended made it, and as removed if
+    # any way removed it.
+    ('( mkdir d; [ -z "$X" ] && exit; rmdir d ); cd d && cat ../../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( [ -z "$X" ] && exit; mkdir d ); cd d || cat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( [ -z "$X" ] && { rmdir scratch/deep; exit; }; : ); cd scratch/deep || cat ../opus-2/draft.json',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('( set -e; rmdir scratch/deep; false; mkdir scratch/deep ); cd scratch/deep || cat ../opus-2/draft.json',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('( rmdir scratch/deep; [ -z "$X" ] && exec true; mkdir scratch/deep ); cd scratch/deep || cat ../opus-2/draft.json',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('( set -e; mkdir d; false; rmdir d ); cd d && cat ../../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    # `--` ends a declaration's options also through `builtin`: zsh then takes 16 as a bad name.
+    ('builtin typeset -i -- 16 p; cat ../opus-2/draft.json', {'bash', 'dash', 'sh'}),
+    ('builtin integer -- 16 p; cat ../opus-2/draft.json', {'bash', 'dash', 'sh'}),
+    # bash rejects `|&` in a command substitution only as it runs the substitution's code.
+    ('x=$(true |& true)\ncat ../opus-2/draft.json', {'bash', 'sh', 'zsh'}),
+    # A here-document whose quoted delimiter starts with a backslash ends at that line.
+    ('cat <<"\\EOF" | sh\ncat ../opus-2/draft.json\n\\EOF', {'bash', 'dash', 'sh', 'zsh'}),
+    ('cat <<"\\EOF" > /dev/null\nx\n\\EOF\ncat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('cat <<"\\EOF" > /dev/null\n\\x\n\\EOF\ncat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    # A here-document ends only at a line that is its delimiter exactly, once `<<-` drops the leading
+    # tabs: not at ` EOF`, `EOF ` or `EOF` and a carriage return, nor at the word as written (`E'O'F`).
+    ('cat <<EOF\n EOF\ncd scratch\nEOF\ncat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('cat <<EOF > /dev/null\n EOF\ncd scratch\nEOF\ncat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('cat <<-EOF > /dev/null\n  EOF\ncd scratch\nEOF\ncat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('cat <<EOF > /dev/null\nEOF \ncd scratch\nEOF\ncat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('cat <<EOF > /dev/null\nEOF\t\ncd scratch\nEOF\ncat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('cat <<EOF > /dev/null\nEOF\r\ncd scratch\nEOF\ncat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ("cat <<E'O'F > /dev/null\nE'O'F\ncd scratch\nEOF\ncat ../opus-2/draft.json", {'bash', 'dash', 'sh', 'zsh'}),
+    ('cat <<-EOF | sh\n\t EOF\n\tcat ../opus-2/draft.json\n\tEOF', {'bash', 'dash', 'sh', 'zsh'}),
+    ('cat <<EOF | sh\n EOF\n\\cat ../opus-2/draft.json\nEOF', {'bash', 'dash', 'sh', 'zsh'}),
+    ('cat <<\\EOF > /dev/null\nEOF\ncat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('cat <<EOF > /dev/null\n EOF\ncat opus-2/draft.json\nEOF', set()),
+    ('cat <<EOF > /dev/null\n EOF\ncat ../opus-2/draft.json\nEOF', set()),
+    ('cat <<-EOF > /dev/null\n\tEOF\ncat opus-2/draft.json', set()),
+    ('x=$(cat <<EOF\nhi\nEOF)\ncat opus-2/draft.json', set()),
+    # `set -e`: a command that fails ends the shell, outside the places that guard it; here the
+    # subshell, which leaves the file as it was.
+    ('( set -e; echo ../opus-2/draft.json > f; false; echo x > f ); cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( set -e; echo ../opus-2/draft.json > f; [ -n "$X" ]; echo x > f ); cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( set -o errexit; echo ../opus-2/draft.json > f; ls nope 2>/dev/null; echo x > f ); cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('bash -ec \'echo ../opus-2/draft.json > f; false; echo x > f\'; cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    # The guarded places do not end it: an if or while condition, each command of an and-or list but
+    # the last, what a function runs there, and a command after `!`. A subshell whose status comes
+    # from `!` does.
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -e; if false; then :; fi; n=1', set()),
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -e; false || :; n=1', set()),
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -e; false && :; n=1', set()),
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -e; while false; do :; done; n=1', set()),
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -e; g() { false; }; g || :; n=1', set()),
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -e; ! true; n=1', set()),
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -e; ! false; n=1', set()),
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -e; ! { true; }; n=1', set()),
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -e; ! { false; }; n=1', set()),
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -e; ( ! true ); n=1', {'bash', 'dash', 'sh', 'zsh'}),
+    # `set -u`: expanding an unset parameter ends the shell, quoted or not; so does `${x?}`.
+    ('( set -u; echo ../opus-2/draft.json > f; : "$X"; echo x > f ) 2>/dev/null; cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( set -o nounset; echo ../opus-2/draft.json > f; y=$X; echo x > f ) 2>/dev/null; cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( set -u; echo ../opus-2/draft.json > f; echo "$1" > /dev/null; echo x > f ) 2>/dev/null; cat "$(cat f)"',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('( echo ../opus-2/draft.json > f; : ${x?}; echo x > f ) 2>/dev/null; cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('set -eu 2>/dev/null; [ $# = 0 ] && cat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    # In an external command's or a subshell's redirections, it fails only that command and the
+    # shell goes on (bash, sh, zsh); dash expands a here-document in a child for any command, and
+    # zsh an external command's prefix assignments. A builtin's or a group's end the shell.
+    ('cat < "${x?}" 2>/dev/null; cat ../opus-2/draft.json', {'bash', 'sh', 'zsh'}),
+    ('(:) < "${x?}" 2>/dev/null; cat ../opus-2/draft.json', {'bash', 'sh', 'zsh'}),
+    ('cat 2>/dev/null <<E\n${x?}\nE\ncat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('read v 2>/dev/null <<E\n${x?}\nE\ncat ../opus-2/draft.json', {'dash'}),
+    ('y=${x?} /bin/echo 2>/dev/null; cat ../opus-2/draft.json', {'zsh'}),
+    ('echo < "${x?}" 2>/dev/null; cat ../opus-2/draft.json', set()),
+    ('{ cat; } < "${x?}" 2>/dev/null; cat ../opus-2/draft.json', set()),
+    # A variable set in some branches only may be unset; the forms with a default or `+`, and a
+    # positional parameter that is set, do not end the shell.
+    ('( set -u; printf ../opus-2 > f; [ -z "${x-}" ] || y=1; : "$y"; printf x > f ); cat "$(cat f)/draft.json"',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('( set -u; if [ -f g ]; then y=1; fi; printf ../opus-2 > f; : "$y"; printf x > f ); cat "$(cat f)/draft.json"',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -u; : "${x-}" "${x:+y}"; set -- a; : "$1"; n=1', set()),
+    # `exec CMD` ends the shell when CMD ends; so do an assignment to a readonly variable and the
+    # other ways out, from a pipeline stage and a background job too.
+    ('( echo ../opus-2/draft.json > f; [ -z "$X" ] && exec true; echo x > f ); cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( readonly r=1; echo ../opus-2/draft.json > f; r=2; echo x > f ) 2>/dev/null; cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( echo ../opus-2/draft.json > f; [ -z "$X" ] && exit; echo x > f ) | cat; cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('echo | ( echo ../opus-2/draft.json > f; [ -z "$X" ] && exit; echo x > f ); cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( echo ../opus-2/draft.json > f; [ -z "$X" ] && { exit; }; echo x > f ) & wait; cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( trap \'echo ../opus-2/draft.json > f\' EXIT; echo x > f; exit ); cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( cd ..; mkdir d2; [ -z "$X" ] && exit; rmdir d2 ); cd ../d2 && cat ../opus-2/draft.json', {'bash', 'dash', 'sh', 'zsh'}),
+    ('f() { echo ../opus-2/draft.json > g; [ -z "$X" ] && return; echo x > g; }; f; cat "$(cat g)"', {'bash', 'dash', 'sh', 'zsh'}),
+    ('for i in 1; do echo ../opus-2/draft.json > g; [ -z "$X" ] && break; echo x > g; done; cat "$(cat g)"', {'bash', 'dash', 'sh', 'zsh'}),
+    # A directory removed where a subshell exits stays removed after it.
+    ('( [ -z "$X" ] && { rm -r scratch; exit; }; : ); [ -d scratch ] || cat ../opus-2/draft.json',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('( rm -r scratch; [ -z "$X" ] && exit; mkdir scratch ); cd scratch || cat ../opus-2/draft.json',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    # `set` clusters: bash and dash give each o the next word, zsh the rest of the cluster where
+    # letters follow it (`-ou pipefail` leaves bash's and sh's parameters unset). Under pipefail a
+    # pipeline's status follows each stage's; the audit takes every pipeline's status as unknown.
+    ('set -ou pipefail 2>/dev/null; [ $# = 0 ] && cat ../opus-2/draft.json', {'bash', 'sh'}),
+    ('set -euo pipefail 2>/dev/null; [ $# = 0 ] && cat ../opus-2/draft.json', {'bash', 'sh', 'zsh'}),
+    ('set -xo pipefail 2>/dev/null; cat "../opus-2/draft.json$*"', {'bash', 'sh', 'zsh'}),
+    ('set -eo pipefail; cat ../opus-2/draft.json${1:+x}', {'bash', 'sh', 'zsh'}),
+    ('set -o pipefail -e; [ -z "$1" ] && cat ../opus-2/draft.json', {'bash', 'sh', 'zsh'}),
+    ('set -o pipefail; false | true || cat ../opus-2/draft.json', {'bash', 'sh', 'zsh'}),
+    ('set -o pipefail; false | true && echo x || cat ../opus-2/draft.json', {'bash', 'sh', 'zsh'}),
+    ('set -o pipefail; if false | true; then :; else cat ../opus-2/draft.json; fi', {'bash', 'sh', 'zsh'}),
+    # bash checks the letters before each word's `o` first: at one it lacks it changes nothing and
+    # fails, and sh exits. At a later letter or an option name it lacks, both keep what came before
+    # and fail. bash lists the options where the word after `o` starts with `-`.
+    ('( printf ../opus-2 > f; set -ou pipefail 2>/dev/null; printf x > f ); cat "$(cat f)/draft.json"',
+     {'dash', 'zsh'}),
+    ('set -oc pipefail 2>/dev/null; cd ..; cat opus-2/draft.json', {'bash', 'sh'}),
+    ('( printf ../opus-2 > f; set -oec pipefail 2>/dev/null; printf x > f ); cat "$(cat f)/draft.json"',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('( printf ../opus-2 > f; set -o bogus a 2>/dev/null; [ $# = 0 ] && exit; printf x > f ); cat "$(cat f)/draft.json"',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('( printf ../opus-2 > f; set -uoc pipefail 2>/dev/null; : "$y"; printf x > f ); cat "$(cat f)/draft.json"',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('( printf ../opus-2 > f; set -eo a 2>/dev/null; printf x > f ); cat "$(cat f)/draft.json"',
+     {'bash', 'dash', 'sh', 'zsh'}),
+    ('set -co pipefail 2>/dev/null; cd ..; cat opus-2/draft.json', {'bash'}),
+    ('set -ec 2>/dev/null; cd ..; cat opus-2/draft.json', {'bash'}),
+    ('set -oe a 2>/dev/null; false; cd ..; cat opus-2/draft.json', {'bash', 'sh'}),
+    ('set -o pipefail -c 2>/dev/null; cd ..; cat opus-2/draft.json', {'bash'}),
+    ('set -o -e > /dev/null; trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; false; n=1', {'bash', 'sh'}),
+    # A letter a shell lacks: bash changes nothing and fails (sh exits, but fails where guarded),
+    # dash exits; zsh's -f is NO_RCS, its -B NO_BEEP (brace expansion stays).
+    ('set -fl 2>/dev/null; cat ../opus-2/*.json', {'bash', 'zsh'}),
+    ('set -fQ 2>/dev/null; cat ../opus-2/*.json', {'bash', 'zsh'}),
+    ('set -fl 2>/dev/null || :; cat ../opus-2/*.json', {'bash', 'sh', 'zsh'}),
+    ('set +B; for f in {a,../opus-2/draft.json}; do cat "$f"; done 2>/dev/null', {'zsh'}),
+    # Under `set -e`: bash keeps nothing of `-eV` (dash and zsh have -V); zsh, in an eval, keeps only
+    # the letters before the one it lacks.
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -eV 2>/dev/null; false; n=1', {'dash', 'sh', 'zsh'}),
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; eval \'set -qe\' 2>/dev/null; false; n=1', {'dash', 'sh'}),
+    # Where zsh may have SH_OPTION_LETTERS, the audit follows both readings: without it -B is NO_BEEP
+    # and -F NO_GLOB, with it both are letters zsh lacks.
+    ('[ -f g ] && setopt shoptionletters; set -B 2>/dev/null; cat ../opus-2/draft.json', {'bash', 'sh', 'zsh'}),
+    ('[ -f g ] && setopt shoptionletters; set -F 2>/dev/null; cat ../opus-2/draft.json', {'bash', 'zsh'}),
+    # `set -x`: the shell writes each command to its standard error before the command's own
+    # redirections, also `set +x ARGS` and a new shell's `-x`.
+    ('{ set -x; : ../opus-2/draft.json; } 2>&1 | xargs cat 2>/dev/null', {'bash', 'dash', 'sh', 'zsh'}),
+    ('( set -o xtrace; : ../opus-2/draft.json ) 2>&1 | xargs cat 2>/dev/null', {'bash', 'dash', 'sh', 'zsh'}),
+    ('set -x 2>/dev/null; { : ../opus-2/draft.json; } 2>&1 >/dev/null | xargs cat 2>/dev/null', {'bash', 'dash', 'sh', 'zsh'}),
+    ('{ set -x 2>/dev/null; set +x ../opus-2/draft.json; } 2>&1 | xargs cat 2>/dev/null', {'bash', 'dash', 'sh', 'zsh'}),
+    ('set -o xtrace 2>/dev/null; { [ -n ../opus-2/draft.json ]; } 2>&1 | xargs cat 2>/dev/null', {'bash', 'dash', 'sh', 'zsh'}),
+    ("bash -x -c ': ../opus-2/draft.json' 2>&1 | xargs cat 2>/dev/null", {'bash', 'dash', 'sh', 'zsh'}),
+    # A child bash traces only where SHELLOPTS is exported.
+    ("set -x 2>/dev/null; export SHELLOPTS; bash -c ': ../opus-2/draft.json' 2>&1 | xargs cat 2>/dev/null",
+     {'bash', 'sh'}),
+    ("set -x 2>/dev/null; bash -c ': ../opus-2/draft.json' 2>&1 | xargs cat 2>/dev/null", set()),
+    # A new shell's own flags (here -i) are not options `set` changes.
+    ("bash -ic 'echo hi' > /dev/null 2>&1", set()),
+    ("dash -ic 'echo hi' > /dev/null 2>&1", set()),
+    # An option the audit does not follow (noclobber here) makes the call suspect.
+    ('set -C; echo ../opus-2/draft.json > f; echo x > f 2>/dev/null; cat "$(cat f)"', {'bash', 'dash', 'sh', 'zsh'}),
+    # zsh's MULTIOS writes the text to f twice (`> f 1>&1`); what f holds is then unknown, also to the
+    # code `.` runs from it.
+    ("cd scratch; printf 'cd ..;' > f 1>&1; . ./f; cat opus-2/draft.json", {'zsh'}),
 ]
 # Reads the audit flags in more shells than make them, for the reason given: each shell that reads
 # must still be flagged.
@@ -403,8 +632,14 @@ OVER = [
     ("readonly z=1; x=$(readonly z=2; echo .) || cat \"$x./opus-2/draft.json\"", set()),
     # the grammar misreads an assignment with only a redirection, which the audit then notes
     ("command readonly y=1 2>/dev/null; y=2 2>/dev/null; cat ../opus-2/draft.json", {"zsh"}),
+    # after a parameter `set -u` finds unset, the audit goes on in every world, also where dash ends
+    # (see `may_end`); bash, sh and zsh fail only the external command here
+    ('set -u; cat < "$X" 2>/dev/null || cat ../opus-2/draft.json', {"bash", "sh", "zsh"}),
     # zsh does not run the EXIT trap after the error ends it
     ("readonly z=1; trap 'cat ../opus-2/draft.json' EXIT; z=2 2>/dev/null", {"bash", "dash", "sh"}),
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -u; [ -z "${x-}" ] || y=1; : "$y"; n=1',
+     {'bash', 'dash', 'sh'}),
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -ou pipefail 2>/dev/null; n=1', {'dash'}),
     # a DEBUG trap is noted in every shell (dash has none)
     ("readonly z=1; trap 'cat ../opus-2/draft.json' DEBUG; z=2 2>/dev/null", {"bash", "sh", "zsh"}),
     # zsh's EXIT trap in a function is noted (it runs at the function's return)
@@ -462,6 +697,59 @@ OVER = [
     ('[ -d gone ] && SHLVL=1; cat "${SHLVL+../opus-2/draft.json}"', {'bash', 'sh', 'zsh'}),
     # the audit takes what `$(echo 1x)` prints in dash as unknown
     ('export "$(echo 1x)" || cat ../opus-2/draft.json', {'bash', 'sh'}),
+    # bash, sh and dash reject a line with `|&` as they read it; the audit still counts the line's
+    # paths there, in case its parse of the line is wrong
+    ('{ echo ../opus-2/draft.json >&2; } |& xargs cat', {'zsh'}),
+    ('cat ../opus-2/draft.json; true |& true', {'zsh'}),
+    ('x=$(true |& true); cat ../opus-2/draft.json', {'bash', 'sh', 'zsh'}),
+    ('cat <<EOF |& sh\ncat ../opus-2/draft.json\nEOF', {'zsh'}),
+    # a quoted reserved word (`\then`) is a syntax error, which the audit notes
+    ('if true\n\\then cat ../opus-2/draft.json; fi', set()),
+    # at an exit in a function bash, sh and zsh run the EXIT trap with the function's locals gone;
+    # the audit keeps the local's value too
+    ('p=x; f() { local p=../opus-2/draft.json; exit; }; trap \'cat "$p"\' EXIT; f', {'dash'}),
+    # zsh's MULTIOS writes standard error to f and to its copy; what f holds is then unknown
+    ('{ echo ../opus-2/draft.json >&2; } 2>f 2>&1 >/dev/null; cat "$(cat f)"', {'zsh'}),
+    # under `set -v` the audit takes standard error as unknown output in every shell; only bash
+    # writes there the code an eval reads
+    ("( set -v; eval ': ../opus-2/draft.json' ) 2>&1 | xargs cat 2>/dev/null", {'bash', 'sh'}),
+    # under noglob the word names a file in the other run's directory, which the audit counts
+    ('set -of noglob 2>/dev/null; cat ../opus-2/*.json', set()),
+    ('set -fo noglob 2>/dev/null; [ $# = 0 ] && cat ../opus-2/*.json', set()),
+    # the audit goes on after a place where `set -e` or `set -u` may end the shell (see `may_end`)
+    ('set -el 2>/dev/null; false; cat ../opus-2/draft.json', {'bash'}),
+    ('set -ul 2>/dev/null; : "$X"; cat ../opus-2/draft.json', {'bash'}),
+    ('set -euo pipefail; cat "../opus-2/draft.json$1"', set()),
+    ('set -oec pipefail 2>/dev/null; cd ..; cat opus-2/draft.json', set()),
+    ('set -eo a 2>/dev/null; cd ..; cat opus-2/draft.json', set()),
+    # the audit does not follow what dash's echo prints, so what f holds there is unknown
+    ('setopt noclobber 2>/dev/null; echo ../opus-2/draft.json > f; echo x > f 2>/dev/null; cat "$(cat f)"', {'zsh'}),
+    ('( ( echo ../opus-2/draft.json > f; [ -z "$X" ] && exit ); echo x > f; exit ); cat "$(cat f)"', set()),
+    ('( set -eo pipefail; echo ../opus-2/draft.json > f; false | true; echo x > f ); cat "$(cat f)"',
+     {'bash', 'sh', 'zsh'}),
+    # zsh's `set -s` sorts the parameters, which the audit does not follow, and notes in every shell
+    ('set -s c a b 2>/dev/null; [ "$1" = a ] && cat ../opus-2/draft.json', {'zsh'}),
+    # the audit does not follow what dash's printf prints; zsh's MULTIOS writes it twice to f
+    ('cd scratch; printf ../ > f 1>&1; cat "$(cat f)opus-2/draft.json"', {'zsh'}),
+    ('cd scratch; printf ../ > f 1>&1; read -r x < f; cat "${x}opus-2/draft.json"', {'zsh'}),
+    # the audit does not follow what dash's printf prints, so what f holds there is unknown
+    ('set -oe a 2>/dev/null; ( printf ../opus-2 > f; false; printf x > f ); cat "$(cat f)/draft.json"', set()),
+    # `kill $$` in a subshell ends the shell around it, which the audit does not follow
+    ('( echo ../opus-2/draft.json > f; [ -z "$X" ] && kill $$ 2>/dev/null; [ -z "$X" ] && exit; echo x > f ); '
+     'cat "$(cat f)"', set()),
+    # bash and zsh translate a `$'...'` delimiter and dash does not; the audit notes the
+    # here-document in every shell
+    ("cat <<$'EOF' > /dev/null\nEOF\ncat ../opus-2/draft.json\n$'EOF'", {'bash', 'sh', 'zsh'}),
+    # a here-document that no line ends runs to the end of the code, where the grammar's reading
+    # fails, which the audit notes
+    ('cat <<EOF > /dev/null\n EOF\ncat ../opus-2/draft.json', set()),
+    # dash and zsh fail at a here-document in `$(...)` that ends at `EOF)`, which the audit reads as
+    # bash does
+    ('x=$(cat <<EOF\nhi\nEOF)\ncat ../opus-2/draft.json', {'bash', 'sh'}),
+    # zsh goes on under `set -e` after a function or eval whose status comes from `!`; the audit
+    # ends it there, as bash and dash do
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -e; f() { ! true; }; f; n=1', {'bash', 'dash', 'sh'}),
+    ('trap \'cat "../opus-$n/draft.json"\' EXIT; n=2; set -e; eval \'! true\'; n=1', {'bash', 'dash', 'sh'}),
 ]
 SHELL_RUNS = {"bash": ["/bin/bash", "--norc", "--noprofile", "-c"], "zsh": ["/bin/zsh", "-f", "-c"],
               "sh": ["/bin/sh", "-c"], "dash": ["/bin/dash", "-c"]}
@@ -474,7 +762,7 @@ def flagged(code: str, name: str) -> tuple[bool, bool, str]:
     with tempfile.TemporaryDirectory() as tmp:
         top = Path(tmp).resolve()
         work = layout(top)
-        proc = subprocess.run([*shell, code], cwd=work, capture_output=True, text=True, timeout=20,
+        proc = subprocess.run([*shell, code], cwd=work, capture_output=True, text=True, timeout=60,
                               stdin=subprocess.DEVNULL,
                               env={"PATH": "/usr/bin:/bin", "HOME": str(top / "home"), "PWD": str(work)})
         roots = [top / "repository", top / "staging"]
@@ -482,7 +770,7 @@ def flagged(code: str, name: str) -> tuple[bool, bool, str]:
                 mock.patch.object(audit, "protected_roots", lambda: roots), \
                 mock.patch.object(audit, "HOME", top / "home"):
             command = " ".join([*map(shlex.quote, shell[:-1]), "-c", shlex.quote(code)])
-            verdict, why = audit.check_call("shell", {"command": command}, work, roots)
+            verdict, why = audit.model_call("shell", {"command": command}, work, roots)
     return ANSWER in proc.stdout, verdict in {"violation", "suspect"}, f"{proc.stdout}{proc.stderr}{why}"
 
 

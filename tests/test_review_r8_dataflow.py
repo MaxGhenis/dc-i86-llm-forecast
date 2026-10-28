@@ -20,10 +20,10 @@ class AuditMisclassification(AssertionError):
 def test_awk_begin_consumes_only_record(review_area, shell, program):
     # BEGIN consumes the only input line, so the record action never opens a file.
     result = subprocess.run([shell, "-c", program], cwd=review_area,
-                            capture_output=True, text=True, timeout=20)
+                            capture_output=True, text=True, timeout=60)
     assert result.returncode == 0 and result.stdout == "" and result.stderr == "", result
     assert (review_area.parent / "opus-2" / "draft.json").read_text() == "MOCK OTHER ANSWER\n"
-    category, reason = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(program)},
+    category, reason = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(program)},
                                         review_area, audit.protected_roots())
     if category != "local":
         raise AuditMisclassification((category, reason))
@@ -50,9 +50,9 @@ def test_awk_begin_consumes_only_record(review_area, shell, program):
 ])
 def test_awk_records_follow_begin_getlines(review_area, shell, program, category, opens_answer):
     (review_area / "MOCK.txt").write_text("MOCK own research\n")
-    real = subprocess.run([shell, "-c", program], cwd=review_area, capture_output=True, text=True, timeout=20)
+    real = subprocess.run([shell, "-c", program], cwd=review_area, capture_output=True, text=True, timeout=60)
     assert ("MOCK OTHER ANSWER" in real.stdout) == opens_answer, (program, real)
-    got, reason = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(program)},
+    got, reason = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(program)},
                                    review_area, audit.protected_roots())
     assert got == category, (program, got, reason)
 
@@ -71,7 +71,7 @@ def test_echo_output_is_exact_or_unknown(shell):
     for args in ECHO_FORMS:
         command = "echo " + " ".join(map(shlex.quote, args))
         real = subprocess.run(["/bin/" + shell, "-c", command], capture_output=True, text=True,
-                              env={"PATH": "/usr/bin:/bin"}, timeout=20).stdout
+                              env={"PATH": "/usr/bin:/bin"}, timeout=60).stdout
         got = audit._echo(args, shell, lambda a: a, posix=shell == "sh")
         assert got is None or got == real, (shell, args, real, got)
         if shell != "sh":
@@ -86,7 +86,7 @@ def test_echo_output_is_exact_or_unknown(shell):
     ("printf '%s\\n' MOCK ../opus-2/draft.json | xargs cat", "violation"),
 ])
 def test_echo_and_printf_feed_exact_lines(review_area, program, category):
-    real = subprocess.run(["/bin/zsh", "-fc", program], cwd=review_area, capture_output=True, text=True, timeout=20)
+    real = subprocess.run(["/bin/zsh", "-fc", program], cwd=review_area, capture_output=True, text=True, timeout=60)
     assert "MOCK OTHER ANSWER" in real.stdout, real
-    got, reason = audit.check_call("shell", {"command": program}, review_area, audit.protected_roots())
+    got, reason = audit.model_call("shell", {"command": program}, review_area, audit.protected_roots())
     assert got == category, (program, got, reason)

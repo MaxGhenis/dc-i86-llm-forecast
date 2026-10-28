@@ -113,27 +113,28 @@ def test_dead_lock_owner_does_not_block_its_forked_child(tmp_path, monkeypatch):
                 (tmp_path / "started").touch()
                 runners.prepare("child", prompt, "MOCK-sha", "manual")
                 (tmp_path / "finished").touch()
+                time.sleep(120)  # alive, outside any use, until the parent has looked (then killed)
                 os._exit(0)
             (tmp_path / "child-pid").write_text(str(child))
             os._exit(0)
     os.waitpid(owner, 0)
     child = None
     try:
-        deadline = time.monotonic() + 5
-        while not (tmp_path / "started").exists() and time.monotonic() < deadline:
+        # The child's own use may take a while on a loaded host; it must end, and then leave the
+        # lock free while the child lives on.
+        deadline = time.monotonic() + 60
+        while not (tmp_path / "finished").exists() and time.monotonic() < deadline:
             time.sleep(.01)
-        assert (tmp_path / "started").exists()
         child = int((tmp_path / "child-pid").read_text())
-        time.sleep(.2)
+        if not (tmp_path / "finished").exists():
+            raise RecoveryDefect("owner has exited; the child's bookkeeping remains blocked")
         lock = runners.STAGE.with_name(runners.STAGE.name + ".lock")
         with lock.open("a") as handle:
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                if not (tmp_path / "finished").exists():
-                    raise RecoveryDefect("owner has exited; child and other bookkeeping remain blocked")
-            else:
-                fcntl.flock(handle, fcntl.LOCK_UN)
+                raise RecoveryDefect("the child holds the lock outside any use; other bookkeeping is blocked")
+            fcntl.flock(handle, fcntl.LOCK_UN)
     finally:
         if child is not None:
             try:

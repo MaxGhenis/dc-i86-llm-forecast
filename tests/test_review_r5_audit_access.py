@@ -9,14 +9,14 @@ import subprocess
 
 import pytest
 
-from test_review_r4_audit import audit_command
+from test_review_r4_audit import audit_command, model_suspects
 
 
 def classification(tmp_path, command, work):
     result = audit_command(tmp_path, command, work)
     if result["violations"]:
         return "violation"
-    if result["suspect"]:
+    if model_suspects(result):
         return "suspect"
     if result["web_calls"]:
         return "web"
@@ -25,7 +25,7 @@ def classification(tmp_path, command, work):
 
 def execute(command, work):
     return subprocess.run(["/bin/sh", "-c", command], cwd=work, capture_output=True,
-                          text=True, timeout=10)
+                          text=True, timeout=60)
 
 
 @pytest.mark.parametrize("command", [

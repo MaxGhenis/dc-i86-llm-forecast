@@ -7,7 +7,10 @@ loops (while, until, for, C-style, with counters), break, continue and return, a
 tests, functions (with arguments and locals), subshells, background jobs, pipelines (whose last
 stage zsh runs in the current shell), sh, bash and zsh -c (with positional parameters), exported and
 unexported variables, env -i, eval, read (with IFS), set -- and shift, unset, variables,
-pushd/popd/dirs with stack rotations, and scripts written and then sourced or run, then prints its
+pushd/popd/dirs with stack rotations, scripts written and then sourced or run (also by a subshell
+that may exit first), lines that start with a backslash and zsh's `|&`, a here-document line with
+a blank before its delimiter, `set -e`, `set -u` and `set -x` (by letter, by name and in clusters,
+also where bash stops after an `o`), and `exec`, then prints its
 directory and reads a relative path, in one of several ways, that may reach another run's MOCK
 answer or a protected place. It runs under bash and zsh (no startup files) in a fresh temporary
 layout, and the audit then reads it. Properties, for every program and both shells:
@@ -86,7 +89,19 @@ atoms = st.one_of(
                      "typeset -i n", "n=1+1", "n=..", "n=0x10", "[ \"$n\" = 2 ]", '[ -n "${n+x}" ] || cd ..',
                      "typeset -i 16 n 2>/dev/null", "typeset -Z 3 n 2>/dev/null", "typeset -u n 2>/dev/null",
                      "typeset +i n", "integer n 2>/dev/null", "export 1x 2>/dev/null", "local 1x 2>/dev/null",
-                     "x=.. :", "x=scratch eval :", "x=.. exec", "[ -d scratch ] && n=", "x=.. g 2>/dev/null"]),
+                     "x=.. :", "x=scratch eval :", "x=.. exec", "[ -d scratch ] && n=", "x=.. g 2>/dev/null",
+                     # a line that starts with a backslash, zsh's `|&` (bash rejects its line), a
+                     # declaration's values expanded before it assigns any, an EXIT trap reading a
+                     # variable, and a subshell that may exit after writing a script (X is never set)
+                     "\\cd ..", "true |& true", 'x=..; export x=scratch q=$x; cd "$q"', "trap 'cd \"$x\"' EXIT",
+                     "( echo 'cd ..' > s.sh; [ -n \"$X\" ] || exit; echo 'cd scratch' > s.sh )",
+                     '[ -n "$X" ] || exit',
+                     # errexit and nounset by letter, by name and in clusters (bash and zsh read
+                     # `-ou` differently), a letter bash lacks, xtrace, and exec ending the shell
+                     "set -e", "set -u", "set +eu", "set -o nounset", "set -ou pipefail 2>/dev/null",
+                     "set -el 2>/dev/null", ': "$X" 2>/dev/null', "set -x 2>/dev/null", "exec true",
+                     # bash keeps what came before a letter it lacks after an `o`, and sh goes on
+                     "set -uoc pipefail 2>/dev/null", "set -o bogus x 2>/dev/null"]),
     st.sampled_from(DIRS).map(lambda d: f"pushd {d} >/dev/null 2>&1"),
     st.sampled_from(DIRS).map(lambda d: f"cd {d} | cat"),
     st.sampled_from(DIRS).map(lambda d: f"eval {shlex.quote('cd ' + d)}"),
@@ -150,6 +165,8 @@ READS = [
     # a script written, then run or sourced
     "echo 'cat {t}' > r.sh; sh r.sh", "printf 'cat %s\\n' {t} > r.sh; . ./r.sh",
     "cat > r.sh <<'EOF'\ncat {t}\nEOF\nbash r.sh",
+    # a here-document line with a blank before the delimiter is not its end
+    "cat <<EOF > /dev/null\n EOF\ncd scratch\nEOF\ncat {t}",
     "cat ~+/{t}", "cd scratch; cat ~-/{t}", "pushd scratch >/dev/null; cat ~1/{t}",
     "export IFS=:; export x=scratch:..; bash -c 'cd $x 2>/dev/null; cat {t}'",
     "cat {t}{{,}}",  # duplicate MOCK operands from brace expansion
@@ -186,7 +203,7 @@ def run(shell: list[str], program: str, work: Path, top: Path) -> tuple[Path | N
     for attempt in range(3):  # a shell stalled on a loaded host says nothing about the audit
         try:
             proc = subprocess.run([*shell, program], cwd=work, env=env, stdin=subprocess.DEVNULL,
-                                  capture_output=True, text=True, timeout=20)
+                                  capture_output=True, text=True, timeout=60)
             break
         except subprocess.TimeoutExpired:
             if attempt == 2:
@@ -222,7 +239,7 @@ def test_audit_agrees_with_bash_and_zsh(case):
                     mock.patch.object(audit, "protected_roots", lambda: roots), \
                     mock.patch.object(audit, "HOME", top / "home"):
                 model = audit._shell(program, work)
-                verdict, why = audit.check_call("shell", {"command": program}, work, roots)
+                verdict, why = audit.model_call("shell", {"command": program}, work, roots)
             places = {w.cwd for w in model.worlds}
             label = f"{shell[0]}: {program!r} -> cwd {cwd}, read {read}, audit {verdict} ({why}), worlds {model.worlds}"
             if read:

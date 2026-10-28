@@ -31,10 +31,10 @@ def assert_protected_read(review_area, monkeypatch, shell, command):
            "OLDPWD": str(review_area)}
     flags = ["--norc", "--noprofile", "-c"] if shell == "/bin/bash" else ["-f", "-c"]
     proc = subprocess.run([shell, *flags, command], cwd=review_area, env=env,
-                          capture_output=True, text=True, timeout=10)
+                          capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0 and "MOCK OTHER ANSWER" in proc.stdout, proc
     call = shell + " -c " + shlex.quote(command)
-    category, reason = audit.check_call("shell", {"command": call}, review_area,
+    category, reason = audit.model_call("shell", {"command": call}, review_area,
                                         audit.protected_roots())
     return category, reason
 
@@ -127,6 +127,6 @@ def test_prior_pwd_fix_close_variant(review_area, monkeypatch):
     # The unnamed-shell model must cover zsh, whose last pipeline stage changes PWD.
     category, reason = assert_protected_read(review_area, monkeypatch, "/bin/zsh", command)
     assert_violation(category, reason)
-    category, reason = audit.check_call("shell", {"command": command}, review_area,
+    category, reason = audit.model_call("shell", {"command": command}, review_area,
                                         audit.protected_roots())
     assert_violation(category, reason)

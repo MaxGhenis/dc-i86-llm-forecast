@@ -85,14 +85,17 @@ def test_the_work_directory_is_outside_the_repository(area):
     assert work == str(runners.WORK / "claude-1") and not work.startswith(str(runners.RUNS))
 
 
-def _accepted_run(graph, label, prompt_sha="sha", passed=True, prior="none"):
+def _accepted_run(graph, label, prompt_sha="sha", passed=True, prior="none", suspect=()):
     run = runners.RUNS / label
     run.mkdir(parents=True)
     runners.write_meta(run, {"label": label, "backend": "subfleet", "prompt_sha256": prompt_sha})
     obj = MOCK_response(graph)
     obj["forecaster"]["prior_context"] = prior
     (run / "response.json").write_text(json.dumps(obj))
-    (run / "audit.json").write_text(json.dumps({"passed": passed}))
+    # A MOCK audit record with the fields audit_transcript writes (a failed audit has a violation).
+    violations = [] if passed else [{"tool": "MOCK", "call": "MOCK", "why": "MOCK"}]
+    (run / "audit.json").write_text(json.dumps({"passed": passed, "violations": violations,
+                                                "suspect": list(suspect)}))
 
 
 def test_pooling_takes_only_current_prompt_audited_runs_with_no_prior_context(area, graph, capsys):
@@ -104,6 +107,18 @@ def test_pooling_takes_only_current_prompt_audited_runs_with_no_prior_context(ar
     err = capsys.readouterr().err
     assert "old-prompt" in err and "failed-audit" in err and "saw-notes" in err
     assert set(cli.accepted_runs(graph, "sha", accept_prior={"saw-notes"})) == {"ok", "saw-notes"}
+
+
+def test_a_run_with_suspect_calls_is_pooled_only_once_the_operator_lists_it(area, graph, capsys):
+    """Round-12 finding 3 (Opus): a suspect call may have read anything, so its run waits for a reader."""
+    _accepted_run(graph, "ok")
+    call = {"tool": "Bash", "call": '{"command": "MOCK command"}', "why": "MOCK reason"}
+    _accepted_run(graph, "odd-call", suspect=[call, call])
+    assert set(cli.accepted_runs(graph, "sha")) == {"ok"}
+    err = capsys.readouterr().err
+    assert "excluding odd-call: 2 suspect call(s)" in err and "--accept-suspect odd-call" in err
+    assert set(cli.accepted_runs(graph, "sha", accept_suspect={"odd-call"})) == {"ok", "odd-call"}
+    assert set(cli.accepted_runs(graph, "sha", accept_prior={"odd-call"})) == {"ok"}
 
 
 def test_runs_without_an_audit_are_excluded_unless_manual_and_allowed(area, graph):

@@ -45,9 +45,9 @@ def test_emulate_command_own_file_stays_local(review_area):
     command = "emulate zsh -c 'cd scratch'; cat ../opus-2/draft.json"
     real = subprocess.run(["/bin/zsh", "-f", "-c", command], cwd=review_area,
                           env={"PATH": "/usr/bin:/bin", "HOME": str(review_area)},
-                          capture_output=True, text=True, timeout=20)
+                          capture_output=True, text=True, timeout=60)
     assert real.returncode == 0 and real.stdout == "MOCK OWN DATA\n", real
-    category, reason = audit.check_call("shell", {"command": "/bin/zsh -c " + shlex.quote(command)},
+    category, reason = audit.model_call("shell", {"command": "/bin/zsh -c " + shlex.quote(command)},
                                        review_area, audit.protected_roots())
     if category != "local":
         raise AuditDefect((category, reason))

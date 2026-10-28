@@ -23,9 +23,11 @@ When the restricted node depends on nothing but the Yes share (no states, and an
 on `passes` alone), as `ban_status` does, the chance that a draw meets the restriction is a
 piecewise-linear function of the share, and the share is drawn exactly from the forecaster's
 distribution tilted by it (dists.sample_share_tilted). Every draw then has weight 1 (the
-condition's probability within the band, Z, is kept as `_mass`): means are exact, each draw counts
-fully, and a forecaster who gives the condition any probability is never dropped, whatever the
-sample size or however small the probability.
+condition's probability within the band, Z, is kept as `_mass`): the draws come from the
+conditional distribution itself, so plain means over them estimate it without the variance that
+weights add (bar the band's segments more than 2^1074 times less likely under the tilt than the
+likeliest, which get no draws); each draw counts fully, and a forecaster who gives the condition any
+probability in the band is never dropped, whatever the sample size or however small the probability.
 Otherwise the share is drawn defensively (`defensive`, see dists.sample_share_band), so a condition
 that holds only at shares the forecaster thinks unlikely still gets draws; the share's weight
 multiplies into `_weight`.
@@ -154,10 +156,12 @@ def _allowed_mass(node: Node, params: np.ndarray, exists: np.ndarray, allowed) -
 
 
 def _used_answers(graph: Graph, node: Node, answers: dict, lo: float, hi: float) -> set[str]:
-    """The keys of the answers that the tilt reads at some share in [lo, hi]: on each side of 50%
-    the band reaches where the node exists, the cells that node_params gives a positive weight
-    between the ends of the band's part there (a cell an end lies exactly on has weight 0 on its
-    other side). A key without an answer stands for the filler row (see _table)."""
+    """The keys of the answers that the tilt reads at some share in (lo, hi]: on each side of 50%
+    the span reaches where the node exists, the cells that node_params gives a positive weight
+    between the lowest and highest shares of the span's part there (a cell an end lies exactly on
+    has weight 0 on its other side). The failing side is (lo, min(hi, 50%)], so a span starting at
+    50% has none; its lowest share is the float above lo, which on a span one float wide is hi
+    itself. A key without an answer stands for the filler row (see _table)."""
     if node.cells_mode == "none":
         keys = {Entry(None, None).key}
     else:
@@ -169,10 +173,12 @@ def _used_answers(graph: Graph, node: Node, answers: dict, lo: float, hi: float)
         else:
             fail = passing = graph.pass_cells  # the passing cells' answers serve every share
         keys = set()
-        for cells, a, b in [(fail, lo, min(hi, 0.5)), (passing, max(lo, half), hi)]:
+        first_share = float(np.nextafter(lo, 1.0))
+        for cells, a, b, part in [(fail, first_share, min(hi, 0.5), min(hi, 0.5) > lo),
+                                  (passing, max(first_share, half), hi, hi > max(lo, 0.5))]:
             ends = np.array([a, b])
-            if a > b or (node.exists_if is not None
-                         and not node.exists_if.evaluate_vec({"yes_share": ends, "passes": ends > 0.5}).any()):
+            if not part or (node.exists_if is not None
+                            and not node.exists_if.evaluate_vec({"yes_share": ends, "passes": ends > 0.5}).any()):
                 continue
             j0, j1, w = _cell_weights(cells, ends)
             first = int(j0[0]) if w[0] < 1 else int(j1[0])
@@ -194,10 +200,13 @@ class _Tilt:
     sampler, taking the tilt as linear, still draws. Scaled first, the tilt is positive wherever its
     exact value is at least 2^-1022, against a largest value of at least 1/2.
 
-    Only what the shares in `band` ((lo, hi], as simulate draws them, by default the whole range) can
-    use sets the scale: the answers they interpolate from, and absence where the node may not exist
-    there. The other answers are set to 0, which shares in the band never read and which cannot
-    overflow, so an answer of 1 at a cell the band never reaches leaves a tiny tilt its precision.
+    Only what the shares simulate may draw can use sets the scale: shares in `band` ((lo, hi], by
+    default the whole range) on the segments the sampler gives probability, each open at its left
+    end as the samplers draw it, the answers they interpolate from, and absence where the node may
+    not exist there. The other
+    answers are set to 0, which the draws never read and which cannot overflow, so an answer of 1 at
+    a cell no draw reaches leaves a tiny tilt its precision. A band without probability has no such
+    shares (simulate then raises), and every answer is set to 0.
     """
 
     def __init__(self, graph: Graph, node: Node, fc: Forecasts, allowed,
@@ -214,10 +223,17 @@ class _Tilt:
             rows = {key: np.where(keep, np.asarray(p, dtype=float), 0.0) for key, p in answers.items()}
             self.absent = 1.0 if None in allowed else 0.0
         lo, hi = band if band is not None else (graph.share_floor, graph.share_ceiling)
-        lo = float(np.nextafter(lo, 1.0)) if lo >= 0.5 else float(lo)  # simulate's draws lie in [lo, hi]
-        used = _used_answers(graph, node, answers, lo, hi)
+        # The segments of the band the sampler draws from (dists.sample_share_tilted's, those with
+        # probability), each (a, b]: the samplers draw above a and at most b, so a segment starting
+        # at 50% holds no failing share.
+        a, b, m = dists.share_segments(graph.share_grid, np.asarray(fc.values["yes_share"]["all"], dtype=float),
+                                       graph.share_floor, graph.share_ceiling, lo, hi, _breaks(graph))
+        spans = [(float(x), float(y)) for x, y, mass in zip(a, b, m) if mass > 0]
+        used = set().union(*(_used_answers(graph, node, answers, a, b) for a, b in spans))
         rows = {key: r if key in used else np.zeros_like(r) for key, r in rows.items()}
-        ends = np.array([v for v, side in ((lo, lo <= 0.5), (hi, hi > 0.5)) if side])
+        # A share on each side of 50% that a span reaches (whether the node exists there depends only
+        # on the side, see `_tilted`).
+        ends = np.array([v for a, b in spans for v, side in ((min(b, 0.5), a < 0.5), (b, b > 0.5)) if side])
         if node.exists_if is None or self.exists(ends).all():
             self.absent = 0.0  # never used: the node exists at every share in the band
         top = max(float(np.sum(r)) for r in [*rows.values(), self.absent])
@@ -255,13 +271,19 @@ def _tilted(graph: Graph, restrict: dict | None):
 def exact_tilt(graph: Graph, fc: Forecasts, restrict: dict | None, band: tuple[float, float] | None = None):
     """(node id, tilt, breaks) when a restriction can be met by drawing the share exactly (see
     `_tilted`). `tilt(v)` (a _Tilt) is the chance the node takes an allowed value at share v in
-    `band`, times 2^tilt.scale, linear between `breaks`."""
+    `band`, times 2^tilt.scale, linear between `breaks` before rounding (a categorical node's sums
+    each allowed option's interpolated chance, each rounded, which far below 2^-1022 can be 0 at a
+    float where the exact sum is not; dists.sample_share_tilted draws off such floats)."""
     tilted = _tilted(graph, restrict)
     if tilted is None:
         return None
     nid, allowed = tilted
-    breaks = sorted({0.5, *graph.cells, *graph.near_cells})
-    return nid, _Tilt(graph, graph.nodes[nid], fc, allowed, band), breaks
+    return nid, _Tilt(graph, graph.nodes[nid], fc, allowed, band), _breaks(graph)
+
+
+def _breaks(graph: Graph) -> list[float]:
+    """The shares where a node's answers may change slope or jump: 50% and the cells."""
+    return sorted({0.5, *graph.cells, *graph.near_cells})
 
 
 def band_mass(graph: Graph, fc: Forecasts, band: tuple[float, float]) -> float:
@@ -310,14 +332,12 @@ def simulate(graph: Graph, fc: Forecasts, n: int, seed, fixed_share: float | Non
             v, _ = dists.sample_share_band(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling,
                                            lo, hi, u_share)
             z, feasible = 0.0, False
-        v = np.clip(v, np.nextafter(lo, 1.0) if lo >= 0.5 else lo, hi)
         weight = np.full(n, 1.0 if feasible else 0.0)
     elif share_band is not None:
         # The forecaster's Yes-share distribution truncated to (lo, hi].
         lo, hi = share_band
         v, weight = dists.sample_share_band(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling,
                                             lo, hi, u_share, defensive=0.5 if defensive else 0.0)
-        v = np.clip(v, np.nextafter(lo, 1.0) if lo >= 0.5 else lo, hi)
     else:
         v = dists.sample_share(graph.share_grid, cdf, graph.share_floor, graph.share_ceiling, u_share)
     draws: dict[str, np.ndarray] = {"yes_share": v, "passes": v > 0.5}

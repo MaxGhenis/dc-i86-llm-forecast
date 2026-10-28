@@ -14,7 +14,7 @@ SHELLS = [("/bin/bash", "posix"), ("/bin/zsh", "zsh")]
 def real(shell, program, work):
     flags = ["--norc", "--noprofile", "-c"] if shell == "/bin/bash" else ["-f", "-c"]
     return subprocess.run(
-        [shell, *flags, program], cwd=work, capture_output=True, text=True, timeout=20,
+        [shell, *flags, program], cwd=work, capture_output=True, text=True, timeout=60,
         env={"PATH": "/usr/bin:/bin", "HOME": str(work), "PWD": str(work), "OLDPWD": str(work)},
     )
 
@@ -33,7 +33,7 @@ def model(program, work, dialect):
 def assert_protected_read(shell, program, work):
     proc = real(shell, program, work)
     assert proc.returncode == 0 and "MOCK OTHER ANSWER" in proc.stdout, (program, proc)
-    verdict, reason = audit.check_call(
+    verdict, reason = audit.model_call(
         "shell", {"command": shell + " -c " + shlex.quote(program)}, work, audit.protected_roots(),
     )
     assert verdict == "violation", (program, verdict, reason)

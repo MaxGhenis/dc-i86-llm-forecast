@@ -1,20 +1,27 @@
-"""Invariants of the band-aware exact tilt. All forecast answers are MOCK.
+"""Invariants of the band-aware exact tilt. All forecast answers and Yes-share CDFs are MOCK.
 
-- Reference: at every share in the band (as simulate draws it, [lo, hi] with lo moved just above
-  50% when the band excludes it), the tilt divided by 2^scale is the chance the node takes an allowed
-  value, computed directly from the unscaled answers (node_params and _allowed_mass, the path the
-  defensive mixture uses).
-- Irrelevance: answers no share in the band reads change neither the tilt there nor its scale.
-  Which answers a share reads comes from probing the node's interpolated parameters (one answer
-  changed at a time, at every cell, end and midpoint of the band), not from `_used_answers`.
+The shares simulate may draw under an exact tilt: those on the segments of the band (lo, hi] that
+the sampler gives probability (dists.share_segments, cut at the CDF's knots and the cells), each
+(a, b] as the samplers draw it: a segment starting at 50% holds no failing share, and a sliver of
+probability between a and the next representable share counts, at that share. The generated bands
+have probability (simulate raises on one without), and their ends include knots and the floats just
+either side of them; the CDFs have flat stretches.
+
+- Reference: at every share simulate may draw, the tilt divided by 2^scale is the chance the node
+  takes an allowed value, computed directly from the unscaled answers (node_params and
+  _allowed_mass, the path the defensive mixture uses).
+- Irrelevance: answers no such share reads change neither the tilt there nor its scale. Which
+  answers a share reads comes from probing the node's interpolated parameters (one answer changed at
+  a time, at every cell, end and midpoint of each stretch), not from `_used_answers`.
 """
 
 import math
 
 import numpy as np
-from hypothesis import assume, given, settings
+from hypothesis import assume, example, given, settings
 from hypothesis import strategies as st
 
+from i86 import dists
 from i86 import graph as graph_mod
 from i86.response import Forecasts
 from i86.simulate import _allowed_mass, _Tilt, node_params
@@ -33,6 +40,15 @@ def _answers(draw, node, keys):
     return out
 
 
+def _cdf(draw, graph):
+    """MOCK: a Yes-share CDF at the grid, its steps between knots positive but for a set left flat."""
+    n = len(graph.share_grid) + 1
+    steps = np.array(draw(st.lists(st.floats(1e-3, 1.0), min_size=n, max_size=n)))
+    steps[sorted(draw(st.sets(st.integers(0, n - 1))))] = 0.0
+    assume(steps.sum() > 0)
+    return (np.cumsum(steps)[:-1] / steps.sum()).tolist()
+
+
 @st.composite
 def cases(draw):
     graph = GRAPH
@@ -40,31 +56,66 @@ def cases(draw):
     answers = _answers(draw, node, sorted({e.key for e in graph.entries(node)}))
     options = [True, False] if node.kind == "binary" else [*node.options, None]
     allowed = set(draw(st.lists(st.sampled_from(options), min_size=1, unique=True)))
+    marks = [0.5, *graph.cells, *graph.share_grid, graph.share_floor, graph.share_ceiling]
+    near = [float(f(x, d)) for x in marks for f, d in ((np.nextafter, 0.0), (np.nextafter, 1.0))]
     ends = st.one_of(st.floats(graph.share_floor, graph.share_ceiling),
-                     st.sampled_from([0.5, *graph.cells, graph.share_floor, graph.share_ceiling]))
+                     st.sampled_from(marks), st.sampled_from([x for x in near
+                                                              if graph.share_floor <= x <= graph.share_ceiling]))
     lo, hi = sorted([draw(ends), draw(ends)])
     # simulate's bands are (lo, hi] with lo < hi; one starting at 50% or above holds no share at lo.
     assume(lo < hi and (lo < 0.5 or float(np.nextafter(lo, 1.0)) <= hi))
-    return node, answers, allowed, (lo, hi)
+    cdf = _cdf(draw, graph)
+    assume(_stretches(graph, cdf, (lo, hi)))  # simulate raises on a band without probability
+    return node, answers, allowed, (lo, hi), cdf
 
 
-def _points(graph, band, extra):
+def _stretches(graph, cdf, band):
+    """The parts of the band simulate may draw from (see the module notes): the sampler's segments
+    with probability, each (a, b]."""
     lo, hi = band
-    lo = float(np.nextafter(lo, 1.0)) if lo >= 0.5 else lo
-    inside = [x for x in [*graph.cells, 0.5, float(np.nextafter(0.5, 1.0))] if lo <= x <= hi]
-    return np.array([lo, hi, *inside, *(lo + (hi - lo) * np.asarray(extra))])
+    breaks = sorted({0.5, *graph.cells, *graph.near_cells})
+    a, b, m = dists.share_segments(graph.share_grid, np.asarray(cdf, dtype=float), graph.share_floor,
+                                   graph.share_ceiling, lo, hi, breaks)
+    return [(float(x), float(y)) for x, y, mass in zip(a, b, m) if mass > 0]
 
 
-def test_tilt_matches_unscaled_answers_in_band():
+def _points(graph, stretches, extra):
+    """Each stretch's lowest share (the float above a) and b, the cells and 50% inside it, and the
+    points `extra` of the way along it."""
+    out = []
+    for a, b in stretches:
+        first = float(np.nextafter(a, 1.0))
+        inside = [x for x in [*graph.cells, 0.5, float(np.nextafter(0.5, 1.0))] if first <= x <= b]
+        out += [first, b, *inside, *np.clip(a + (b - a) * np.asarray(extra), first, b)]
+    return np.array(out)
+
+
+def _forecasts(node, answers, cdf):
+    return Forecasts(values={"yes_share": {"all": cdf}, node.id: answers})
+
+
+def _sliver():
+    """MOCK: every Yes share in (50%, 55%] (the CDF of test_review_r11_tilt), and a band starting one
+    float below 55%, so its only probability lies in that last float's sliver, which simulate draws
+    at 55%: the 72% cell's answer is never read. Even answers, with a first option allowed, so that
+    the irrelevance test's tiny answers keep the allowed chance tiny."""
+    node = GRAPH.nodes["ban_status"]
+    answers = {key: [1 / len(node.options)] * len(node.options) for key in sorted({e.key for e in GRAPH.entries(node)})}
+    cdf = [float(np.clip((x - 0.5) / 0.05, 0.0, 1.0)) for x in GRAPH.share_grid]
+    return node, answers, {"repealed"}, (float(np.nextafter(0.55, 0.0)), 0.97), cdf
+
+
+def test_tilt_matches_unscaled_answers_where_simulate_draws():
     graph = GRAPH
 
     @settings(max_examples=400, deadline=None)
     @given(cases(), st.lists(st.floats(0.0, 1.0), min_size=1, max_size=8))
+    @example(_sliver(), [0.5])
     def check(case, extra):
-        node, answers, allowed, band = case
-        fc = Forecasts(values={node.id: answers})
+        node, answers, allowed, band, cdf = case
+        fc = _forecasts(node, answers, cdf)
         tilt = _Tilt(graph, node, fc, allowed, band)
-        v = _points(graph, band, extra)
+        v = _points(graph, _stretches(graph, cdf, band), extra)
         exists = (node.exists_if.evaluate_vec({"yes_share": v, "passes": v > 0.5})
                   if node.exists_if is not None else np.ones(len(v), bool))
         ref = _allowed_mass(node, node_params(graph, node, fc, v, None), exists, allowed)
@@ -82,14 +133,17 @@ def _params(graph, node, answers, v):
     return np.where(exists[:, None], node_params(graph, node, fc, v, None), 0.0)
 
 
-def _read(graph, node, answers, other, band):
+def _read(graph, node, answers, other, stretches):
     """The keys whose answer, replaced alone by its value in `other`, changes the node's
-    parameters at some share in the band where the node exists. The parameters, not the chance of
-    an allowed value: with every value allowed, that chance is 1 whatever the answers but for
-    rounding. Interpolation is linear between cells, so the band's ends, the cells and 50% inside
-    it, and the midpoints between them reach every row with a positive weight."""
-    pts = np.unique(_points(graph, band, []))
-    v = np.concatenate([pts, (pts[:-1] + pts[1:]) / 2])
+    parameters at some share on the stretches where the node exists. The parameters, not the chance
+    of an allowed value: with every value allowed, that chance is 1 whatever the answers but for
+    rounding. Interpolation is linear between cells, so each stretch's ends, the cells and 50%
+    inside it, and the midpoints between them reach every row with a positive weight."""
+    v = []
+    for stretch in stretches:
+        pts = np.unique(_points(graph, [stretch], []))
+        v += [*pts, *((pts[:-1] + pts[1:]) / 2)]
+    v = np.array(v)
     base = _params(graph, node, answers, v)
     return {key for key in answers
             if not np.array_equal(_params(graph, node, {**answers, key: other[key]}, v), base)}
@@ -100,8 +154,9 @@ def test_unread_answers_change_neither_tilt_nor_scale():
 
     @settings(max_examples=400, deadline=None)
     @given(cases(), st.integers(0, 1060), st.lists(st.floats(0.0, 1.0), min_size=1, max_size=8))
+    @example(_sliver(), 1060, [0.5])
     def check(case, k, extra):
-        node, answers, allowed, band = case
+        node, answers, allowed, band, cdf = case
         # Tiny answers; certain allowed values in the other set.
         if node.kind == "binary":
             small = {key: p * 2.0 ** -k for key, p in answers.items()}
@@ -112,11 +167,12 @@ def test_unread_answers_change_neither_tilt_nor_scale():
             first = next((i for i, o in enumerate(node.options) if o in allowed), None)
             certain = {key: small[key] if first is None else
                        [1.0 if i == first else 0.0 for i in range(len(node.options))] for key in answers}
-        read = _read(graph, node, small, certain, band)
+        stretches = _stretches(graph, cdf, band)
+        read = _read(graph, node, small, certain, stretches)
         loud = {key: small[key] if key in read else certain[key] for key in answers}
-        a = _Tilt(graph, node, Forecasts(values={node.id: small}), allowed, band)
-        b = _Tilt(graph, node, Forecasts(values={node.id: loud}), allowed, band)
-        v = _points(graph, band, extra)
+        a = _Tilt(graph, node, _forecasts(node, small, cdf), allowed, band)
+        b = _Tilt(graph, node, _forecasts(node, loud, cdf), allowed, band)
+        v = _points(graph, stretches, extra)
         assert a.scale == b.scale
         np.testing.assert_array_equal(a(v), b(v))
 

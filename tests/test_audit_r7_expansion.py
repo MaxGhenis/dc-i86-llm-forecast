@@ -15,7 +15,7 @@ SHELLS = [("/bin/bash", "posix"), ("/bin/zsh", "zsh")]
 def real(shell, program, work):
     flags = ["--norc", "--noprofile", "-c"] if shell == "/bin/bash" else ["-f", "-c"]
     return subprocess.run([shell, *flags, program], cwd=work, capture_output=True, text=True,
-                          timeout=20, env={"PATH": "/usr/bin:/bin", "HOME": str(work),
+                          timeout=60, env={"PATH": "/usr/bin:/bin", "HOME": str(work),
                                            "PWD": str(work), "OLDPWD": str(work)})
 
 
@@ -67,7 +67,7 @@ def test_words_match_real_shells(review_area, shell, dialect, program):
         # A zsh nested parameter default has a different grammar. The audit reports its
         # uncertainty instead of giving bash's parse a definite meaning in zsh.
         assert dialect == "zsh" and program == 'unset x; set -- ${x:={1,2}}', got.notes
-        assert audit.check_call("shell", {"command": shell + " -c " + shlex.quote(program)},
+        assert audit.model_call("shell", {"command": shell + " -c " + shlex.quote(program)},
                                 review_area, audit.protected_roots())[0] == "suspect"
         return
     count = got.vars.get("#")
@@ -130,7 +130,7 @@ def test_failed_parameter_error_stops_the_shell(review_area, shell, dialect, ope
     assert proc.returncode != 0 and "MOCK OTHER ANSWER" not in proc.stdout
     got = model(program, review_area, dialect)
     assert not got.worlds
-    assert audit.check_call("shell", {"command": shell + " -c " + shlex.quote(program)}, review_area,
+    assert audit.model_call("shell", {"command": shell + " -c " + shlex.quote(program)}, review_area,
                             audit.protected_roots())[0] == "local"
 
 
@@ -142,7 +142,7 @@ def test_expanded_existing_legal_directory_names_are_not_rejected(review_area, s
     proc = real(shell, program + '; pwd -P', review_area)
     got = model(program, review_area, dialect)
     assert proc.returncode == 0 and {w.cwd for w in got.worlds} == {review_area / name}
-    assert audit.check_call("shell", {"command": shell + " -c " + shlex.quote(program)}, review_area,
+    assert audit.model_call("shell", {"command": shell + " -c " + shlex.quote(program)}, review_area,
                             audit.protected_roots())[0] == "local"
 
 
@@ -153,6 +153,6 @@ def test_expanded_existing_legal_directory_names_are_not_rejected(review_area, s
 ])
 def test_unmodeled_arrays_are_reported_as_suspect(review_area, program):
     for shell, _ in SHELLS:
-        category, reason = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(program)},
+        category, reason = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(program)},
                                             review_area, audit.protected_roots())
         assert category == "suspect" and "array" in reason, (program, category, reason)

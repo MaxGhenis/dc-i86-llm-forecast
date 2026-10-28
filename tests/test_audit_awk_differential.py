@@ -78,13 +78,13 @@ def test_audit_agrees_with_awk(case):
             (work / "MOCK.txt").write_text("MOCK own research\n")
             env = {"PATH": "/usr/bin:/bin", "HOME": str(top / "home"), "PWD": str(work)}
             proc = subprocess.run([*shell, program], cwd=work, env=env, stdin=subprocess.DEVNULL,
-                                  capture_output=True, text=True, timeout=20)
+                                  capture_output=True, text=True, timeout=60)
             read = ANSWER in proc.stdout.splitlines()
             roots = [top / "repository", top / "staging"]
             with mock.patch.object(runners, "WORK", top / "work"), \
                     mock.patch.object(audit, "protected_roots", lambda: roots), \
                     mock.patch.object(audit, "HOME", top / "home"):
-                verdict, why = audit.check_call("shell", {"command": program}, work, roots)
+                verdict, why = audit.model_call("shell", {"command": program}, work, roots)
             label = f"{shell[0]}: {program!r} -> read {read}, exit {proc.returncode}, audit {verdict} ({why})"
             if read:
                 assert verdict in {"violation", "suspect"}, label

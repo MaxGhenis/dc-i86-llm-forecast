@@ -3,13 +3,25 @@
 The forecasters run on machines that also hold earlier forecasts of these questions, other runs'
 answers and the operator's notes. The prompt forbids reading local files; this audit reads each run's
 native transcript (Claude stream-json or Codex JSONL) and checks every tool call. It guards against
-accidental and casual reads, not a forecaster set on hiding them.
+accidental and casual reads; a forecaster set on hiding one could make it look like a call the model
+misreads, and then only the reader of the suspect calls stands in the way.
+
+A shell call counts as local, or web, only inside the subset whose reads `exact` knows from the
+command's text (`check_call`); within its assumptions such a call reads nothing outside the run's
+work directory but what the tools load to run and the ignore files rg and ugrep consult, and any
+other shell call is suspect. The rest of this module models the shells for every call: it finds the
+reads that exclude a run and the reasons a call is suspect. The model is not exact. What follows is
+what it models; of the round-11 review's inputs, each a read in some shell (ROUND11 in
+tests/test_audit_exact.py), it still took 64 of 97 as local when the subset came.
 
 Each shell command is parsed with tree-sitter's bash grammar, so quoting, here-documents, subshells,
-command substitutions, pipelines, loops, functions and redirections are read as the shell reads them
-(`cat <file` reads `file`; a quoted `';'` is an argument, and the lines of a here-document fed to
-`cat` are data). The grammar misreads `!` before a compound command (`! { ...; }`, `! if ...`); the
-audit reads those itself, and any other command it cannot fully read is suspect.
+command substitutions, pipelines, loops, functions and redirections are read much as the shell
+reads them (`cat <file` reads `file`; a quoted `';'` is an argument, and the lines of a here-document fed to
+`cat` are data). The grammar misreads `!` before a compound command (`! { ...; }`, `! if ...`), a
+line that starts with a backslash, and a here-document line with blanks around its delimiter
+(` EOF`, which the shells take as more of the body); the audit mends those before it reads them,
+and any other command it cannot fully read is suspect. It also splits an unquoted `$a$b$c/x` into
+two words, which the audit does not see.
 
 The working directory is tracked as the set of places the shell could be, each with the last
 command's exit status (`_World`):
@@ -21,7 +33,8 @@ command's exit status (`_World`):
   earlier, may have worked or failed: the shell is then in either place. For a literal scratch
   directory the failed place is an alternative; an expansion-generated target keeps both as main
   places, since expansion can produce a filename rather than the intended directory.
-  A `cd` to a file fails. `CDPATH` is followed, `cd -` and `pushd -` go to `$OLDPWD`,
+  A `cd` to a file fails. `CDPATH` is followed where its value is known on every branch (zsh's
+  `cdpath` array is not), `cd -` and `pushd -` go to `$OLDPWD`,
   and one before any `cd` in the command goes where the audit cannot follow.
 - `&&`, `||`, `if`, `case` and loops run their parts only where the status allows. The audit knows
   the status of `true`, `false`, `:`, `cd`, `!`, tests of known strings and numbers (`[ a = b ]`,
@@ -50,7 +63,11 @@ command's exit status (`_World`):
   Expansion options (`set -f`, `noglob`, zsh's option spellings and `emulate sh`) travel with each
   shell state through branches, functions and subshells; `emulate MODE -c command` runs the command
   in the current shell and then restores only the options. `${x:=word}` and `${x=word}` assign in the
-  current shell; failed `${x:?word}` and `${x?word}` expansions exit it.
+  current shell, except in words a forked child expands (below), where the assignment is lost;
+  failed `${x:?word}` and `${x?word}` expansions exit it, except in those words and in dash's
+  here-documents, where only the command fails unless it is a special builtin (the audit follows
+  both ways there; see below). An upper-case name the code never set
+  may come from the environment: the audit follows `${NAME?}` on, with its value unknown.
   Bash expands a failed parameter's diagnostic word before exiting; native zsh prints its source.
   Brace expansions that duplicate substitutions with effects the audit cannot order are suspect.
 - Subshells, command substitutions, pipeline stages, background jobs, `sh -c` and wrapped commands
@@ -74,7 +91,10 @@ command's exit status (`_World`):
   goes back at the return only there), and a function or alias they may each have defined
   differently, or not at all, runs as each; one a branch never set is unset there. Assignments
   before a command go back after it, except where the shell keeps them: sh and dash after a
-  special builtin, sh after a function, zsh after a bare `exec`.
+  special builtin, sh after a function or `source` (also special builtins selected by `builtin`),
+  zsh after a bare `exec` or, with POSIX_BUILTINS, a function or special builtin. Transparent
+  zsh modifiers preserve that selection. `command` suppresses special-builtin persistence,
+  except where macOS sh's nested `builtin` selects a special builtin again.
 - Integer variables (bash's and zsh's `typeset -i`, zsh's `integer`, and in native zsh a variable
   an arithmetic assignment creates) take every value as arithmetic: an assignment, before a
   command in zsh, `+=`, read, for and a declaration's value. Where the audit cannot evaluate the
@@ -89,21 +109,44 @@ command's exit status (`_World`):
   differ) or unknown, in order through groups, functions, loops and branches: `echo` and `printf`
   with each shell's options and escapes, `pwd`, `dirname`, `basename`, `cat` of a file written
   earlier or in the work directory, here-documents (the body, expanded as a double-quoted string
-  is unless the delimiter is quoted), `<(code)` (a name that reads as what the code prints), and
+  is unless the delimiter is quoted, though a `)` in a comment or a `case` pattern ends a `$(...)`
+  in it early), `<(code)` (a name that reads as what the code prints), and
   declarations that list. Output redirected to a file
-  becomes its text (of the last of several files; zsh's MULTIOS writes it to each); sent to
+  becomes its text (of the last of several files, the earlier ones left empty even where standard
+  error was copied there; zsh's MULTIOS writes it to each); sent to
   standard error, `/dev/null` or another descriptor, it is gone, except that zsh's MULTIOS (as it
   stands when the redirections are made) also sends a redirected pipeline stage down the pipe;
   what such a stage's files then hold is unknown (zsh's copier may end at the pipe first).
-  `exec`'s redirections, `2>&1` among them, hold for the rest of the shell. A duplication or close
+  Standard input given more than once reads the last (bash, sh, dash) or, under zsh's MULTIOS, each
+  in turn, after the pipe where the command is a pipeline stage fed by one (`echo in | cat < f`).
+  `exec`'s redirections, `2>&1` among them, hold for the rest of the shell; the model drops one
+  made as the last command of `&&` and keeps one that failed, where the shells do the reverse.
+  A duplication or close
   acts on the descriptor it names, whichever way its arrow points (`1<&-` closes standard output).
   On a closed standard output (`>&-`) bash 3.2 keeps what a builtin wrote (of printf, the first
-  pass of its format, where the write fails) and writes it with its next builtin write or at exit;
+  pass of its format, where the write fails; bash keeps more where a pass does not end in a
+  newline, which the model misses) and writes it with its next builtin write or at exit;
   dash and zsh drop it. bash's and dash's `echo`, `printf`, `pwd` and `type` fail there where
   zsh's succeed; another command's status is then unknown. A here-string feeds its word and a
   newline. Where standard error may be standard output (`2>&1`),
   a command that may print a diagnostic makes the output from there unknown, and so does standard
-  error copied before standard output moves (`2>&1 >f`).
+  error copied before standard output moves (`2>&1 >f`), and any command under `set -x` or `set -v`
+  (the shell writes the command, or the code bash's eval reads, to its standard error).
+- `set` follows each shell's letters (SET_LETTERS): bash and dash give each `o` the next word,
+  zsh the rest of the cluster where letters follow it (`set -ou pipefail`), and where they read
+  the words differently the audit follows each. bash checks the letters before each word's `o`
+  first and, at one it lacks, changes nothing and fails (sh exits, except where `guarding`
+  holds); at a later letter or option name it lacks, bash and sh keep what came before and fail.
+  dash exits and zsh ends the eval or the shell, after the letters before it. Under `set -e` a command that may fail, outside the places the
+  shells ignore -e, and under `set -u` a parameter that may be unset (quoted or not), may end the
+  shell, as `exec CMD` does; the audit follows that ending and goes on. In an external command's
+  or a subshell's redirections, which bash and zsh expand in the child they fork, such a parameter
+  ends only the child, and the command fails; so does one in an external command's prefix
+  assignment in zsh. dash expands redirections in the shell, a subshell's here-document apart, but
+  fails only the command at a here-document for any command but a special builtin (measured). An
+  option the audit does
+  not follow that could change what the code reads, prints or where it runs (keyword,
+  physical, globdots and the like) makes the call suspect.
 - Writes to a readonly variable follow each shell, as measured on macOS's bash 3.2, sh and dash
   and zsh 5.9: bash fails a declaration, `unset`, `for` and `read` and goes on, skips an
   assignment before a command and runs the command, and at a plain assignment drops the rest of
@@ -120,7 +163,8 @@ command's exit status (`_World`):
   builtin's own error from ending bash's POSIX mode, and dash's `command` fails where the code it
   runs would end the shell; zsh's `command` runs only a file (a builtin there runs as a child
   process) unless `emulate sh` set POSIX_BUILTINS. `setopt`, `emulate` and `shopt` fail in the
-  shells that lack them, and at an option name the shell lacks; at `set -o` with an option it
+  shells that lack them, and at an option name the shell lacks (the model takes some of zsh's
+  aliases, `dotglob` among them, for names zsh lacks, and `nonoglob` for one it has); at `set -o` with an option it
   lacks, bash fails, dash exits and zsh ends the eval or the shell as at `readonly`.
 - An EXIT trap's code runs where the shell or subshell ends, in each way it may end (an exit
   included). Code that other traps run where their signal or event comes, and zsh's EXIT trap set
@@ -203,13 +247,16 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import functools
 import glob as globlib
 import itertools
 import json
+import math
 import os
 import re
 import shlex
 from contextlib import contextmanager, nullcontext
+from decimal import Decimal
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import unquote
@@ -217,8 +264,16 @@ from urllib.parse import unquote
 import tree_sitter_bash
 from tree_sitter import Language, Parser
 
+from . import exact
+
 HOME = Path.home()
+# The start of the reason for a shell call that is suspect only because it lies outside `exact`'s subset.
+EXACT_REASON = "shell code the audit does not read exactly"
 URL = re.compile(r"https?://[^\s'\"<>)`]+")
+# Text a URL parser may read as an http(s) URL: the scheme in any case, then any number of slashes
+# or backslashes (the WHATWG parser, as in Node's fetch, reads `http:host`, `HTTP:/\\host` and
+# `http://host` alike).
+URLISH = re.compile(r"(?i)\bhttps?:[/\\]*[^\s'\"<>)`]+")
 # Text, outside URLs, that names a protected place.
 PROTECTED_TEXT = re.compile(
     r"dc-i86-llm-forecast|dc-ballot|\.subfleet|\.claude\b|\.codex\b|chief-of-staff|\.brier|"
@@ -386,6 +441,27 @@ AWKS = {"awk", "gawk", "mawk", "nawk"}
 # Dir.chdir('x'), chdir('x') in Perl or PHP, setwd('x') in R.
 CODE_CHDIR = re.compile(r"""(?:\b(?:os\.|process\.|Dir\.)?chdir|\bsetwd)\s*\(?\s*(['"])([^'"]+)\1""")
 WEB_TOOLS = {"WebSearch", "WebFetch"}
+# Tools that name files, checked by the paths they name (and where those lead through links).
+FILE_TOOLS = {"Read", "Edit", "MultiEdit", "Write", "NotebookEdit", "LS", "Grep", "Glob", "file_read", "file_change"}
+# Tools that read nothing: the task list, plan mode, a background Bash call's output and stopping
+# it (the call itself is audited; Claude Code 2.1.308 names these TaskOutput and TaskStop and keeps
+# BashOutput, KillShell and KillBash as aliases) and loading the schemas of deferred tools. Any
+# other tool is suspect.
+QUIET_TOOLS = {"TodoWrite", "TodoRead", "BashOutput", "TaskOutput", "KillShell", "KillBash", "TaskStop",
+               "ExitPlanMode", "ToolSearch"}
+# Claude Code's tools for MCP servers' resources (2.1.308's names and the aliases its table maps to
+# them), which reach whatever the server reaches, as the servers' own tools (`mcp__server__tool`) do.
+MCP_TOOLS = {"ListMcpResourcesTool", "ReadMcpResourceTool", "ReadMcpResourceDirTool", "ListMcpResources",
+             "ReadMcpResource", "ReadMcpResourceDir"}
+# Codex items that are not tool calls. An item of any other type is suspect.
+CODEX_NOT_CALLS = {"agent_message", "reasoning", "todo_list", "error"}
+# The transcript events the audit reads: Claude Code's stream-json events (those the committed
+# transcripts hold) and Codex's JSON events. A line of any other type is suspect.
+EVENT_TYPES = {"system", "assistant", "user", "result", "rate_limit_event", "tool_progress",
+               "thread.started", "turn.started", "turn.completed", "turn.failed", "error",
+               "item.started", "item.updated", "item.completed"}
+# A tool input field the call did not set.
+MISSING = object()
 # This project's own public repository. It holds no answers until every run has finished.
 OWN_REPO = re.compile(r"dc-i86-llm-forecast", re.I)
 
@@ -423,6 +499,9 @@ MAX_WORLDS = 64
 _TEST_UNARY = {"-" + c for c in "abcdefghknoprstuvwxzGLNORS"}
 # Passes of a loop the audit follows before it stops following the directory.
 MAX_PASSES = 12
+# Statements after which `set -e` may end the shell (see `_Shell.errexit_end`).
+ERREXIT_STATEMENTS = {"command", "redirected_statement", "pipeline", "subshell", "declaration_command", "variable_assignment", "variable_assignments", "test_command",
+                      "unset_command"}
 STATEMENTS = {
     "command", "redirected_statement", "pipeline", "list", "subshell", "compound_statement", "if_statement",
     "elif_clause", "else_clause", "while_statement", "for_statement", "c_style_for_statement",
@@ -467,6 +546,39 @@ BASH_OPTIONS = frozenset("""allexport braceexpand emacs errexit errtrace functra
     pipefail posix privileged verbose vi xtrace""".split())
 DASH_OPTIONS = frozenset("""errexit noglob ignoreeof interactive monitor noexec stdin xtrace verbose vi emacs
     noclobber allexport notify nounset nolog debug""".split())
+# Options that change nothing the audit follows in a shell running a script or `-c` code: job
+# control, line editing, history, command hashing, notification, startup files. pipefail too, as
+# the audit takes every pipeline's status as unknown, and the trap options, as traps other than
+# EXIT already make the call suspect (see `trap`). Spelled as `option` reads them.
+HARMLESS_OPTIONS = frozenset("""emacs vi monitor notify hashall history histexpand ignoreeof interactive-comments
+    nolog debug errtrace functrace pipefail trapsasync beep bgnice autolist rmstarsilent autocd banghist
+    sunkeyboardhack singlelinezle longlistjobs recexact mailwarning promptcr autoresume listtypes menucomplete
+    globalrcs rcs histignorespace histignoredups interactivecomments login""".split())
+# The options `set`'s letters name, as each shell takes them: bash 3.2 (also as sh), dash, and zsh
+# 5.9 natively and under SH_OPTION_LETTERS (`emulate sh`), measured on macOS; spelled as `option`
+# reads them. "" is a letter whose effect the audit does not follow (zsh's -s sorts the positional
+# parameters, -A sets an array). A letter missing is one the shell lacks; zsh cannot change -i, -m,
+# -t or -Z in a running shell, an error as a missing letter is. `o` takes an option's name.
+SET_LETTERS = {
+    "bash": dict(a="allexport", b="notify", e="errexit", f="noglob", h="hashall", i="", k="keyword", m="monitor",
+                 n="noexec", p="privileged", r="restricted", t="onecmd", u="nounset", v="verbose", x="xtrace",
+                 B="braceexpand", C="noclobber", E="errtrace", H="histexpand", I="", P="physical", T="functrace"),
+    "dash": dict(a="allexport", b="notify", e="errexit", f="noglob", i="", m="monitor", s="", u="nounset",
+                 v="verbose", x="xtrace", C="noclobber", E="emacs", I="ignoreeof", V="vi"),
+    "zsh": {"0": "correct", "1": "printexitvalue", "2": "nobadpattern", "3": "nonomatch", "4": "globdots",
+            "5": "notify", "6": "bgnice", "7": "ignoreeof", "8": "markdirs", "9": "autolist", "A": "",
+            "B": "nobeep", "C": "noclobber", "D": "pushdtohome", "E": "pushdsilent", "F": "noglob", "G": "nullglob",
+            "H": "rmstarsilent", "I": "ignorebraces", "J": "autocd", "K": "nobanghist", "L": "sunkeyboardhack",
+            "M": "singlelinezle", "N": "autopushd", "O": "correctall", "P": "rcexpandparam", "Q": "pathdirs",
+            "R": "longlistjobs", "S": "recexact", "T": "cdablevars", "U": "mailwarning", "V": "nopromptcr",
+            "W": "autoresume", "X": "listtypes", "Y": "menucomplete", "a": "allexport", "d": "noglobalrcs",
+            "e": "errexit", "f": "norcs", "g": "histignorespace", "h": "histignoredups", "k": "interactivecomments",
+            "l": "login", "n": "noexec", "p": "privileged", "r": "restricted", "s": "", "u": "nounset",
+            "v": "verbose", "w": "chaselinks", "x": "xtrace", "y": "shwordsplit"},
+    "zshsh": dict(a="allexport", b="notify", e="errexit", f="noglob", l="login", n="noexec", p="privileged",
+                  r="restricted", s="", u="nounset", v="verbose", x="xtrace", C="noclobber", T="trapsasync",
+                  X="markdirs"),
+}
 # bash 3.2's shopt options; later versions have more.
 BASH_SHOPTS = frozenset("""cdable_vars cdspell checkhash checkwinsize cmdhist compat31 dotglob execfail
     expand_aliases extdebug extglob extquote failglob force_fignore gnu_errfmt histappend histreedit histverify
@@ -533,6 +645,7 @@ DASH_LACKS = frozenset("""let pushd popd dirs source caller disown enable help l
 # (`{ echo a >&2; } 2>&1`), as redirection targets.
 CLOSED = "\x00closed"
 MAYBE_OUT = "\x00stderr"
+TANGLED = "\x00tangled"  # zsh's MULTIOS with a duplication or close among the targets
 
 
 def protected_roots() -> list[Path]:
@@ -577,6 +690,19 @@ def _reaches_sibling(path: Path, workdir: Path) -> bool:
     return pp[len(wp)] != workdir.name or not _under(workdir, WORK)
 
 
+def _real(path: Path, workdir: Path) -> Path:
+    """Where a path leads at audit time, through any links; spelled from the work area where it
+    lies there, so that the checks against the work directory and its siblings apply to it."""
+    from .runners import WORK
+
+    real = Path(os.path.realpath(path))
+    for base in (workdir, WORK):
+        resolved = Path(os.path.realpath(base))
+        if _under(real, resolved):
+            return base / real.relative_to(resolved)
+    return real
+
+
 def _covers_protected(root: Path, roots: list[Path]) -> bool:
     """A search rooted here can reach a protected place or another run's work directory."""
     from .runners import WORK
@@ -616,6 +742,26 @@ def _resolve(token: str, cwd: Path, bare: bool = False) -> Path | None:
     if not (bare or token.startswith("/") or token.startswith(".") or "/" in token or "*" in token):
         return None
     return _normpath(cwd / token)
+
+
+def _multios_tangled(redirects: list) -> bool:
+    """Whether a descriptor (standard output or error) is redirected more than once with a
+    duplication or close among them, which zsh's MULTIOS joins in ways the audit does not follow
+    (measured on zsh 5.9: `> f >&-` leaves f empty, `> f 1>&1` writes to f and to standard output,
+    `2>&1 2>/dev/null` and `2>f 2>&1` send standard error to both)."""
+    seen: dict[str, list[bool]] = {"1": [], "2": []}
+    for r in redirects:
+        if r.type != "file_redirect":
+            continue
+        op = "".join(_text(c) for c in r.children if not c.is_named)
+        fd = next((_text(c) for c in r.named_children if c.type == "file_descriptor"), "")
+        last = _text(r.named_children[-1]) if r.named_children else ""
+        both = op in {"&>", "&>>"} or op == ">&" and fd == "" and not last.isdigit() and last != "-"
+        dup = op in {">&-", "<&-"} or op in {">&", "<&"} and (last.isdigit() or last == "-")
+        for which in ("1", "2") if both else (fd or ("1" if op.startswith(">") else "0"),):
+            if which in seen:
+                seen[which].append(dup)
+    return any(len(dups) > 1 and any(dups) for dups in seen.values())
 
 
 def _err_state(redirects: list, err: bool) -> bool:
@@ -663,6 +809,10 @@ def _array_values(value: str) -> list[str] | None:
 
 def _array(items: list[str]) -> str:
     return ARRAY_OPEN + str(len(items)) + ":" + SPLIT.join(items) + ARRAY_CLOSE
+
+
+class _ReservedWord(str):
+    """An unquoted word that zsh recognizes before expansion as a reserved word."""
 
 
 class _LiteralWord(str):
@@ -1149,8 +1299,15 @@ RESERVED = {"{", "}", "if", "then", "elif", "else", "fi", "for", "select", "whil
 
 def _assignment_status(node) -> str:
     """An assignment succeeds unless a command substitution in it fails."""
+    def hidden(text) -> bool:
+        return any(expanded and (piece.startswith("$(") or piece.startswith("${") and hidden(piece[2:-1]))
+                   for expanded, piece in _heredoc_parts(text))
+
     def substitutes(n) -> bool:
-        return n.type in {"command_substitution", "process_substitution"} or any(map(substitutes, n.children))
+        # The grammar leaves backquotes inside ${...} as literal expansion text.
+        return (n.type in {"command_substitution", "process_substitution"}
+                or n.type == "expansion" and hidden(_text(n)[2:-1])
+                or any(map(substitutes, n.children)))
     return MAYBE if substitutes(node) else OK
 
 
@@ -1184,6 +1341,122 @@ def _declaration_takes(kind: str, keyword: str, flags: str) -> bool:
         return all(ch in allowed for _, ch in letters)
     allowed = {"export": "fnp", "readonly": "afnp"}.get(keyword, "aFfiprtx")
     return all(ch in allowed for sign, ch in letters if sign == "-" or keyword not in {"export", "readonly"})
+
+
+def _declaration_words(args: list[str]) -> tuple[str, list[str]]:
+    """A declaration's options, the words up to the first other one or `--` (kept last, see
+    `declare`), and its names, the rest: after `--`, a word that starts with `-` is a name, and not
+    a valid one."""
+    flags, names = "", []
+    for k, a in enumerate(args):
+        if a == "--":
+            return flags + "--", names + args[k + 1:]
+        if not a.startswith(("-", "+")) or len(a) < 2 or ASSIGN.match(a):
+            return flags, names + args[k:]
+        flags += a
+    return flags, names
+
+
+def _option_key(name: str) -> str:
+    """What `option` does with a name, for telling apart readings of `set` (see `_set_words`)."""
+    n = name.lower().replace("_", "")
+    if not n:
+        return "unmodeled"
+    return "harmless" if n in HARMLESS_OPTIONS or n.startswith("no") and n[2:] in HARMLESS_OPTIONS else n
+
+
+def _set_words(args: list[str], reading: str, startup: bool = False) -> dict:
+    """How `set` takes `args` in one reading (see SET_LETTERS; "posix" is bash's letters and
+    dash's together): the options its letters set, as (name, on); the option names its `o`s take;
+    the positional parameters it sets (None: they stay); whether it lists the options; the
+    letters dash lacks ("posix"; bash's errors are `_bash_set`'s), or the one zsh stops at; and
+    `effects`, which tells readings that differ apart. `startup`: a new shell's flags, where c, s, i and l are its own."""
+    zsh = reading != "posix"
+    table = SET_LETTERS[reading] if zsh else {**SET_LETTERS["dash"], **SET_LETTERS["bash"]}
+    letters, names, missing, dash_missing = [], [], [], []
+    positional, lists, j = None, False, 0
+    while j < len(args) and not (zsh and missing):
+        a = args[j]
+        if a in {"--", "-"}:
+            positional = args[j + 1:]
+            break
+        if not (a.startswith(("-", "+")) and len(a) > 1):
+            positional = args[j:]
+            break
+        on, cluster = a[0] == "-", a[1:]
+        for k, c in enumerate(cluster):
+            if c == "o":
+                if zsh and cluster[k + 1:]:
+                    names.append((cluster[k + 1:], on))  # zsh: the rest of the cluster
+                    break
+                if j + 1 < len(args) and (zsh or args[j + 1][:1] not in {"", "-", "+"}):
+                    j += 1
+                    names.append((args[j], on))
+                else:
+                    lists = True
+                    if not zsh and j + 1 < len(args):
+                        dash_missing.append(c)  # dash takes `-e` as a name it lacks; bash lists
+                continue
+            if startup and c in "csil":
+                continue
+            if not zsh:
+                dash_missing += [c] if c not in SET_LETTERS["dash"] else []
+            if c in table:
+                letters.append((table[c], on))
+            else:
+                missing.append(c)
+                if zsh:
+                    break
+        j += 1
+    effects = (tuple((_option_key(n), on) for n, on in letters), tuple(names),
+               None if positional is None else tuple(positional), lists)
+    return {"letters": letters, "names": names, "positional": positional, "lists": lists, "missing": missing,
+            "dash_missing": dash_missing, "effects": effects}
+
+
+def _bash_set(args: list[str]) -> tuple[list[str], list[tuple[bool, str, bool]] | None]:
+    """Where bash 3.2 fails `set ARGS`. First it checks the letters of each word of options, but
+    not those after an `o` in the same word (they are the `o`'s word in this check, and an `o` at
+    a word's end takes the next word unless that starts with `-` or `+`): at a letter it lacks
+    there, `set` fails (status 2) before it changes anything, and sh exits. Then it takes the
+    words in order, each `o` the next word (or, where that is missing or starts with `-` or `+`,
+    it lists the options), and stops at a letter or an option name it lacks: what came before
+    stays, `set` fails (status 1), and sh goes on (measured on bash 3.2 and its sh). The letters
+    the first check meets that bash lacks, and what the second applies before it stops, as
+    (is a name, the letter or name, on), or None where it does not stop."""
+    usage, j = [], 0
+    while j < len(args):
+        a = args[j]
+        if a in {"--", "-"} or not (a.startswith(("-", "+")) and len(a) > 1):
+            break
+        cluster = a[1:]
+        k = cluster.find("o")
+        usage += [c for c in (cluster if k < 0 else cluster[:k]) if c not in SET_LETTERS["bash"]]
+        if k == len(cluster) - 1 and j + 1 < len(args) and args[j + 1][:1] not in {"", "-", "+"}:
+            j += 1
+        j += 1
+    if usage:
+        return usage, None
+    done: list[tuple[bool, str, bool]] = []
+    j = 0
+    while j < len(args):
+        a = args[j]
+        if a in {"--", "-"} or not (a.startswith(("-", "+")) and len(a) > 1):
+            break
+        on = a[0] == "-"
+        for c in a[1:]:
+            if c == "o":
+                if j + 1 < len(args) and args[j + 1][:1] not in {"", "-", "+"}:
+                    j += 1
+                    if args[j] not in BASH_OPTIONS:
+                        return usage, done
+                    done.append((True, args[j], on))
+            elif c not in SET_LETTERS["bash"]:
+                return usage, done
+            else:
+                done.append((False, c, on))
+        j += 1
+    return usage, None
 
 
 def _zsh_option(name: str) -> bool:
@@ -1268,9 +1541,128 @@ def _misread_bangs(node) -> list[int]:
     return out
 
 
-def _parseable(data: bytes) -> tuple[bytes, set[int]]:
-    """The command with each misread `!` blanked (offsets unchanged), and where the statements
-    they negated start."""
+# Where a newline before a backslash is text, not the end of a command line.
+TEXT_NODES = {"string", "raw_string", "ansi_c_string", "translated_string", "heredoc_body", "comment"}
+
+
+def _misread_backslashes(data: bytes) -> list[int]:
+    """Offsets of each newline the grammar misreads before a backslash. It takes a line that
+    starts with one as more of the line before: `true` then `\\cat x` on the next line parses as
+    `true '\\cat' x`, a backslash and newline after it joins the lines (`true cat x`), and a
+    here-document body loses such a first line to its command's words. The shell ends the line
+    there, as it does anywhere outside quotes and here-document bodies."""
+    root = _BASH.parse(data).root_node
+    out, i = [], data.find(b"\n\\")
+    while i != -1:
+        node = root.descendant_for_byte_range(i, i + 1)
+        if node is None or node.type not in TEXT_NODES:
+            out.append(i)
+        i = data.find(b"\n\\", i + 1)
+    return out
+
+
+def _heredoc_delimiter(word: str) -> str | None:
+    """The line that ends a here-document whose word is `word`: the word after quote removal
+    (`E'O'F` gives `EOF`, `"\\EOF"` gives `\\EOF`). None for `$'...'` and `$"..."`, which bash and
+    zsh translate and dash does not (measured)."""
+    if "$'" in word or '$"' in word:
+        return None
+    out, quote, i = [], None, 0
+    while i < len(word):
+        c = word[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            else:
+                out.append(c)
+        elif c == "\\" and i + 1 < len(word) and (quote is None or word[i + 1] in '$`"\\'):
+            out.append(word[i + 1])
+            i += 1
+        elif c in "'\"" and quote in {None, c}:
+            quote = None if quote else c
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _misread_heredocs(data: bytes, root=None) -> list[int]:
+    """Where the grammar ends a here-document at a line the shells take as more of its body. The
+    shells end it only at a line that is the delimiter exactly, once `<<-` drops the line's
+    leading tabs; the grammar also ends it with blanks or a carriage return around the delimiter
+    (` EOF`, `EOF `) and at the word as written (`<<E'O'F`, then `E'O'F`). Each is the offset of
+    the delimiter the grammar matched, or -1 where `_parseable` cannot mend the reading: a line
+    of the grammar's body that is the delimiter, or a delimiter the shells read differently. In
+    a command substitution a `)` or a backquote may follow the delimiter: the grammar reads it
+    as bash does (measured on bash 3.2, its sh, dash and zsh 5.9)."""
+    root = root or _BASH.parse(data).root_node
+    out = []
+    for r in _walk(root):
+        if r.type != "heredoc_redirect":
+            continue
+        start = next((c for c in r.named_children if c.type == "heredoc_start"), None)
+        body = next((c for c in r.named_children if c.type == "heredoc_body"), None)
+        end = next((c for c in r.named_children if c.type == "heredoc_end"), None)
+        if start is None or end is None:
+            continue
+        delimiter = _heredoc_delimiter(_text(start))
+        if delimiter is None:
+            out.append(-1)
+            continue
+        tabs = any(not c.is_named and _text(c) == "<<-" for c in r.children)
+        first = data.rfind(b"\n", 0, (body or end).start_byte) + 1
+        last = data.rfind(b"\n", 0, end.start_byte) + 1
+        stop = data.find(b"\n", end.start_byte)
+        lines = data[first:last].decode(errors="replace").split("\n")[:-1]
+        line = data[last:len(data) if stop == -1 else stop].decode(errors="replace")
+        if tabs:
+            lines = [x.lstrip("\t") for x in lines]
+            line = line.lstrip("\t")
+        substituted = any(a.type == "command_substitution" for a in _ancestors(r))
+        if delimiter in lines:
+            out.append(-1)
+        elif line != delimiter and not (substituted and line[len(delimiter):][:1] in {")", "`"}
+                                         and line.startswith(delimiter)):
+            out.append(end.start_byte)
+    return out
+
+
+def _ancestors(node):
+    while node.parent is not None:
+        node = node.parent
+        yield node
+
+
+def _insert(data: bytes, added: list[int], at: list[int], byte: bytes = b" ") -> tuple[bytes, list[int]]:
+    """`data` with `byte` inserted before each offset in `at`, and the offsets of every byte
+    `_parseable` has added, moved to match."""
+    at = sorted(set(at))
+    b = bytearray(data)
+    for i in reversed(at):
+        b[i:i] = byte
+    added = [a + sum(1 for i in at if i <= a) for a in added]
+    return bytes(b), added + [i + k for k, i in enumerate(at)]
+
+
+def _parseable(data: bytes) -> tuple[bytes, set[int], tuple[int, ...]]:
+    """The command as the grammar can read it: a space after each newline it misreads before a
+    backslash (see `_misread_backslashes`; a blank that starts a line changes nothing, outside a
+    here-document's body), a byte before each delimiter it matches where the shells go on with
+    the here-document (see `_misread_heredocs`), and each misread `!` blanked (offsets
+    unchanged). Also where the statements those `!`s negated start, and where the added bytes
+    are (`heredoc` leaves them out of the body)."""
+    added: list[int] = []
+    for _ in range(16):
+        newlines = _misread_backslashes(data)
+        if newlines:
+            data, added = _insert(data, added, [i + 1 for i in newlines])
+            continue
+        ends = [i for i in _misread_heredocs(data) if i >= 0]
+        if not ends:
+            break
+        for i in sorted(ends, reverse=True):
+            # Any byte but the delimiter's first stops the grammar's match.
+            data, added = _insert(data, added, [i], b"y" if data[i:i + 1] == b"x" else b"x")
     negate: set[int] = set()
     for _ in range(16):
         bangs = _misread_bangs(_BASH.parse(data).root_node)
@@ -1284,7 +1676,7 @@ def _parseable(data: bytes) -> tuple[bytes, set[int]]:
                 nxt += 1
             negate.add(nxt)
         data = bytes(b)
-    return data, negate
+    return data, negate, tuple(sorted(added))
 
 
 def _expand(path: Path) -> list[Path]:
@@ -1301,7 +1693,7 @@ def _walk(node):
         yield from _walk(c)
 
 
-def _rejected(nodes) -> tuple[bool, bool]:
+def _rejected(nodes) -> tuple[bool, bool, bool]:
     """Whether POSIX-mode bash and dash reject a line of code (its statements) as they read it,
     before any of it runs. dash rejects a process substitution, a here-string (`<<<`) and an array
     value (`p=(1 2)`, `local p=(1)`) anywhere in the line, its command substitutions and function
@@ -1309,15 +1701,19 @@ def _rejected(nodes) -> tuple[bool, bool]:
     outside a command substitution: glued to text before it, or as an assignment's value, `<(` is
     plain text, and a command substitution's code it reads as it runs it, where the error ends only
     the substitution (measured on macOS's /bin/sh and dash). Here-documents' bodies are left to the
-    process substitution's own handling (see `value`)."""
-    posix = dash = False
+    process substitution's own handling (see `value`). bash 3.2 itself, and so its sh, and dash
+    reject `|&` (zsh's pipe of both outputs) the same way: the third value."""
+    posix = dash = bash = False
 
     def walk(node, substituted):
-        nonlocal posix, dash
+        nonlocal posix, dash, bash
         if node.type == "heredoc_body":
             return
         if node.type in {"herestring_redirect", "array"}:
             dash = True
+        if node.type == "|&":
+            dash = True
+            bash = bash or not substituted
         if node.type == "process_substitution":
             dash = True
             parent, prev = node.parent, node.prev_sibling
@@ -1329,7 +1725,7 @@ def _rejected(nodes) -> tuple[bool, bool]:
 
     for n in nodes:
         walk(n, False)
-    return posix, dash
+    return posix, dash, bash
 
 
 def _body(node):
@@ -1677,10 +2073,16 @@ def _echo(args: list[str], shell: str | None, tilde, posix: bool | None = False,
     winning, decodes unless BSD_ECHO is set (`emulate sh` sets it), and takes a lone `-` as the end
     of the options. `shell` None is the transcript's own shell, bash or zsh; an option None was left
     set in some branches and not in others. Each possibility is followed. Escapes for bytes the
-    audit cannot hold, and parts of the words it cannot work out, are UNKNOWN."""
-    if shell not in {None, "bash", "zsh", "sh"}:
+    audit cannot hold, and parts of the words it cannot work out, are UNKNOWN. For dash, only
+    plain words without backslashes or its leading -n option are followed here."""
+    if shell not in {None, "bash", "zsh", "sh", "dash"}:
+        return None
+    if shell == "dash" and (any("\\" in a or UNKNOWN in a for a in args) or
+                            args and "-n" in _choices(args[0])):
         return None
     regimes = set()
+    if shell == "dash":
+        regimes.add((False, False, False))
     if shell in {None, "bash", "sh"}:
         for p in [posix] if posix is not None else [False, True]:
             for x in [xpg] if xpg is not None else [False, True]:
@@ -1896,6 +2298,11 @@ class _Shell:
         self.made_ever: set[Path] = set()
         self.doubt = False  # take every directory as missing (the first pass in `_shell`)
         self.negate: set[int] = set()  # where statements negated by a removed `!` start
+        # Here-document continuations attached to a negated command must wait for its status
+        # to turn over. Each active negation collects only its own command's continuation.
+        self.negating: list[dict] = []
+        self.added: dict[bytes, tuple[int, ...]] = {}  # bytes `_parseable` added, by parsed code
+        self.prevalued: dict = {}  # a declaration's assignment nodes, by their expanded values
         # Which shell runs the code where shells differ: "zsh", "posix" (bash, dash) or None when the
         # audit cannot tell, which keeps what either would do. `lastpipe`: bash's `shopt -s lastpipe`.
         self.dialect: str | None = None
@@ -1906,6 +2313,8 @@ class _Shell:
         self.shwordsplit: bool | None = False
         self.localoptions: bool | None = False  # zsh restores options on function return
         self.braceexpand: bool | None = True
+        self.noclobber: bool | None = False  # `set -C`: `>` may not replace an existing file
+        self.appendcreate: bool | None = False  # zsh's APPEND_CREATE: noclobber's `>>` may create a file
         self.ksharrays: bool | None = False
         self.shoptionletters: bool | None = False
         self.globsubst: bool | None = False  # zsh globs expansion results only with this option
@@ -1917,6 +2326,14 @@ class _Shell:
         self.bsdecho: bool | None = False
         # zsh's MULTIOS: a pipeline stage's output goes down the pipe as well as to its redirections.
         self.multios: bool | None = True
+        # `set -e` and `set -u`: a command that fails, or the expansion of an unset parameter, may
+        # end the shell (see `may_end`).
+        self.errexit: bool | None = False
+        self.nounset: bool | None = False
+        # `set -x` and `set -v`: the shell writes each command, or each line it reads, to standard
+        # error (see `visit`).
+        self.xtrace: bool | None = False
+        self.verbose: bool | None = False
         # zsh's POSIX_BUILTINS (set by `emulate sh` and `emulate ksh`): `command` runs builtins.
         self.posixbuiltins: bool | None = False
         # zsh's POSIX_IDENTIFIERS (the same): an arithmetic assignment makes no integer (see
@@ -1951,7 +2368,7 @@ class _Shell:
         self.kept: str | None = None
         self.trims = 0
         self.jumped = 0  # how many jumps (break, continue, return) and exits have been taken
-        self.exits: list[list] = []  # [output, number, worlds] where the shell exited (see `leave`)
+        self.exits: list[list] = []  # [output, number, worlds, state] where the shell exited (see `leave`)
         # Set once a redirection names a descriptor above 2: such a descriptor may be a copy of
         # standard output, so what any later command prints is unknown.
         self.stray = False
@@ -1961,8 +2378,21 @@ class _Shell:
         self.exec_err = False
         self.err_around = False  # the same outside the redirections of the simple command running
         self.noisy = 0  # commands run that may have written to standard error while err_out held
+        self.child_ends = 0  # unset parameters met in words a forked child may expand
+        self.open_failures = 0  # file redirections whose open may fail (see `open_may_fail`)
+        # Words being expanded that bash or zsh may expand in the child a command forks: its
+        # redirections, and in zsh an external command's prefix assignments (see `failed_redirect`).
+        self.forked_words = 0
+        # While a command's redirections expand: whether it runs in the shell itself (None: it may
+        # or may not, see `runs_inline`).
+        self.inline: bool | None = False
+        self.subshell_words = False  # while the command whose redirections expand is a subshell
+        self.shnullcmd = False  # zsh's SH_NULLCMD (see `null_command`)
+        self.cshnullcmd = False  # zsh's CSH_NULLCMD rejects redirections with no command
         self.out_closed = False  # whether a redirection around has closed standard output
+        self.closed_fds: set[str] = set()  # descriptors closed by the redirections around this command
         self.stage = None  # the pipeline stage running, while one before the last is
+        self.fed = None  # the pipeline stage running, while one after the first is (see `redirect`)
         # The options of the emulation `emulate MODE -c` runs code in, while it does: functions
         # defined there keep them (zsh's sticky emulation; see `emulate`), by body.
         self.sticky: dict | None = None
@@ -2105,7 +2535,8 @@ class _Shell:
         return {name: getattr(self, name) for name in
                 ("noglob", "shwordsplit", "lastpipe", "allexport", "localoptions", "braceexpand", "ksharrays",
                  "shoptionletters", "globsubst", "nomatch", "posix", "xpgecho", "bsdecho", "multios",
-                 "posixbuiltins", "posixidentifiers", "typesettounset")}
+                 "posixbuiltins", "posixidentifiers", "typesettounset", "errexit", "nounset", "xtrace",
+                 "verbose", "shnullcmd", "cshnullcmd", "noclobber", "appendcreate")}
 
     def restore_options(self, options: dict) -> None:
         for name, value in options.items():
@@ -2209,15 +2640,23 @@ class _Shell:
         exits, exec_err = len(self.exits), self.exec_err
         err_out = self.err_out
         traps, self.exit_traps = self.exit_traps, []  # a subshell starts with no EXIT trap
+        # It ends at its own unset parameters.
+        forked, inline, self.forked_words, self.inline = self.forked_words, self.inline, 0, False
+        subshell_words, self.subshell_words = self.subshell_words, False
+        opens = self.open_failures
         try:
             yield
         finally:
+            self.forked_words, self.inline, self.subshell_words = forked, inline, subshell_words
             self.memo = memo
             self.exec_err, self.err_out = exec_err, err_out  # a subshell's `exec` holds in it alone
             self.run_traps(exits)
             self.exit_traps = traps
             self.finish(exits)
             self.flush()  # bash writes what it still buffers when the subshell exits
+            # An open that failed in this child does not fail a redirection of its parent.
+            # In particular, `$(true < missing; echo /dev/null)` still supplies /dev/null.
+            self.open_failures = opens
             self.pending, self.diverted = saved[-2:]
             saved = saved[:-2]
             (self.worlds, self.known, self.vars, self.functions, self.aliases, self.dialect, self.shell_name,
@@ -2256,13 +2695,18 @@ class _Shell:
             self.dialect, self.shell_name, self.lastpipe = DIALECTS.get(verb or ""), verb, False
             self.noglob, self.shwordsplit, self.localoptions = False, False, False
             self.braceexpand, self.ksharrays = True, False
+            self.noclobber = self.appendcreate = False
             self.shoptionletters = False
             self.globsubst = False
             self.nomatch = True
             self.posix, self.xpgecho, self.bsdecho, self.multios = verb == "sh", False, False, True
+            # Until the shell's own flags (`bash -e`) set them.
+            self.errexit = self.nounset = self.xtrace = self.verbose = False
             prefix = self.unspecial, self.caught, self.guarded
             self.posixbuiltins, self.unspecial, self.caught, self.guarded = False, frozenset(), False, False
             self.posixidentifiers = self.typesettounset = False
+            self.shnullcmd = False
+            self.cshnullcmd = False
             # bash 3.2 (including /bin/sh) clears OLDPWD; native zsh initializes it to PWD.
             # Both discard the parent's directory stack, even when its entries still exist.
             self.worlds = [w._replace(oldpwd=w.cwd if verb == "zsh" else None, stack=()) for w in self.worlds]
@@ -2275,11 +2719,14 @@ class _Shell:
                 imported = env["SHELLOPTS"]
                 if UNKNOWN in imported or CHOICE.search(imported) or "$" in imported:
                     self.noglob, self.braceexpand, self.allexport = None, None, None
+                    self.noclobber = None
+                    self.errexit, self.nounset, self.xtrace, self.verbose = None, None, None, None
                     self.notes.append("a child shell's exported SHELLOPTS cannot be resolved")
                 else:
                     # SHELLOPTS enables listed options in addition to the new shell's defaults.
                     for name in imported.split(":"):
-                        if name in {"noglob", "braceexpand", "allexport", "posix"}:
+                        if name in {"noglob", "braceexpand", "allexport", "posix", "errexit", "nounset", "xtrace",
+                                    "verbose", "noclobber"}:
                             self.option(name, True)
             locals_, local_exports_, self.locals, self.local_exports = self.locals, self.local_exports, [], []
             sticky, self.sticky = self.sticky, None
@@ -2434,19 +2881,20 @@ class _Shell:
             self.rejoin(self.unwind(frame.take("drop")))
 
     def line(self, group: list) -> None:
-        """A line of code, which POSIX-mode bash and dash may reject as they read it (see
-        `_rejected`): dash then exits, and POSIX-mode bash ends the eval or sourced file the line is
-        in, failed, else the shell, with nothing of the line run. Its paths count as alternatives,
+        """A line of code, which POSIX-mode bash (bash too, at `|&`) and dash may reject as they
+        read it (see `_rejected`): dash then exits, and bash ends the eval or sourced file the line
+        is in, failed, else the shell, with nothing of the line run. Its paths count as alternatives,
         in case the audit's parse of the line is wrong."""
         def run():
             for c in group:
                 self.part(c)
 
-        posix, dash = _rejected(group)
+        posix, dash, bash = _rejected(group)
+        posix = posix or bash
         kinds = self.kinds()
-        ways = {"run": any(k == "bash" or k == "zsh" or k == "posix" and not posix or k == "dash" and not dash
-                           for k in kinds),
-                "abort": "posix" in kinds and posix, "exit": "dash" in kinds and dash}
+        ways = {"run": any(k == "zsh" or k == "bash" and not bash or k == "posix" and not posix
+                           or k == "dash" and not dash for k in kinds),
+                "abort": "posix" in kinds and posix or "bash" in kinds and bash, "exit": "dash" in kinds and dash}
         if not ways["abort"] and not ways["exit"]:
             run()
             return
@@ -2609,10 +3057,81 @@ class _Shell:
         """The shell exits in every world. What it printed so far is one way its output may end,
         kept until the shell (or subshell) ends (see `finish`)."""
         if self.worlds:
-            self.exits.append([self.output, self.jumped, list(self.worlds)])
+            self.exits.append([self.output, self.jumped, list(self.worlds), self.state()])
             self.jumped += 1
         self.set_status(EXITED)
         self.set_worlds(self.worlds)
+
+    def may_end(self, worlds: list | None = None) -> None:
+        """The shell may end here in `worlds` (every world by default): under `set -e` after a
+        command that may have failed, under `set -u` at a parameter that may be unset, where `exec`
+        runs a command. What it printed and left so far is one way it may end (see `leave`). The
+        audit also goes on from here in every world: it does not follow each place a shell ignores
+        -e (an eval in a condition, bash's command substitutions), and exec may fail."""
+        ending = list(self.worlds if worlds is None else worlds)
+        if not ending:
+            return
+        live, self.worlds = self.worlds, ending
+        try:
+            self.leave()
+        finally:
+            self.worlds = live
+
+    def unbound(self, name: str) -> None:
+        """`$name` under `set -u`: expanding an unset parameter ends the shell, as `${name?}` does
+        (see `end_unbound`). bash 3.2 takes "$@" with no positional parameters as unset too; `$!` is
+        unset before a background job."""
+        if self.nounset is False or name in {"#", "?", "$", "-", "0"}:
+            return
+        count = self.vars.get("#")
+        if name in {"@", "*"} or name.isdigit():
+            known = count is not None and count.isdigit()
+            if known and (int(count) >= int(name) if name.isdigit() else int(count) > 0):
+                return
+            self.end_unbound()
+            return
+        raw = self.vars.get(name, self.never_set(name) if IDENTIFIER.fullmatch(name) else UNSET)
+        if raw == UNSET or UNKNOWN in raw or "$" in raw or UNSET in _choices(raw):
+            self.end_unbound()
+
+    def end_unbound(self, surely: bool = False) -> None:
+        """The shell may end at an unset parameter under `set -u` (`surely`: it does, at a failed
+        `${name?word}`), printing a message where standard error is (the command's own redirections
+        may not be made yet). In words a forked child may expand (`forked_words`), only that child
+        may end, the command failing (see `failed_redirect`), so the shell also goes on. Only the
+        ending carries the message: where the shell goes on, the child printed it where standard
+        error went as the word expanded (see `erring`), which may be standard output (`2>&1 <
+        "${x?}"`), and the ending kept alongside then leaves the output unknown."""
+        self.child_ends += bool(self.forked_words)
+        if surely and not self.forked_words:
+            self.complain(around=True)
+            self.leave()
+            return
+        output, noisy = self.output, self.noisy
+        self.complain(around=True)
+        try:
+            self.may_end()
+        finally:
+            self.output, self.noisy = output, noisy
+
+    def failed_redirect(self) -> None:
+        """A command whose redirections or here-document met an unset parameter, under `set -u` or
+        at `${name?word}` (see `end_unbound`), may fail without ending the shell. bash 3.2, its sh
+        and zsh 5.9 make an external command's redirections, and a subshell's, in the child they
+        fork, which alone ends (zsh also an external command's prefix assignments). dash expands a
+        here-document in the shell, a subshell's apart, and fails any command but a special
+        builtin there. In each, the command does not run, fails, and the shell goes on (measured).
+        A file redirection whose open may fail takes this failing way too (see `open_may_fail`).
+        At an unset parameter, a builtin's, a function's, a group's or a loop's redirections end
+        the shell, as do any command's at a file in dash and a special builtin's at a here-document
+        there. The possible file-open failure keeps the shell going conservatively, including
+        where a special builtin's redirection error could instead end it.
+        The audit takes this way wherever a shell that may run the code does, and follows the
+        ending too (see `end_unbound`). What the command's output files then hold is unknown: those
+        before the failed one are opened (left empty, or holding the message where standard error
+        went there: `cat > out 2>&1 < "${x?}"`), the rest untouched."""
+        self.complain(around=True)
+        self.set_status(FAILED)
 
     def trap(self, args: list[str]) -> None:
         """`trap CODE SIGNAL...`. An EXIT trap's code runs when the shell (or subshell) ends (see
@@ -2654,12 +3173,15 @@ class _Shell:
     def run_traps(self, mark: int) -> None:
         """At the end of a shell or subshell: the code its EXIT traps may have set may run in every
         world it may end in, including those that exited (from `exits` at `mark` on). It may not
-        run: the audit does not tell which branches set a trap, or reset it (`trap - EXIT`). What
-        the shell printed is then unknown."""
+        run: the audit does not tell which branches set a trap, or reset it (`trap - EXIT`). It runs
+        with each ending's variables (`trap 'eval "$c"' EXIT; ... && exit; c=:`). What the shell
+        printed is then unknown."""
         traps, self.exit_traps = list(dict.fromkeys(self.exit_traps)), []
         if not traps:
             return
         ended = [w for entry in self.exits[mark:] for w in entry[2]]
+        # The code runs with the variables, functions and files of the way the shell ended.
+        self.join(([self.state()] if self.worlds else []) + [entry[3] for entry in self.exits[mark:]])
         self.set_worlds([w._replace(status=MAYBE) for w in [*self.worlds, *ended]])
         frames, self.frames = self.frames, [*self.frames, _Frame("barrier")]
         try:
@@ -2673,10 +3195,17 @@ class _Shell:
 
     def finish(self, mark: int) -> None:
         """At the end of a shell or subshell: its output is what it printed where it ran to the end,
-        or where it exited (`exits` from `mark` on, which end with it)."""
-        ends = [entry[0] for entry in self.exits[mark:]]
-        if ends:
-            self.output = _either_output(([self.output] if self.worlds else []) + ends)
+        or where it exited (`exits` from `mark` on, which end with it). Files and directories are as
+        any of those left them (`( echo a > f; [ -z "$X" ] && exit; echo b > f )` may leave a)."""
+        entries = self.exits[mark:]
+        if entries:
+            self.output = _either_output(([self.output] if self.worlds else []) + [entry[0] for entry in entries])
+            states = ([(self.files, self.made, self.removed)] if self.worlds else []) + [
+                (entry[3][6], entry[3][1], entry[3][2]) for entry in entries]
+            self.files = {path: tuple(dict.fromkeys(a for files, _, _ in states for a in files.get(path, (None,))))
+                          for path in set().union(*(files for files, _, _ in states))}
+            self.made = set.intersection(*(made for _, made, _ in states))
+            self.removed = set.union(*(removed for _, _, removed in states))
         del self.exits[mark:]
 
     def carry(self, mark: int, before: str | None, plain: bool) -> None:
@@ -3111,13 +3640,16 @@ class _Shell:
                 if c.type == "string_content":
                     parts.append(_unquote_double(c.text))
                 elif c.type in {"simple_expansion", "expansion"} and _text(c) in {"$*", "${*}"}:
+                    self.unbound("*")
                     parts.append("\x01*\x02")  # "$*": the parameters joined by IFS's first character
                 elif c.type == "expansion" and re.fullmatch(r"\$\{[A-Za-z_][A-Za-z0-9_]*\[\*\]\}", _text(c)):
+                    self.unbound(_text(c)[2:-4])
                     parts.append("\x01" + _text(c)[2:-1] + "\x02")
                 elif c.type in {"simple_expansion", "expansion"} and (m := re.fullmatch(
                         r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", _text(c))):
                     # In native zsh "$a" joins an array at IFS's first character; bash keeps
                     # the first element. Quoted "${a[@]}" is handled separately above.
+                    self.unbound(m[1])
                     parts.append("\x01" + m[1] + "[Q]\x02")
                 else:
                     parts.append(self.value(c))
@@ -3128,12 +3660,16 @@ class _Shell:
         if t == "simple_expansion":
             name = node.named_children[0] if node.named_children else None
             if name is not None and name.type in {"variable_name", "special_variable_name"}:
+                self.unbound(_text(name))
                 # Unquoted, $* is one word per parameter before splitting, like $@.
                 listed = LIST if _text(name) in {"@", "*"} else ""
                 return FIELD + listed + "\x01" + ("@" if _text(name) == "*" else _text(name)) + "\x02" + FIELD_END
             return FIELD + UNKNOWN + FIELD_END
         if t == "expansion":
             text = _text(node)
+            m = re.fullmatch(r"\$\{#?([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?$!-])(.*)\}", text, re.S)
+            if m and not re.match(r":?[-=+?]", m[2]) and not text.startswith("${#}"):
+                self.unbound(m[1])  # all but the forms with a default, an assignment, `+` or `?`
             m = re.fullmatch(r"\$\{(#?)([A-Za-z_][A-Za-z0-9_]*)\[([@*])\]\}", text)
             if m:
                 name = m[2]
@@ -3173,6 +3709,16 @@ class _Shell:
                         return FIELD + UNKNOWN + FIELD_END
                 if name not in self.vars and name in INHERITED and self.inherit:
                     raw = self.expand("\x01" + name + "\x02")
+                elif name not in self.vars and IDENTIFIER.fullmatch(name) and self.never_set(name) == UNKNOWN:
+                    # Set or not as the shell or its environment gives it (CLAUDECODE, SHLVL, OPTARG):
+                    # the shell may end at `?` and goes on with a value the audit does not know.
+                    for c in node.named_children[1:]:
+                        self.value(c)
+                    if op.endswith("?"):
+                        self.end_unbound()
+                    elif op.endswith("="):
+                        self.set_var(name, UNKNOWN)
+                    return FIELD + UNKNOWN + FIELD_END
                 unknown = raw != UNSET and (UNKNOWN in raw or CHOICE.search(raw) or "$" in raw)
                 if unknown:
                     self.notes.append("a parameter expansion depends on an unknown variable value")
@@ -3194,7 +3740,7 @@ class _Shell:
                         else:
                             for c in node.named_children[1:]:
                                 self.value(c)
-                    self.worlds = []
+                    self.end_unbound(surely=True)  # an EXIT trap still runs; the files are as they are
                     return ""
                 if use_word:
                     # The default word's substitutions run only when the default is used.
@@ -3226,13 +3772,13 @@ class _Shell:
             if self.dialect != "zsh" and (self.shell_name in {"sh", "dash"} or self.posix is not False):
                 # A syntax error in POSIX-mode bash and in dash, which ends the shell before the line
                 # runs: what it prints is unknown. Its paths still count.
-                self.exits.append([None, self.jumped, list(self.worlds)])
+                self.exits.append([None, self.jumped, list(self.worlds), self.state()])
                 self.jumped += 1
             reading = _text(node).startswith("<")
             self.feeding += reading  # what it prints reaches the command that reads it, not this output
             before, self.output = self.output, ""
             try:
-                with self.child():
+                with self.child(), self.descriptors(self.closed_fds - ({"1"} if reading else {"0"})):
                     self.diverted = None
                     stmts = [c for c in node.named_children if c.type in STATEMENTS]
                     for c in stmts if reading else []:
@@ -3270,7 +3816,7 @@ class _Shell:
         before, self.output = self.output, ""
         self.feeding += 1
         try:
-            with self.child(), self.guarding(False):
+            with self.child(), self.guarding(False), self.descriptors(self.closed_fds - {"1"}):
                 self.diverted, self.out_closed = None, False  # its standard output is the substitution's
                 for c in node.named_children:
                     self.visit(c)
@@ -3411,9 +3957,12 @@ class _Shell:
     def run(self, text: str, stdin: str | None = None, alias: bool = False) -> None:
         """Run shell code. An alias's text (`alias`) is part of the line it is used on: its last
         line runs on into the rest of that line (see `lines`)."""
-        data, negate = _parseable(text.encode())
+        data, negate, added = _parseable(text.encode())
+        if added:
+            self.added[data] = added
         tree = _BASH.parse(data)
-        if tree.root_node.has_error or _reserved_commands(tree.root_node):
+        if (tree.root_node.has_error or _reserved_commands(tree.root_node) or _misread_backslashes(data)
+                or _misread_heredocs(data, tree.root_node)):
             self.notes.append("part of a command the audit could not parse")
         saved, self.negate = self.negate, negate
         try:
@@ -3451,16 +4000,32 @@ class _Shell:
             # A `!` the grammar could not take, before a compound command (see `_parseable`). In
             # `! { a; } && b >x` it negates `{ a; }`, which starts where the list does.
             self.negate = self.negate - {node.start_byte}
-            with self.guarding():
-                self.visit(node)
-            swap = {OK: FAILED, FAILED: OK}
-            self.worlds = [w._replace(status=swap.get(w.status, w.status)) for w in self.worlds]
-            return
+            self.negate_command(_body(node), lambda: self.visit(node))
+            return  # `set -e` does not end the shell after `!`
         after = node.next_sibling
         if node.type in STATEMENTS and after is not None and after.type == "&":
             self.background(node)
             return
+        if node.type in STATEMENTS and (self.xtrace is not False or self.verbose is not False):
+            # Under `set -x` the shell writes the command to its standard error before the command's
+            # own redirections; under `set -v` bash writes the code an eval or `.` reads (measured).
+            self.complain()
         self._visit(node)
+        self.errexit_end(node)
+
+    def errexit_end(self, node) -> None:
+        """`set -e` (errexit): after a statement that may have failed, the shell may end (see
+        `may_end`), except where the shells ignore -e: each command of an and-or list but the last,
+        the conditions of if, while and until, and a command after `!`, with what they run (see
+        `guarding`). A function or eval whose status comes from a `!` ends bash, sh and dash, and
+        not zsh, which the audit takes to end as well (measured on bash 3.2, sh, dash and zsh 5.9).
+        An and-or list ends by its last command, and a compound command by the commands inside
+        it."""
+        if self.errexit is False or self.guarded:
+            return
+        if node.type not in ERREXIT_STATEMENTS:
+            return
+        self.may_end([w for w in self.worlds if w.status in (FAILED, MAYBE)])
 
     def background(self, node) -> None:
         """A statement before `&` runs in a subshell, and the shell goes on with status 0. zsh is the
@@ -3506,11 +4071,7 @@ class _Shell:
                 for c in node.named_children:
                     self.visit(c)
         elif t == "negated_command":
-            with self.guarding():
-                for c in node.named_children:
-                    self.visit(c)
-            swap = {OK: FAILED, FAILED: OK}
-            self.worlds = [w._replace(status=swap.get(w.status, w.status)) for w in self.worlds]
+            self.negated(node)
         elif t == "if_statement":
             self.branches(self.if_clauses(node))
         elif t == "while_statement":
@@ -3990,18 +4551,33 @@ class _Shell:
         """export, declare, typeset, local and readonly: assignments, with `-x` (and export) exporting,
         `-n` (export) or `+x` unexporting, `-i` making the variable arithmetic, `-f` naming functions."""
         keyword = _text(node.children[0]) if node.children else ""
-        flags, names = "", []
-        for c in node.named_children:
-            if c.type == "variable_assignment":
-                names.append(c)
-            elif c.type in {"word", "variable_name", "string", "raw_string", "concatenation", "simple_expansion",
-                            "expansion", "number"}:
-                w = self.expand(self.value(c))
-                if w.startswith(("-", "+")) and len(w) > 1 and not names:
-                    flags += w
-                else:
-                    names.append(w)
-        self.declaration(keyword, flags, names, _assignment_status(node))
+        flags, names, options = "", [], True
+        # Every word expands, values included, before the builtin assigns any (`a=0; export a=1
+        # b=$a` sets b to 0, and a command substitution in a value runs even where the
+        # declaration then fails or ends the shell): `assign` takes the values from here.
+        saved, self.prevalued = self.prevalued, dict(self.prevalued)
+        try:
+            for c in node.named_children:
+                if c.type == "variable_assignment":
+                    options = False
+                    names.append(c)
+                    if (n := c.child_by_field_name("name")) is not None and n.type != "subscript":
+                        self.prevalued[c] = self.assignment_value(c)
+                elif c.type in {"word", "variable_name", "string", "raw_string", "concatenation", "simple_expansion",
+                                "expansion", "number"}:
+                    w = self.expand(self.value(c))
+                    if options and w == "--":
+                        # After it a word that starts with `-` is a name, and a number no option's
+                        # argument (`typeset -i -- 16 p`); it stays last among the options.
+                        flags, options = flags + "--", False
+                    elif options and w.startswith(("-", "+")) and len(w) > 1:
+                        flags += w
+                    else:
+                        options = False
+                        names.append(w)
+            self.declaration(keyword, flags, names, _assignment_status(node))
+        finally:
+            self.prevalued = saved
 
     def declaration(self, keyword: str, flags: str, names: list, ok: str = OK, checked: bool = False) -> None:
         """What a declaration does (see `declare`), setting the status (`ok` where nothing fails);
@@ -4050,14 +4626,9 @@ class _Shell:
             return
         if keyword == "local" and not self.locals:
             def outside(then):
-                # The arguments expand before the shell reports local's missing function scope:
-                # bash then fails it, dash exits.
+                # The arguments expand (see `declare`) before the shell reports local's missing
+                # function scope: bash then fails it, dash exits.
                 def run():
-                    for item in names:
-                        if not isinstance(item, str):
-                            value = item.child_by_field_name("value")
-                            if value is not None:
-                                self.value(value)
                     self.complain()
                     then()
                 return run
@@ -4340,7 +4911,6 @@ class _Shell:
     def assign(self, node, around: bool = False, prefix: bool = False) -> None:
         """An assignment node (see `set_var`)."""
         name = node.child_by_field_name("name")
-        val = node.child_by_field_name("value")
         if name is None:
             return
         if name.type == "subscript":
@@ -4349,17 +4919,20 @@ class _Shell:
             if base is not None:
                 self.vars[_text(base)] = UNKNOWN
             return
+        value = self.prevalued[node] if node in self.prevalued else self.assignment_value(node)
+        append = any(not c.is_named and _text(c) == "+=" for c in node.children)
+        self.set_var(_text(name), value, append, around, prefix)
+
+    def assignment_value(self, node) -> str:
+        """An assignment node's value, expanded: an array's elements as words, a scalar's text."""
+        val = node.child_by_field_name("value")
         if val is not None and val.type == "array":
             lists = self.word_lists(self.marked_words(val.named_children, val))
             if len(lists) != 1:
                 self.notes.append("an array assignment differs between possible shells")
-                value = UNKNOWN
-            else:
-                value = _array([self.tilde(v) for v in lists[0]])
-        else:
-            value = self.tilde(self.expand(self.value(val))).replace(SPLIT, " ") if val is not None else ""
-        append = any(not c.is_named and _text(c) == "+=" for c in node.children)
-        self.set_var(_text(name), value, append, around, prefix)
+                return UNKNOWN
+            return _array([self.tilde(v) for v in lists[0]])
+        return self.tilde(self.expand(self.value(val))).replace(SPLIT, " ") if val is not None else ""
 
     def set_var(self, name: str, value: str, append: bool = False, around: bool = False, prefix: bool = False) -> None:
         """Assign a variable: as arithmetic where it is an integer (see `set_number`), except that
@@ -4440,67 +5013,116 @@ class _Shell:
         for item in values if values is not None else [value]:
             self.add(item, bare=False)
 
-    def pipeline(self, stages: list, data: str | None = None, tail: list | None = None) -> None:
+    def pipeline(self, stages: list, data: str | None = None, tail: list | None = None,
+                 piped: bool = False) -> None:
         """Each stage runs in a subshell, fed what the stage before it printed (when known), except
         that zsh runs the last stage in the current shell, as bash does after `shopt -s lastpipe`:
         `x | cd d`, `x | read y` and `x | while read d; do cd "$d"; done` change zsh's shell. Where
         the audit cannot tell which shell runs the code and the last stage could change the shell
         (see `_keeps_shell`), it keeps both outcomes. `tail`: redirections written after the
         pipeline, which belong to its last stage. A search whose results reach a later stage that
-        reads names (xargs, a shell, a `while read` loop) is fed."""
+        reads names (xargs, a shell, a `while read` loop) is fed. `piped` marks the first stage of
+        a continuation the grammar put inside a here-document: its `data` came from a pipe too."""
         if not stages:
             self.set_status(MAYBE)
+            return
+        if stages[0].type == "negated_command":
+            # The grammar attaches `!` to only the first stage, even though the shell negates
+            # the entire pipeline. A last-stage here-document's &&/|| must wait for that too.
+            first = stages[0].named_children
+            self.negate_command(_body(stages[-1]),
+                                lambda: self.pipeline([*first, *stages[1:]], data, tail, piped))
             return
         here = {"zsh": [True], "posix": [False, True] if self.lastpipe is not False else [False]}.get(self.dialect, [False, True])
         ways = [False] if self._keeps_shell(stages[-1]) else here
         if len(ways) == 1:
-            self._pipeline(stages, data, tail, ways[0])
+            self._pipeline(stages, data, tail, ways[0], piped)
         else:
-            self.either(*(lambda h=h: self._pipeline(stages, data, tail, h) for h in ways))
+            self.either(*(lambda h=h: self._pipeline(stages, data, tail, h, piped) for h in ways))
 
-    def _pipeline(self, stages: list, data: str | None, tail: list | None, here: bool) -> None:
+    def _pipeline(self, stages: list, data: str | None, tail: list | None, here: bool,
+                  piped: bool = False) -> None:
         """`pipeline` with the last stage run in the current shell if `here`. What the last stage
         prints follows what came before the pipeline."""
         before, mark = self.output, self.jumped
-        out = self._stages_from(stages, data, tail, here, 0)
+        out = self._stages_from(stages, data, tail, here, 0, piped)
         self.output = _concat(before, out)
         self.carry(mark, before, True)
 
     def _stages_from(self, stages: list, data: str | None, tail: list | None, here: bool,
-                     start: int) -> str | None:
+                     start: int, piped: bool = False) -> str | None:
         """Run a pipeline's stages from `start`, the first fed `data`; return what the last prints.
         Where a stage may read several inputs (a CHOICE: what echo prints in different shells,
         say), the rest of the pipeline runs on each."""
         readers = [self._reads_names(s) for s in stages]
+        # The first stage is fed by a pipe where the pipeline is itself a stage fed by one.
+        inherited = piped or self.fed is not None and self.fed == stages[0].parent
+        waiting = False
         for i in range(start, len(stages)):
             stage = stages[i]
             if data is not None and CHOICE.search(data) and len(alts := _choices(data)) > 1:
                 outs = []
 
                 def rest(d, i=i):
-                    outs.append(self._stages_from(stages, d, tail, here, i))
+                    outs.append(self._stages_from(stages, d, tail, here, i, piped))
 
                 self.either(*(lambda d=d: rest(d) for d in alts))
-                return _either_output(outs)
+                return None if waiting else _either_output(outs)
             last = i == len(stages) - 1
+            if not last and self.null_exec_wait(stage, stages[i + 1:]):
+                waiting = True
             self.output = ""
             fed = any(readers[i + 1:])
             self.feeding += fed
             outer, self.stage = self.stage, None if last else stage
+            feeder, self.fed = self.fed, stage if i > 0 or inherited else None
+            opened = {"1"} if not last else set()
+            if i > 0 or inherited:
+                opened.add("0")
+            if not last and stage.next_sibling is not None and stage.next_sibling.type == "|&":
+                opened.add("2")
             try:
-                with nullcontext() if last and here else self.child():
+                with (nullcontext() if last and here else self.child()), self.descriptors(self.closed_fds - opened):
                     if not last:
                         self.diverted, self.out_closed = None, False  # its standard output is the pipe
+                        nxt = stage.next_sibling
+                        if nxt is not None and nxt.type == "|&":
+                            self.err_out = True  # zsh's `|&`: its standard error too (see `line`)
                     if tail and last:
                         self.with_redirects(stage, tail, data)
                     else:
                         self.statement(stage, data)
             finally:
                 self.feeding -= fed
-                self.stage = outer
+                self.stage, self.fed = outer, feeder
             data = self.output
         self.set_status(MAYBE)
-        return data
+        return None if waiting else data
+
+    def null_exec_wait(self, stage, following: list) -> bool:
+        """zsh 5.9's bare NULLCMD=exec stage under MULTIOS may wait for a pipe reader that
+        waits for EOF. Measured with `> /dev/null | cat` and `>> /dev/null | cat`: neither
+        finished within the timeout. A group, MULTIOS off, and a nonreader (`:`) finish.
+        Preserve the reads of later stages, but make the pipeline's output unknown."""
+        if "zsh" not in self.kinds() or self.multios is False or self.shnullcmd is True or self.cshnullcmd is True:
+            return False
+        if stage.type != "redirected_statement" or stage.child_by_field_name("body") is not None:
+            return False
+        names = _choices(self.vars.get("NULLCMD", "cat"))
+        defined = self.functions.get("exec", (None,))
+        if not any(n == "exec" or UNKNOWN in n for n in names) or None not in defined:
+            return False
+        redirects = [r for r in stage.named_children if r.type == "file_redirect"]
+        output = any("".join(_text(c) for c in r.children if not c.is_named) in {">", ">>", ">|"}
+                     and next((_text(c) for c in r.named_children if c.type == "file_descriptor"), "1") == "1"
+                     for r in redirects)
+        nonreaders = {":", "true", "false", "echo", "printf", "pwd"}
+        if not output or all(self._command_name(s) in nonreaders and self._keeps_shell(s) for s in following):
+            return False
+        note = "zsh NULLCMD=exec with MULTIOS may wait for a pipeline reader; output is unknown"
+        if note not in self.notes:
+            self.notes.append(note)
+        return True
 
     def _keeps_shell(self, node) -> bool:
         """Whether a pipeline stage leaves the shell as it was wherever it runs: a simple command,
@@ -4537,6 +5159,8 @@ class _Shell:
         inner = node.child_by_field_name("body") if node.type == "redirected_statement" else node
         if inner is not None and inner.type == "while_statement":
             return True
+        if inner is not None and inner.type in {"compound_statement", "subshell"}:
+            return any(cls._reads_names(c) for c in inner.named_children if c.type in STATEMENTS)
         return cls._command_name(node) in NAME_READERS
 
     def statement(self, node, stdin: str | None) -> None:
@@ -4548,22 +5172,68 @@ class _Shell:
             self.while_loop(node, stdin)
         elif node.type == "pipeline":
             self.pipeline(self._stages(node), data=stdin)
+        elif node.type in {"compound_statement", "subshell"} and len(
+                children := [c for c in node.named_children if c.type in STATEMENTS]) == 1:
+            # A group with one statement passes its inherited input to that statement. A loop
+            # or another group may in turn pass it on, without treating inner redirections as
+            # belonging to the pipeline stage around the group. What `visit` does around a
+            # statement it does here too: `set -x` and `-v` write to the group's standard error
+            # (`set -x; { echo; } 2>&1` prints `+ echo`, measured on bash 3.2), and `set -e` may end
+            # the shell after it; a `!` before it or `&` after it is visit's to follow.
+            inner = children[0]
+            if inner.start_byte in self.negate or inner.next_sibling is not None and inner.next_sibling.type == "&":
+                self.visit(node)
+                return
+            with self.child() if node.type == "subshell" else nullcontext():
+                if not self.worlds:
+                    return
+                if self.xtrace is not False or self.verbose is not False:
+                    self.complain()
+                self.statement(inner, stdin)
+                self.errexit_end(inner)
         else:
             self.visit(node)
 
     def redirected(self, node, stdin: str | None = None, outer: list | None = None) -> None:
         body = node.child_by_field_name("body")
         redirects = [c for c in node.named_children if c.type in REDIRECTS] + list(outer or [])
-        self.with_redirects(body, redirects, stdin)
+        self.with_redirects(body, redirects, stdin, node)
 
-    def with_redirects(self, body, redirects: list, stdin: str | None) -> None:
-        """A statement and the redirections written after it. In `cd .. && python3 - <<EOF` the
-        grammar attaches the here-document to the whole list; in the shell it, like any redirection
-        after a list or pipeline, belongs to the last command."""
+    def negated(self, node, redirects: list | None = None, stdin: str | None = None) -> None:
+        """`! command`, its status turned over. The grammar puts redirections written after it
+        (`! cat < f`) outside the negation; in the shell they belong to the command, so whether
+        they are made in a child is the command's to decide (see `failed_redirect`)."""
+        inner = node.named_children
+        def run():
+            for i, c in enumerate(inner):
+                if redirects and i == len(inner) - 1:
+                    self.with_redirects(c, redirects, stdin)
+                else:
+                    self.visit(c)
+        self.negate_command(_body(inner[-1]), run)
+
+    def negate_command(self, node, run) -> None:
+        """Negate a parsed or grammar-repaired command, before its here-document's conditional
+        continuation, but after any remaining stages of its pipeline. For a pipeline the
+        emitting command is its last stage, including when `_parseable` removed the `!`."""
+        if node.type == "pipeline":
+            node = _body(self._stages(node)[-1])
+        continuation = {"node": node, "after": [], "outputs": []}
+        self.negating.append(continuation)
+        try:
+            with self.guarding():
+                run()
+        finally:
+            self.negating.pop()
+        self.heredoc_after(continuation["after"], _either_output(continuation["outputs"]), negated=True)
+
+    def with_redirects(self, body, redirects: list, stdin: str | None, node=None) -> None:
+        """A statement and the redirections written after it (`node`, where it has no statement:
+        see `null_command`). In `cd .. && python3 - <<EOF` the grammar attaches the here-document to
+        the whole list; in the shell it, like any redirection after a list or pipeline, belongs to
+        the last command."""
         if body is None:
-            _, after = self.redirect(redirects, stdin)
-            for stmt in after:
-                self.visit(stmt)
+            self.null_command(node, redirects, stdin)
         elif body.type == "command":
             self.simple(body, redirects, stdin)
         elif body.type == "redirected_statement":
@@ -4571,48 +5241,207 @@ class _Shell:
         elif body.type == "list":
             self.and_or(body, redirects, stdin)
         elif body.type == "pipeline":
-            self.pipeline(self._stages(body), tail=redirects)
+            self.pipeline(self._stages(body), data=stdin, tail=redirects)
+        elif body.type == "negated_command":
+            self.negated(body, redirects, stdin)
         else:
-            outs: list[tuple[str, bool]] = []
-            data, after = self.redirect(redirects, stdin, outs)
-            before, self.output = self.output, ""
-            diverted, emits, err, mark = self.diverted, self.emits, self.err_out, self.jumped
-            closed, tees = self.out_closed, self.tees()  # MULTIOS as the redirections are made
-            trims = self.trims
+            def run(data):
+                self.statement(body, data)
+            self.around_redirects(body, node if node is not None else body, redirects, stdin, run, body.type != "subshell",
+                                  body.type == "subshell")
+
+    def around_redirects(self, node, unit, redirects: list, stdin: str | None, run, inline: bool | None,
+                         subshell: bool = False) -> None:
+        """Make `redirects` and run `run(data)` inside them, `data` being what they feed standard
+        input; `node` is what runs, `unit` the statement they belong to (a pipeline's stage, say),
+        and `inline` and `subshell` say where its redirections expand (see `redirecting`)."""
+        outs: list[tuple[str, bool]] = []
+        ends = self.child_ends
+        opens = self.open_failures
+        failures: list = []
+        closed_fds = set(self.closed_fds)
+        with self.redirecting(inline, subshell):
+            data, after = self.redirect(redirects, stdin, outs, piped=self.fed is not None and self.fed == unit,
+                                        failures=failures, closed=closed_fds)
+        fails = self.child_ends > ends or self.open_failures > opens  # see `failed_redirect`
+        before, self.output = self.output, ""
+        diverted, emits, err, mark = self.diverted, self.emits, self.err_out, self.jumped
+        closed, tees = self.out_closed, self.tees()  # MULTIOS as the redirections are made
+        trims = self.trims
+        if outs:
+            self.diverted = None
+            self.out_closed = any(target == CLOSED for target, _ in outs)
+        self.err_out = _err_state(redirects, err)
+        noisy = self.noisy
+        try:
+            ways = [lambda: run(data)]
+            if self.child_ends > ends or self.open_failures > opens and "dash" in self.kinds():
+                ways.append(self.failed_redirect)
+            ways.extend(lambda failure=failure: self.redirect_failed(failure) for failure in failures)
+            with self.descriptors(closed_fds):
+                self.either(*ways) if len(ways) > 1 else run(data)
+        finally:
             if outs:
-                self.diverted = None
-                self.out_closed = any(target == CLOSED for target, _ in outs)
-            self.err_out = _err_state(redirects, err)
-            noisy = self.noisy
-            try:
-                if body.type == "while_statement":
-                    self.while_loop(body, data)
+                self.diverted, self.out_closed = diverted, closed
+            if self.err_out and not err and self.noisy > noisy:
+                self.output = None  # diagnostics inside reached what it printed
+            self.err_out = err or self.exec_err
+        own = self.output
+        piped = self.stage is not None and self.stage == unit
+        self.carry(mark, before, not outs and not after and self.diverted is None and not self.stray)
+        self.write_outs(outs, None if fails else own, tees, piped)
+        self.emit(before, own, outs, after, piped, node, bool(outs) or self.emits == emits, tees,
+                  False if self.trims == trims else None)
+
+    def null_command(self, node, redirects: list, stdin: str | None, unit=None) -> None:
+        """Redirections with no command (`< f`, `> f`, and in zsh a command whose words all expand
+        to nothing; `unit` is the statement they belong to, `node` by default). bash, sh and dash
+        make them in the shell and run nothing, with the status of the last command substitution in
+        them, or 0. zsh runs a command with them, chosen in this order (measured on zsh 5.9, in the
+        order of its exec.c): where NULLCMD is empty or unset, it prints "redirection with no
+        command", makes no redirection, and ends what the nearest `eval`, `.` or `emulate -c` runs,
+        or else the shell (see `abort`); CSH_NULLCMD gives the same error; otherwise `:` where it
+        emulates sh or ksh (SH_NULLCMD);
+        otherwise $READNULLCMD (`more` unless set) for one `<` on any descriptor and nothing else,
+        where READNULLCMD is not empty; otherwise $NULLCMD (`cat` unless set). That command is
+        looked up as a function, a builtin or a file, never an alias, and runs in the shell where it
+        is a builtin or a function, so what its redirections' words assign stays. A precommand
+        modifier there (`noglob`, `builtin`, `command`, `-`) gives the same error unless a function
+        of that name shadows it; `exec` keeps its redirections for the shell, and `time` is
+        unresolved. An external `more` copies its input as cat does, its output not being a terminal.
+        Either variable may come from the environment (see `never_set`)."""
+        unit = node if unit is None else unit
+        substituted = any(_assignment_status(n) == MAYBE for n in [node, *redirects])
+
+        def posix() -> None:
+            self.around_redirects(node, unit, redirects, stdin,
+                                  lambda data: self.set_status(MAYBE if substituted else OK), True)
+
+        def unknown() -> None:
+            self.notes.append("a redirection with no command, which zsh runs with a NULLCMD the audit cannot tell")
+
+            def run(data) -> None:
+                self.output = None
+                self.set_status(MAYBE)
+            self.around_redirects(node, unit, redirects, stdin, run, None)
+
+        def error() -> None:
+            self.complain()
+            self.abort()  # zsh: redirection with no command
+
+        def verb(name: str) -> None:
+            defined = self.functions.get(name)
+            if name in {"exec", "noglob", "builtin", "command", "-"} and defined is not None and None in defined:
+                # Choose the function's temporary redirections, exec's persistent ones, or a
+                # modifier's error before making any redirection.
+                def selected(body):
+                    saved = self.functions.pop(name)
+                    shadow = (body,)
+                    if body is not None:
+                        self.functions[name] = shadow
+                    try:
+                        verb(name)
+                    finally:
+                        if self.functions.get(name, shadow) is shadow:
+                            self.functions[name] = saved
+                self.either(*(lambda body=body: selected(body) for body in defined))
+                return
+            if name in {"noglob", "builtin", "command", "-"} and defined is None:
+                error()
+                return
+            if name == "exec" and name not in self.functions:
+                alias = self.aliases.pop(name, None)
+                try:
+                    self.run_words(node, [], [[name]], redirects, stdin, unit)
+                finally:
+                    if alias is not None and name not in self.aliases:
+                        self.aliases[name] = alias
+                return
+
+            def run(data) -> None:
+                alias = self.aliases.pop(name, None)  # no alias expands there
+                try:
+                    if name == "more" and name not in self.functions:
+                        self.prefixed("command", ["cat"], data)  # external pager, no cat function or alias
+                    else:
+                        self.command([name], data)
+                finally:
+                    if alias is not None and name not in self.aliases:
+                        self.aliases[name] = alias
+            defined = self.functions.get(name)
+            ways = {True} if name in ZSH_BUILTINS - {"command"} or defined is not None and None not in defined else \
+                {True, False} if defined is not None else {False}
+            self.around_redirects(node, unit, redirects, stdin, run, ways.pop() if len(ways) == 1 else None)
+
+        def zsh() -> None:
+            if self.cshnullcmd is not False:
+                if self.cshnullcmd is True:
+                    error()
                 else:
-                    self.visit(body)
-            finally:
-                if outs:
-                    self.diverted, self.out_closed = diverted, closed
-                if self.err_out and not err and self.noisy > noisy:
-                    self.output = None  # diagnostics inside reached what it printed
-                self.err_out = err or self.exec_err
-            own = self.output
-            self.carry(mark, before, not outs and not after and self.diverted is None and not self.stray)
-            self.write_outs(outs, own, tees, self.stage is not None and self.stage == body.parent)
-            self.emit(before, own, outs, after, self.stage is not None and self.stage == body.parent, body,
-                      bool(outs) or self.emits == emits, tees, False if self.trims == trims else None)
+                    saved, self.cshnullcmd = self.cshnullcmd, False
+                    try:
+                        self.either(error, zsh)
+                    finally:
+                        self.cshnullcmd = saved
+                return
+            lone = len(redirects) == 1 and redirects[0].type == "file_redirect" and \
+                "".join(_text(c) for c in redirects[0].children if not c.is_named) == "<"
+            names = ["NULLCMD", "READNULLCMD"] if lone else ["NULLCMD"]
+            values = [self.vars.get(n, {"NULLCMD": "cat", "READNULLCMD": "more"}[n]
+                                    if self.never_set(n) == UNSET else UNKNOWN) for n in names]
+            # Each value a variable may have, "?" where the audit cannot tell it; a value counts
+            # only where zsh consults it.
+            def pick(value: str) -> list[str]:
+                return [("?" if UNKNOWN in v or "$" in v else v) for v in _choices(value)]
+            runs: dict[str, None] = {}
+            for null in pick(values[0]):
+                for read in pick(values[1]) if lone else [UNSET]:
+                    for sh in [True, False] if self.shnullcmd is None else [self.shnullcmd]:
+                        name = "?" if null == "?" else "" if null in {"", UNSET} else ":" if sh else \
+                            read if read not in {"", UNSET} else null
+                        runs[name] = None
+            thunks = [error if name == "" else unknown if name in {"?", "time"} else
+                      (lambda name=name: verb(name)) for name in runs]
+            thunks[0]() if len(thunks) == 1 else self.either(*thunks)
+
+        kinds = self.kinds()
+        if "zsh" not in kinds:
+            posix()
+        elif kinds == ["zsh"]:
+            zsh()
+        else:
+            self.either(zsh, posix)
 
     def redirect(self, redirects: list, stdin: str | None, outs: list | None = None,
-                 ifs: str | None | bool = False) -> tuple[str | None, list]:
-        """Note the files that redirections name; return what reaches standard input (a
-        here-document or here-string, when there is one) and any statements a here-document
-        carries after it (the rest of a pipeline, say). Files standard output goes to are added to
-        `outs`, as (target, appended)."""
+                 ifs: str | None | bool = False, piped: bool = False,
+                 inputs: list | None = None, failures: list | None = None,
+                 closed: set[str] | None = None) -> tuple[str | None, list]:
+        """Note the files that redirections name; return what reaches standard input and any
+        statements a here-document carries after it (the rest of a pipeline, say). Files standard
+        output goes to are added to `outs`, as (target, appended).
+
+        Standard input is `stdin` unless the redirections give it another: a file (`<`, `<>`), a
+        here-document or here-string, another descriptor's input, or nothing (closed). With several,
+        bash, sh and dash read the last; zsh's MULTIOS reads them all in turn, after the pipe where
+        the command is a pipeline stage fed by the one before (`piped`): `echo in | cat < f` prints
+        both (measured on zsh 5.9; a group's or a loop's own redirections join its pipe, the commands
+        inside it do not). `inputs` gathers them for the here-document's redirections. `failures`
+        keeps each possible failed open's state before later redirection words expand: bash, sh
+        and zsh stop there, while dash expands those words before attempting the opens."""
         after: list = []
+        top = inputs is None
+        inputs = ([stdin] if piped else []) if inputs is None else inputs
+        closed = set(self.closed_fds) if closed is None else closed
         # Whether standard error is a copy of standard output as it stands before this
         # redirection: from a `2>&1` around (`{ { echo x >&2; } > f; } 2>&1`) or earlier here.
         err = self.err_out
         copied = err is not False
+        if self.tees() is not False and _multios_tangled(redirects):
+            self.stray = True
+            if outs is not None:
+                outs.append((TANGLED, False))
         for r in redirects:
+            made = err  # standard error as the redirections before this one left it
             if r.type == "file_redirect":
                 op = "".join(_text(c) for c in r.children if not c.is_named)
                 fd = next((_text(c) for c in r.named_children if c.type == "file_descriptor"), "")
@@ -4635,10 +5464,11 @@ class _Shell:
                 if op in {">&-", "<&-"}:
                     # Closes a descriptor: closed, standard output takes nothing, standard input
                     # gives nothing.
+                    closed.add(which)
                     if which == "1" and outs is not None:
                         outs.append((CLOSED, False))
                     elif which == "0":
-                        stdin = ""
+                        inputs.append(CLOSED)
                     continue
                 dest = r.child_by_field_name("destination")
                 if dest is None:
@@ -4646,32 +5476,301 @@ class _Shell:
                     dest = named[-1] if named else None
                 if dest is None:
                     continue
-                target = self.expand(self.value(dest))
+                with self.child_words(), self.erring(made):
+                    target = self.expand(self.value(dest))
                 if op.endswith("&") and (target.isdigit() or target == "-"):
                     # Duplicates or closes a file descriptor: `>&2` sends standard output elsewhere.
-                    if target not in {"-", "0", "1", "2"}:
-                        self.stray = True
+                    if target in closed or target not in {"-", "0", "1", "2"}:
+                        if target not in {"0", "1", "2"}:
+                            self.stray = True
+                        # Nonstandard descriptors may be closed; standard descriptors can also
+                        # have been explicitly closed earlier here or by an enclosing command.
+                        self.open_failures += 1
+                        if failures is not None and self.kinds() != ["dash"]:
+                            failures.append((self.state(), list(self.worlds), list(outs or [])))
+                    if target == "-":
+                        closed.add(which)
+                    elif target not in closed:
+                        closed.discard(which)
                     if outs is not None and which == "1" and target != "1":
                         outs.append((CLOSED if target == "-" else MAYBE_OUT if target == "2" and err else "/dev/null",
                                      False))
                     elif which == "0" and target != "0":
-                        stdin = "" if target == "-" else None  # another descriptor's input
+                        inputs.append(CLOSED if target == "-" else None)  # another descriptor's input
                     continue
-                if op == "<" and fd in {"", "0"}:
-                    stdin = self.file_text(target)  # standard input reads the file instead
+                if op in {"<", "<>"} and fd in {"", "0"}:
+                    inputs.append(self.file_text(target))  # standard input reads the file
+                if op in {"<", "<>", ">", ">>", ">|", "&>", "&>>", ">&"}:
+                    if self.open_may_fail(target, op):
+                        self.open_failures += 1
+                        if failures is not None and self.kinds() != ["dash"]:
+                            failures.append((self.state(), list(self.worlds), list(outs or [])))
+                    closed.difference_update({"1", "2"} if both else {which})
                 self.add(target, bare=True)
                 if outs is not None and op in {">", ">>", ">|", "&>", "&>>", ">&"} and fd in {"", "1"}:
                     outs.append((target, op.endswith(">>")))
             elif r.type == "heredoc_redirect":
-                stdin = self.heredoc(r)
+                with self.child_words(here=True), self.erring(made):
+                    content = self.heredoc(r)
+                fd = r.child_by_field_name("descriptor")
+                closed.discard(_text(fd) if fd is not None else "0")
+                if fd is None or _text(fd) == "0":
+                    inputs.append(content)
+                elif _text(fd) == "1":
+                    # This descriptor is open for reading, so a command cannot write its output
+                    # there. Leave its output unknown, including shells' differing buffering.
+                    self.stray = True
+                    self.notes.append("a here-document opens standard output for reading")
                 for c in r.named_children:
                     if c.type == "file_redirect":
-                        self.redirect([c], None, outs)
+                        self.redirect([c], None, outs, inputs=inputs, failures=failures, closed=closed)
                     elif c.type in STATEMENTS:
-                        after.append(c)
+                        op = r.child_by_field_name("operator")
+                        after.append((_text(op), c) if op is not None else c)
+                        if c.type == "pipeline" and c.children and c.children[0].type == "|&":
+                            self.notes.append("a here-document's command sends standard error down `|&`")
             elif r.type == "herestring_redirect":
-                stdin = self.herestring(list(r.named_children), ifs)
-        return stdin, after
+                with self.child_words(), self.erring(made):
+                    inputs.append(self.herestring(list(r.named_children), ifs))
+        if not top or len(inputs) <= int(piped):
+            return stdin, after
+        last = "" if inputs[-1] == CLOSED else inputs[-1]
+        joined = None if CLOSED in inputs else functools.reduce(_concat, inputs)  # zsh: a closed one fails
+        multios = self.tees()
+        return (joined if multios else last if multios is False or len(inputs) == 1 else
+                _either_output([joined, last])), after
+
+    def open_may_fail(self, target: str, op: str) -> bool:
+        """A file redirection may fail where its input is missing, or its output's parent is
+        missing or is a file, or noclobber may reject replacing an existing output (or, in zsh
+        without APPEND_CREATE, which `emulate sh` and `emulate ksh` set, appending to a missing
+        one: `setopt noclobber; echo x >> new` fails there, and succeeds in bash and sh). As with
+        `chdir`, absence at audit time does not prove absence when
+        the transcript ran: keep both success and failure, including the command's skipped
+        effects and nonzero status. Files and directories made earlier in the call count as
+        present. Descriptor duplications and process substitutions are handled separately."""
+        text = _alt(target)[0]
+        if text in self.substituted or text in {"/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"}:
+            return False
+        if UNKNOWN in text or CHOICE.search(text) or "$" in text:
+            return True
+        for world in self.worlds:
+            path = _resolve(text, world.cwd, bare=True)
+            if path is None:
+                return True
+            if op == "<":
+                if (path not in self.files and not path.exists()) or any(_under(path, p) for p in self.removed):
+                    return True
+            elif (self.noclobber is not False and op in {">", "&>", ">&"} and
+                  (path in self.files or path.exists())):
+                return True
+            elif (self.noclobber is not False and op in {">>", "&>>"} and self.appendcreate is not True and
+                  "zsh" in self.kinds() and path not in self.files and not path.exists()):
+                return True
+            elif (path.parent not in self.made and not path.parent.is_dir()) or path.is_dir():
+                return True
+        return False
+
+    def redirect_failed(self, failure: tuple) -> None:
+        """Fail at a redirection's saved state, before any later words were expanded. Paths and
+        notes already found remain conservative possibilities, but skipped assignments, command
+        substitutions and file writes do not alter the state carried to the next command."""
+        state, worlds, _ = failure
+        self.restore(state)
+        self.set_worlds(worlds)
+        self.output = ""  # `around_redirects` already saved the preceding output
+        self.failed_redirect()
+
+    @contextmanager
+    def erring(self, err: bool):
+        """Expanding a redirection's word, with standard error where the command's redirections
+        before it sent it (`: 2>&1 < "${x?}"` prints the message on standard output)."""
+        saved, self.err_out = self.err_out, err
+        try:
+            yield
+        finally:
+            self.err_out = saved
+
+    @contextmanager
+    def child_words(self, here: bool = False):
+        """Expanding a redirection's word. bash and zsh expand it in the child a command forks,
+        unless the command runs in the shell (`inline`; None where it may or may not). dash expands
+        a file's in the shell, and a here-document's (`here`) there too except for a subshell, but
+        fails the command without ending at a here-document for any but a special builtin
+        (measured). Where the shell may go on (`forked_words`) the expansion's assignments stay
+        only where it ran in the shell (see `in_child`)."""
+        kinds = self.kinds()
+        forks = here and "dash" in kinds or not self.inline and (here or kinds != ["dash"])
+        child = [k for k in kinds if not self.inline and (k != "dash" or here and self.subshell_words)]
+        self.forked_words += forks
+        try:
+            with self.in_child(child, maybe=self.inline is None):
+                yield
+        finally:
+            self.forked_words -= forks
+
+    @contextmanager
+    def in_child(self, child: list[str], maybe: bool = False):
+        """Expansions that the shells in `child` make in a forked child (`maybe`: or in the shell
+        itself): what they assign (`${x:=word}`, `$((x=1))`) is lost there and stays in the other
+        shells that may run the code."""
+        if not child:
+            yield
+            return
+        vars, exports = dict(self.vars), dict(self.exports)
+        yield
+        every = set(child) >= set(self.kinds()) and not maybe
+        for name in set(vars) | set(self.vars):
+            old, new = vars.get(name), self.vars.get(name)
+            if old == new:
+                continue
+            if every and old is None:
+                self.vars.pop(name, None)
+            elif every:
+                self.vars[name] = old
+            else:
+                never = self.never_set(name) if IDENTIFIER.fullmatch(name) else ""
+                values = list(dict.fromkeys(c for v in (old, new) for c in _choices(never if v is None else v)))
+                self.vars[name] = values[0] if len(values) == 1 else "\x06" + "\x05".join(values) + "\x07"
+        for name in set(exports) | set(self.exports):
+            if exports.get(name) != self.exports.get(name):
+                if every and name not in exports:
+                    self.exports.pop(name, None)
+                elif every:
+                    self.exports[name] = exports[name]
+                else:
+                    self.exports[name] = "maybe"
+
+    @contextmanager
+    def descriptors(self, closed: set[str]):
+        """Descriptors explicitly closed by the redirections enclosing a command. Functions,
+        eval and compound bodies inherit these closes until the enclosing command finishes."""
+        saved, self.closed_fds = self.closed_fds, closed
+        try:
+            yield
+        finally:
+            self.closed_fds = saved
+
+    @contextmanager
+    def redirecting(self, inline: bool | None, subshell: bool = False):
+        """Expanding the redirections of a command that runs in the shell itself (`inline`: a
+        builtin, a function, a group, a loop), or that may fork (an external command, a subshell);
+        `inline` None: either, as where a function is defined in some branches."""
+        saved = self.inline, self.subshell_words
+        self.inline, self.subshell_words = inline, subshell
+        try:
+            yield
+        finally:
+            self.inline, self.subshell_words = saved
+
+    def runs_inline(self, words: list[str], assigns: list) -> bool | None:
+        """Whether a simple command with these words runs in the shell itself (see `inline_ways`):
+        True or False in every shell it may be, None where that differs or may go either way. One
+        with only assignments and redirections does (measured; zsh runs a command for redirections
+        alone, see `null_command`)."""
+        if not words:
+            return bool(assigns) or "zsh" not in self.kinds()
+        ways = set().union(*(self.inline_ways(words, kind) for kind in self.kinds()))
+        return ways.pop() if len(ways) == 1 else None
+
+    def inline_ways(self, words: list[str], kind: str) -> set[bool]:
+        """Whether a simple command runs in shell `kind` itself: a builtin or a function every
+        branch defines; both ways for a function defined in some branches or an alias. zsh's
+        modifiers are followed to the command they select, including nested `builtin command`.
+        Only an initial unquoted `nocorrect` is reserved; `noglob` and `-` are also builtins (measured on
+        zsh 5.9). A modifier with no command and redirections is handled by `simple`."""
+        i, forced = 0, False
+        while i < len(words):
+            verb = _alt(self.expand(words[i]))[0]
+            if not forced and verb in self.aliases:
+                return {True, False}
+            defined = self.functions.get(verb)
+            if not forced and defined is not None and None not in defined:
+                return {True}
+            if kind == "zsh" and (verb == "noglob" or
+                                     verb == "nocorrect" and isinstance(words[i], _ReservedWord)):
+                i += 1
+                forced = False
+                continue
+            if kind == "zsh" and verb == "-":
+                i += 1
+                continue
+            if kind == "zsh" and verb == "builtin" and i + 1 < len(words):
+                i += 1
+                forced = True
+                while i < len(words) and _alt(self.expand(words[i]))[0] == "-":
+                    forced = False
+                    i += 1
+                continue
+            if kind == "zsh" and verb == "command":
+                j = i + 1
+                while j < len(words) and _alt(self.expand(words[j]))[0].startswith("-") and words[j] != "-":
+                    if _alt(self.expand(words[j]))[0] == "--":
+                        j += 1
+                        break
+                    if set(_alt(self.expand(words[j]))[0][1:]) & {"v", "V"}:
+                        return {True}  # describes the command, running nothing
+                    j += 1
+                if j >= len(words):
+                    return {True}
+                builtin = _alt(self.expand(words[j]))[0] in ZSH_BUILTINS - {"command"}
+                return {True} if builtin and self.posixbuiltins is True else \
+                    {False} if not builtin or self.posixbuiltins is False else {True, False}
+            if forced:
+                return {True}  # either a builtin or zsh's no-such-builtin error
+            if verb in self.aliases:
+                return {True, False}
+            defined = self.functions.get(verb)
+            if defined is not None and None not in defined:
+                return {True}
+            builtin = verb in (ZSH_BUILTINS - {"command"} if kind == "zsh" else BASH_BUILTINS)
+            return {builtin, True} if defined is not None else {builtin}
+        return {False} if kind == "zsh" else {True}
+
+    def zsh_no_builtin(self, words: list[str]) -> bool:
+        """Whether zsh's `builtin` names no builtin after its nested modifiers. Such an error
+        makes none of the redirections (measured on zsh 5.9). `builtin command` follows command's
+        selection, while `builtin -` follows the command after `-`, including functions and files.
+        Unlike bash's builtin, zsh's treats `--` as the requested builtin's name."""
+        i, forced = 0, False
+        while i < len(words):
+            verb = _alt(self.expand(words[i]))[0]
+            if not forced and verb in self.functions:
+                return False
+            if verb in {"noglob", "-"} or verb == "nocorrect" and isinstance(words[i], _ReservedWord):
+                i += 1
+                forced = False
+                continue
+            if verb != "builtin" or i + 1 >= len(words):
+                return False
+            i += 1
+            forced = True
+            name = _alt(self.expand(words[i]))[0]
+            if name in {"noglob", "builtin", "-"}:
+                continue
+            return name not in ZSH_BUILTINS
+        return False
+
+    def zsh_bare_modifier(self, words: list[str]) -> str | None:
+        """The last bare zsh modifier in a chain, if there is no selected command. A function
+        shadows an ordinary modifier name; `builtin` suppresses that lookup for its next word.
+        A bare modifier rejects redirections before their words expand, even nested in `builtin`."""
+        i, forced = 0, False
+        while i < len(words):
+            name = _alt(self.expand(words[i]))[0]
+            if not forced and name in self.functions:
+                return None
+            modifier = name in {"noglob", "builtin", "command", "-"} or \
+                name == "nocorrect" and isinstance(words[i], _ReservedWord)
+            if not modifier:
+                return None
+            if i + 1 == len(words):
+                return name
+            if name == "command":
+                return None  # command's options and external-command selection are not transparent
+            forced = name == "builtin"
+            i += 1
+        return None
 
     def heredoc(self, r) -> str | None:
         """What a here-document feeds standard input: its lines as written (`<<-` drops their
@@ -4688,7 +5787,11 @@ class _Shell:
         src = root.text
         first = src.rfind(b"\n", 0, body.start_byte) + 1
         last = src.rfind(b"\n", 0, end.start_byte) + 1 if end is not None else body.end_byte
-        text = src[first:max(first, last)].decode(errors="replace")
+        # Without the bytes added so that the grammar reads a line starting with a backslash, or
+        # goes on past a line the shells do not take as the end.
+        added = set(self.added.get(src, ()))
+        text = bytes(c for i, c in enumerate(src[first:max(first, last)], first) if i not in added)
+        text = text.decode(errors="replace")
         if any(not c.is_named and _text(c) == "<<-" for c in r.children):
             text = re.sub(r"(?m)^\t+", "", text)
         if start is not None and any(q in _text(start) for q in "'\"\\"):
@@ -4733,18 +5836,105 @@ class _Shell:
             elif c.type != "comment":
                 args.append(c)
         words += self.marked_words(args, node)
+        # A here-string can be inside `command` while the following file redirection wraps the
+        # statement. They still take effect in source order, including zsh's MULTIOS input join.
+        redirs.sort(key=lambda r: r.start_byte)
         # Words expand, and split into fields, before the command's own assignments take effect,
         # as in the shell. Where the shells split them differently, the command runs each way.
         lists = self.word_lists(words)
+        self.simple_words(node, assigns, lists, redirs, stdin)
+
+    def simple_words(self, node, assigns: list, lists: list[list[str]], redirs: list,
+                     stdin: str | None) -> None:
+        """Run expanded words, retaining a modifier's function and undefined alternatives before
+        deciding whether zsh rejects its redirections without expanding them."""
+        kinds = self.kinds()
+        if "zsh" in kinds and redirs and not assigns:
+            names = {w for ws in lists for w in ws if w in {"noglob", "builtin", "command", "-"}}
+            for name in names:
+                alts = self.functions.get(name, ())
+                if len(alts) > 1 and None in alts:
+                    def run(alt):
+                        saved, shadow = self.functions.pop(name), (alt,)
+                        if alt is not None:
+                            self.functions[name] = shadow
+                        try:
+                            self.simple_words(node, assigns, lists, redirs, stdin)
+                        finally:
+                            if self.functions.get(name, shadow) is shadow:
+                                self.functions[name] = saved
+                    self.either(*(lambda alt=alt: run(alt) for alt in alts))
+                    return
+        wrapped = node.parent is not None and node.parent.type == "redirected_statement"
+        unit = node.parent if wrapped else node  # the statement the redirections belong to
+        modifiers = [self.zsh_bare_modifier(ws) for ws in lists]
+        if "zsh" in kinds and redirs and not assigns and all(modifiers):
+            def modified_null():
+                if all(m == "nocorrect" for m in modifiers):
+                    self.null_command(node, redirs, stdin, unit)
+                else:
+                    # zsh rejects a lone modifier before it expands any redirection's word;
+                    # the error ends the nearest eval or sourced file, or the shell itself.
+                    self.complain()
+                    self.abort()
+            if kinds == ["zsh"]:
+                modified_null()
+            else:
+                self.either(lambda: self.as_dialect("zsh", modified_null),
+                            lambda: self.as_dialect("posix", lambda:
+                                self.run_words(node, assigns, lists, redirs, stdin, unit)))
+            return
+        if "zsh" in kinds and not assigns and redirs and not all(lists):
+            if any(lists):
+                self.notes.append("a command whose words may expand to nothing, which zsh runs as redirections alone")
+            else:
+                self.null_command(node, redirs, stdin, unit)  # words that all expand to nothing
+                return
+        missing = [self.zsh_no_builtin(ws) for ws in lists] if "zsh" in kinds else []
+        if any(missing):
+            def nothing():
+                self.complain()  # no such builtin, with none of the redirections made
+                self.set_status(FAILED)
+            if kinds == ["zsh"] and all(missing) and not assigns:
+                nothing()
+            else:
+                self.either(nothing, lambda: self.run_words(node, assigns, lists, redirs, stdin, unit))
+            return
+        self.run_words(node, assigns, lists, redirs, stdin, unit)
+
+    def run_words(self, node, assigns: list, lists: list[list[str]], redirs: list, stdin: str | None,
+                  unit) -> None:
+        """`simple` from its expanded words on: make the redirections, then run the command once
+        for each way its words and standard input may be."""
         outs: list[tuple[str, bool]] = []
-        stdin, after = self.redirect(redirs, stdin, outs, ifs=self.prefix_ifs(assigns))
+        ends = self.child_ends
+        opens = self.open_failures
+        failures: list = []
+        closed_fds = set(self.closed_fds)
+        # zsh treats literal `time` as a timed pipeline: its explicit input redirection replaces
+        # this pipe rather than joining it with MULTIOS (measured on zsh 5.9).
+        name = node.child_by_field_name("name")
+        piped = self.fed is not None and self.fed == unit and not (name is not None and _text(name) == "time")
+        with self.redirecting(self.runs_inline(lists[0], assigns)):
+            stdin, after = self.redirect(redirs, stdin, outs, ifs=self.prefix_ifs(assigns), piped=piped,
+                                          failures=failures, closed=closed_fds)
         inputs = _choices(stdin) if stdin is not None and CHOICE.search(stdin) else [stdin]
-        runs = [(ws, data) for ws in lists for data in inputs]
+        runs = [(ws, data, False, None) for ws in lists for data in inputs]
+        if self.child_ends > ends or self.open_failures > opens and "dash" in self.kinds():
+            runs.append((lists[0], stdin, True, None))  # see `failed_redirect`
+        runs.extend((lists[0], stdin, True, failure) for failure in failures)
         if len(runs) == 1:
-            self.run_simple(node, assigns, lists[0], stdin, outs, after)
+            self.run_simple(node, assigns, lists[0], stdin, outs, after, closed_fds=closed_fds)
         else:
-            self.either(*(lambda ws=ws, data=data: self.run_simple(node, assigns, ws, data, outs, after)
-                          for ws, data in runs))
+            def run(ws, data, fails, failure):
+                targets = outs
+                if failure is not None:
+                    state, worlds, targets = failure
+                    self.restore(state)
+                    self.set_worlds(worlds)
+                self.run_simple(node, assigns, ws, data, targets, after, fails, closed_fds)
+            self.either(*(lambda ws=ws, data=data, fails=fails, failure=failure: run(ws, data, fails, failure)
+                          for ws, data, fails, failure in runs))
 
     def marked_words(self, nodes: list, parent) -> list[str]:
         """The marked values of a command's argument nodes. The grammar drops a backslash-escaped
@@ -4792,6 +5982,7 @@ class _Shell:
         """The words marked words become after expansion and field splitting (see `_fields`), in
         each shell the audit may be in: one list, or two where the shells differ."""
         out: list[list[str]] = []
+        reserved_nocorrect = words[:1] == ["nocorrect"]
         for params, bash in self.field_modes():
             expanded = []
             for word in words:
@@ -4828,7 +6019,9 @@ class _Shell:
                 if wildcard_modes == {False, True}:
                     self.notes.append("a pathname pattern mixes quoted and unquoted wildcard characters")
                     marked = UNKNOWN
-                cls = _ExpandedLiteralWord if literal and from_expansion else _LiteralWord if literal else _ExpandedWord if from_expansion else str
+                # zsh recognizes nocorrect in the first source word, before expansion. An earlier
+                # word disappearing cannot promote a later ordinary command to a reserved word.
+                cls = _ReservedWord if w == "nocorrect" and reserved_nocorrect and not fields else _ExpandedLiteralWord if literal and from_expansion else _LiteralWord if literal else _ExpandedWord if from_expansion else str
                 for field in _fields(marked, self.ifs(), params, bash=bash):
                     if TILDE in field and len(self.worlds) == 1:
                         field = self.tilde(field, self.worlds[0])
@@ -4877,9 +6070,22 @@ class _Shell:
                 return self.value(val) if plain else UNKNOWN
         return False
 
-    def run_simple(self, node, assigns: list, words: list[str], stdin: str | None, outs: list, after: list) -> None:
+    def run_simple(self, node, assigns: list, words: list[str], stdin: str | None, outs: list, after: list,
+                   fails: bool = False, closed_fds: set[str] | None = None) -> None:
+        """Run a simple command, whose words and redirections `simple` expanded; where `fails`, the
+        command does not run, as an unset parameter or a file open in its redirections failed it (see
+        `failed_redirect`)."""
+        with self.descriptors(self.closed_fds if closed_fds is None else closed_fds):
+            emission = self.simple_effects(node, assigns, words, stdin, outs, after, fails)
+        if emission is not None:
+            self.emit(*emission)  # continuations run after the command's descriptor closes end
+
+    def simple_effects(self, node, assigns: list, words: list[str], stdin: str | None, outs: list,
+                       after: list, fails: bool) -> tuple | None:
+        """A simple command's effects and the arguments for routing its output. The caller
+        restores enclosing descriptors before a here-document's continuation runs."""
         before, self.output = self.output, ""
-        if len(words) == 1 and _alt(self.expand(words[0]))[0] == "exec" and "exec" not in self.functions:
+        if not fails and len(words) == 1 and _alt(self.expand(words[0]))[0] == "exec" and "exec" not in self.functions:
             # `exec` with only redirections: they hold for the rest of the shell. Standard error
             # sent where standard output goes may stay there (where a branch ran it, say).
             def redirect():
@@ -4911,11 +6117,41 @@ class _Shell:
         around, self.err_around = self.err_around, err
         self.err_out = _err_state(_redirects(node), err)
         noisy = self.noisy
-        if not words:
+        if fails:
+            self.failed_redirect()
+        elif not words:
             self.assignments(node, assigns)
         else:
             verb = _alt(self.expand(words[0]))[0]
-            self.with_assignments(assigns, verb, lambda: self.command(words, stdin))
+            # Transparent modifiers leave assignment persistence to their selected builtin.
+            # macOS sh also keeps a prefix before `builtin eval` and `builtin source`.
+            zsh_verb = self.assignment_verb(words, "zsh")
+            posix_verb = self.assignment_verb(words, "posix")
+            ends = self.child_ends
+
+            def runs(forked: bool) -> None:
+                # zsh expands an external command's prefix assignments in its child (see
+                # `failed_redirect`), losing what they assign.
+                def run():
+                    self.forked_words -= forked
+                    try:
+                        if self.child_ends > ends and forked:
+                            self.either(lambda: self.command(words, stdin), self.failed_redirect)
+                        else:
+                            self.command(words, stdin)
+                    finally:
+                        self.forked_words += forked
+                self.forked_words += forked
+                try:
+                    with self.in_child(["zsh"] if forked else []):
+                        self.with_assignments(assigns, verb, run, zsh_verb=zsh_verb, posix_verb=posix_verb)
+                finally:
+                    self.forked_words -= forked
+            ways = self.inline_ways(words, "zsh") if assigns and "zsh" in self.kinds() else {True}
+            if len(ways) == 1:
+                runs(not ways.pop())
+            else:
+                self.either(lambda: runs(True), lambda: runs(False))
         kept = False if self.trims == trims else self.kept  # see `kept`: unknown when nested
         self.kept = None
         if outs:
@@ -4930,29 +6166,81 @@ class _Shell:
         if words and own != "":
             self.closed_status(words, own, outs)
         self.carry(mark, before, not outs and not after and self.diverted is None and not self.stray)
-        self.write_outs(outs, own, tees, self.stage is not None and self.stage in (node, node.parent))
-        self.emit(before, own, outs, after, self.stage is not None and self.stage in (node, node.parent), node,
-                  bool(outs) or self.emits == emits, tees, kept)
+        self.write_outs(outs, None if fails else own, tees, self.stage is not None and self.stage in (node, node.parent))
+        return (before, own, outs, after, self.stage is not None and self.stage in (node, node.parent), node,
+                bool(outs) or self.emits == emits, tees, kept)
 
-    def with_assignments(self, assigns: list, verb: str, run, bare: bool = False) -> None:
+    def assignment_verb(self, words: list[str], kind: str) -> str:
+        """Command deciding a prefix assignment's persistence. zsh's transparent modifiers and
+        sh's `builtin` expose the selected command, even after `command` in macOS sh. Direct
+        `command eval` still suppresses special persistence."""
+        i, forced = 0, False
+        while i < len(words):
+            name = _alt(self.expand(words[i]))[0]
+            if not forced and name in self.functions:
+                return name
+            if kind == "zsh" and (name in {"noglob", "-"} or
+                                   name == "nocorrect" and isinstance(words[i], _ReservedWord)):
+                i += 1
+                forced = False
+            elif name == "builtin" and i + 1 < len(words):
+                i += 1
+                forced = True
+                if kind == "posix" and words[i] == "--":
+                    i += 1
+            elif kind == "posix" and name == "command":
+                j = i + 1
+                while j < len(words) and words[j].startswith("-") and words[j] != "-":
+                    opt = _alt(self.expand(words[j]))[0]
+                    j += 1
+                    if opt == "--":
+                        break
+                    if set(opt[1:]) & {"v", "V"}:
+                        return "command"  # describes the command without executing it
+                if j >= len(words) or _alt(self.expand(words[j]))[0] not in {"command", "builtin"}:
+                    return "command"
+                i, forced = j, True  # command bypasses a function named builtin or command
+            else:
+                return name
+        return _alt(self.expand(words[0]))[0]
+
+    def with_assignments(self, assigns: list, verb: str, run, bare: bool = False,
+                         zsh_verb: str | None = None, posix_verb: str | None = None) -> None:
         """Run `run`, the command `verb` after the assignments `assigns`, which hold for it alone,
         exported to it. One to a readonly variable is skipped; in bash's POSIX mode before a special
         builtin, dash, and zsh before a builtin or function, it ends the shell; zsh then fails an
         external command.
 
-        Afterwards bash and zsh put the old values back, over any the command set; sh and dash
-        keep what the command left before a special builtin, sh also before a function, and zsh
-        before an `exec` with no redirections (`bare`). Only sh's stay exported, and sh then takes
-        an integer's value as arithmetic (see INTEGER). Measured on bash 3.2, its sh, dash and zsh
-        5.9."""
+        Afterwards bash and native zsh put the old values back, over any the command set; sh and dash
+        keep what the command left before a special builtin, sh also before a function or `source`,
+        including a special builtin selected by `builtin`; and zsh before an `exec` with no
+        redirections (`bare`), or with POSIX_BUILTINS before functions and
+        special builtins. sh's stay exported, as do zsh's before a function with POSIX_BUILTINS;
+        sh then takes an integer's value as arithmetic (see INTEGER). `zsh_verb` is the command
+        selected by transparent zsh precommands, and `posix_verb` by sh's `builtin`, including
+        after `command`. zsh's special
+        builtins include `source`, `declare`, `integer` and `local` (and the `typeset` and `float`
+        forms). Direct `command eval` suppresses this persistence. Measured on bash 3.2, its sh,
+        dash and zsh 5.9."""
         saved, exports = {}, {}
-        builtin = verb in self.functions or verb in ZSH_BUILTINS - {"command"}  # zsh's command: external
+        zsh_verb = verb if zsh_verb is None else zsh_verb
+        posix_verb = verb if posix_verb is None else posix_verb
+        builtin = zsh_verb in self.functions or zsh_verb in ZSH_BUILTINS - {"command"}  # zsh's command: external
         special = verb in SPECIAL_BUILTINS
-        prefix = {"bash": "skip", "posix": "exit" if special else "skip", "dash": "exit",
+        posix_special = posix_verb in SPECIAL_BUILTINS | {"source"}
+        zsh_special = zsh_verb in SPECIAL_BUILTINS | {"source", "declare", "integer", "local", "typeset", "float"}
+        prefix = {"bash": "skip", "posix": "exit" if posix_special else "skip", "dash": "exit",
                   "zsh": "abort" if builtin else "fail"}
         defined = self.functions.get(verb)
         function = False if defined is None else True if None not in defined else None
-        kept = {"bash": False, "posix": True if special else function, "dash": special, "zsh": verb == "exec" and bare}
+        zsh_defined = self.functions.get(zsh_verb)
+        zsh_function = False if zsh_defined is None else True if None not in zsh_defined else None
+        zsh_keeps = (True if zsh_verb == "exec" and bare else
+                     self.posixbuiltins if zsh_special or zsh_function is True else
+                     False if zsh_function is False or self.posixbuiltins is False else None)
+        zsh_function_exports = (False if zsh_function is False or self.posixbuiltins is False else
+                                True if zsh_function is True and self.posixbuiltins is True else None)
+        kept = {"bash": False, "posix": True if posix_special else function, "dash": special, "zsh": zsh_keeps}
 
         def prefix_from(i):
             for j in range(i, len(assigns)):
@@ -4995,13 +6283,20 @@ class _Shell:
                 if name in self.vars and self.integer(name) is not False:
                     self.set_var(name, self.vars[name], around=True)
 
+        def zsh_keeps_prefix():
+            if zsh_function_exports is False:
+                put_back(values=False)
+            elif zsh_function_exports is None:
+                self.either(lambda: None, lambda: put_back(values=False))
+
         prefix_from(0)
         ways = {}
         for kind in self.kinds():
             if kept[kind] is not True:
                 ways["back"] = put_back
             if kept[kind] is not False:
-                ways[kind == "posix" and "sh"] = sh_keeps if kind == "posix" else lambda: put_back(values=False)
+                ways[kind] = (sh_keeps if kind == "posix" else zsh_keeps_prefix if kind == "zsh" else
+                              lambda: put_back(values=False))
         thunks = list(ways.values())
         thunks[0]() if len(thunks) == 1 else self.either(*thunks)
 
@@ -5057,7 +6352,7 @@ class _Shell:
         the others opened (`>` empties them) and left. A pipeline stage's under MULTIOS (`piped`)
         goes through a process zsh starts to copy it to the pipe and the files, which may end at
         the pipe before it writes them (`echo x > f | true`): what they hold is then unknown."""
-        if piped and tees is not False:
+        if piped and tees is not False or any(target == TANGLED for target, _ in outs):
             own = None
         for k, (target, append) in enumerate(outs):
             last = k == len(outs) - 1
@@ -5080,7 +6375,7 @@ class _Shell:
         self.emits += 1
         closed = any(target == CLOSED for target, _ in outs)
         away = any(target not in {"/dev/stdout", "/dev/fd/1"} for target, _ in outs)
-        pipe = any(stmt.type == "pipeline" for stmt in after)
+        pipe = any(not isinstance(stmt, tuple) and stmt.type == "pipeline" for stmt in after)
         tees = self.tees() if tees == "now" else tees
         reach = False if closed else True if not away else tees if piped or pipe else False
         if any(target == MAYBE_OUT for target, _ in outs):
@@ -5107,11 +6402,68 @@ class _Shell:
             self.output = before if certain else None
         if self.stray:
             self.output = None
-        for stmt in after:
-            if stmt.type == "pipeline":
-                self.pipeline(self._stages(stmt), shown)
+        if after and self.negating and self.negating[-1]["node"] == node:
+            pending = self.negating[-1]
+            pending["after"] = after
+            pending["outputs"].append(shown)
+            return
+        self.heredoc_after(after, shown)
+
+    def heredoc_after(self, after: list, shown: str | None, negated: bool = False) -> None:
+        """Run the commands the grammar attached to a here-document, after the command's full
+        status (including `!`) is known. `shown` feeds a pipeline continuation. Where `negated`,
+        first finish that pipeline, then invert its status before testing any &&/||."""
+        def steps(stmt, op=None):
+            # The grammar attaches `&&`/`||` and their right side to a here-document. Flatten
+            # that continuation so `false <<E && true || echo x` keeps the list's usual left
+            # associativity instead of treating its right side as a single guarded group.
+            if stmt.type == "list":
+                for child in stmt.children:
+                    if not child.is_named:
+                        op = _text(child)
+                    elif child.type in STATEMENTS:
+                        yield from steps(child, op)
+                        op = None
+            elif stmt.type == "pipeline":
+                # The grammar may put an and-or list inside the remaining pipeline, rather
+                # than outside it: `! cat <<E | true || echo x`. Only its first command is a
+                # pipeline stage; the conditional command waits for the whole pipeline's status.
+                for child in stmt.named_children:
+                    if child.type in STATEMENTS:
+                        yield from steps(child, op or "|")
+                        op = "|"
             else:
-                self.visit(stmt)
+                yield op, stmt
+
+        continuations = [part for stmt in after for part in
+                         (steps(stmt[1], stmt[0]) if isinstance(stmt, tuple) else steps(stmt))]
+        if negated:
+            stages = []
+            while continuations and continuations[0][0] == "|":
+                stages.append(continuations.pop(0)[1])
+            if stages:
+                with self.guarding():
+                    self.pipeline(stages, shown, piped=True)
+            swap = {OK: FAILED, FAILED: OK}
+            self.worlds = [w._replace(status=swap.get(w.status, w.status)) for w in self.worlds]
+        k = 0
+        while k < len(continuations):
+            op, stmt = continuations[k]
+            stages = [stmt]
+            while k + 1 < len(continuations) and continuations[k + 1][0] == "|":
+                k += 1
+                stages.append(continuations[k][1])
+            def run(stmt=stmt, k=k, op=op, stages=stages):
+                with self.guarding() if k < len(continuations) - 1 else nullcontext():
+                    if op == "|" or len(stages) > 1:
+                        self.pipeline(stages, shown if op == "|" else None, piped=op == "|")
+                    else:
+                        self.visit(stmt)
+            if op in {"&&", "||"}:
+                self.fork(run, OK if op == "&&" else FAILED)
+            else:
+                run()
+            k += 1
 
     def quiet_errors(self, words: list[str], outs: list) -> bool:
         """Whether a simple command certainly writes nothing to standard error: a few builtins
@@ -5254,8 +6606,8 @@ class _Shell:
             if table.get(name, shadow) is shadow:  # unless the command defined it anew
                 table[name] = saved
 
-    def command(self, words: list[str], stdin: str | None = None) -> None:
-        self._command(words, stdin)
+    def command(self, words: list[str], stdin: str | None = None, lookup: bool = True) -> None:
+        self._command(words, stdin, lookup)
         if words and os.path.basename(words[0]) in {"cd", "chdir", "pushd", "popd"}:
             # A successful directory builtin refreshes bash's directory variables. Preserve
             # explicit overrides after failure; mixed outcomes cannot retain one exact value.
@@ -5270,13 +6622,13 @@ class _Shell:
                     self.vars[key] = UNKNOWN
                     self.notes.append("a directory variable has different possible values after cd")
 
-    def _command(self, words: list[str], stdin: str | None = None) -> None:
+    def _command(self, words: list[str], stdin: str | None = None, lookup: bool = True) -> None:
         """Run a simple command. What it prints follows what the commands before it printed to the
         same place (`output`): the handlers below set what this one prints, starting from nothing."""
         before, self.output = self.output, ""
         mark = self.jumped
         try:
-            self._run_command(words, stdin)
+            self._run_command(words, stdin, lookup=lookup)
             if self.pending is not False and self.buffers():
                 # bash writes what it buffers before a builtin's next write, which empties it.
                 own = self.output
@@ -5316,8 +6668,10 @@ class _Shell:
             return bool(names) and not any("l" in f for f in flags)
         return False
 
-    def _run_command(self, words: list[str], stdin: str | None = None, lacking: bool = True) -> None:
-        """Run a command (`lacking`: where dash may lack its builtin, see DASH_LACKS)."""
+    def _run_command(self, words: list[str], stdin: str | None = None, lacking: bool = True,
+                     lookup: bool = True) -> None:
+        """Run a command (`lacking`: where dash may lack its builtin, see DASH_LACKS).
+        `lookup` False skips aliases and functions for this word only, as `builtin` selects it."""
         if not words:
             return
         self.set_status(MAYBE)
@@ -5327,13 +6681,23 @@ class _Shell:
             if self.with_script(verb_word, lambda text: self.run_script(verb_word, text, None, args, stdin=stdin)):
                 return
         verb = os.path.basename(verb_word)
+        if verb == "nocorrect" and isinstance(verb_word, _ReservedWord) and \
+                "zsh" in self.kinds():
+            def modified():
+                self.command(args, stdin)
+            if self.kinds() == ["zsh"]:
+                modified()
+            else:
+                self.either(lambda: self.as_dialect("zsh", modified),
+                            lambda: self.as_dialect("posix", lambda: self._run_command(words, stdin, lacking, lookup)))
+            return
         for kind in ("aliases", "functions"):
-            alts = getattr(self, kind).get(verb, ())
+            alts = getattr(self, kind).get(verb, ()) if lookup else ()
             if len(alts) > 1:
                 # Defined in only some of the branches that may have run, or differently there.
                 self.either(*(lambda a=a: self.shadowed(kind, verb, a, words, stdin) for a in alts))
                 return
-        if verb in self.aliases and self.calls < 4 and self.inlined < 256:
+        if lookup and verb in self.aliases and self.calls < 4 and self.inlined < 256:
             # Whether the alias expands: zsh expands aliases in scripts, but reads a `-c` string
             # whole before it runs it, so not one defined in the same string; bash only when told to
             # (expand_aliases). The audit follows both.
@@ -5346,7 +6710,7 @@ class _Shell:
                     self.calls -= 1
             self.either(expanded, lambda: self.shadowed("aliases", verb, None, words, stdin))
             return
-        if verb in self.functions and self.calls < 4 and self.inlined < 256:
+        if lookup and verb in self.functions and self.calls < 4 and self.inlined < 256:
             # A function runs in the calling shell, with its own positional parameters and locals.
             for a in args:
                 self.add(a, bare=False)
@@ -5391,7 +6755,16 @@ class _Shell:
             if self.kinds() == ["dash"]:
                 missing()
             else:
-                self.either(lambda: self._run_command(words, stdin, lacking=False), missing)
+                self.either(lambda: self._run_command(words, stdin, lacking=False, lookup=lookup), missing)
+            return
+        if verb in {"noglob", "-"} and "zsh" in self.kinds():
+            # These builtins are ordinary names and a function takes precedence over them,
+            # unlike the reserved word nocorrect handled before function lookup.
+            if self.kinds() == ["zsh"]:
+                self.command(args, stdin)
+            else:
+                self.either(lambda: self.as_dialect("zsh", lambda: self.command(args, stdin)),
+                            lambda: self.as_dialect("posix", lambda: self._run_command(words, stdin, lacking, lookup)))
             return
         # What the rest print: nothing for a quiet builtin, what the code prints where the cases
         # below run code, and otherwise what they work out, or unknown.
@@ -5550,13 +6923,11 @@ class _Shell:
             self.set_status(OK)
             return
         if verb in {"export", "declare", "typeset", "local", "readonly"}:
-            flags = "".join(a for a in args if a.startswith(("-", "+")) and len(a) > 1 and not ASSIGN.match(a))
-            self.declaration(verb, flags, [a for a in args if not (a.startswith(("-", "+")) and len(a) > 1)])
+            self.declaration(verb, *_declaration_words(args))
             return
-        if verb in {"integer", "float"} and "zsh" in self.kinds() and verb not in self.functions:
+        if verb in {"integer", "float"} and "zsh" in self.kinds() and (not lookup or verb not in self.functions):
             # zsh's `integer` is `typeset -i` and `float` `typeset -F`; other shells have neither.
-            flags = "".join(a for a in args if a.startswith(("-", "+")) and len(a) > 1 and not ASSIGN.match(a))
-            names = [a for a in args if not (a.startswith(("-", "+")) and len(a) > 1)]
+            flags, names = _declaration_words(args)
             # The `-` ends the option it implies: a number right after `integer` is a name, not a base.
             zsh = lambda: self.as_dialect("zsh", lambda: self.declaration(
                 "typeset", ("-i" if verb == "integer" else "-F") + "-" + flags, names))
@@ -5857,7 +7228,10 @@ class _Shell:
             self.set_status(MAYBE)
 
     def option(self, spelling: str, enabled: bool) -> None:
-        """Expansion-related option names. zsh ignores case and underscores and accepts `noNAME`."""
+        """Option names the audit follows. zsh ignores case and underscores and accepts `noNAME`.
+        Another option a shell has that could change what the code reads, prints or where it runs
+        (keyword, physical, cdablevars, globdots and the like; see HARMLESS_OPTIONS for
+        the rest) makes the call suspect."""
         name = spelling.lower().replace("_", "")
         if name == "posix":
             # bash's POSIX mode; zsh has no option of that name.
@@ -5871,17 +7245,26 @@ class _Shell:
                    "shoptionletters": ("shoptionletters", True), "globsubst": ("globsubst", True),
                    "nomatch": ("nomatch", True), "multios": ("multios", True),
                    "posixbuiltins": ("posixbuiltins", True), "posixidentifiers": ("posixidentifiers", True),
-                   "typesettounset": ("typesettounset", True)}
+                   "typesettounset": ("typesettounset", True), "errexit": ("errexit", True),
+                   "nounset": ("nounset", True), "unset": ("nounset", False), "xtrace": ("xtrace", True),
+                   "verbose": ("verbose", True), "shnullcmd": ("shnullcmd", True),
+                   "cshnullcmd": ("cshnullcmd", True), "noclobber": ("noclobber", True),
+                   "clobber": ("noclobber", False), "appendcreate": ("appendcreate", True)}
         if name.startswith("no") and name not in options and name[2:] in options:
             name, enabled = name[2:], not enabled
-        if name in options:
-            attr, positive = options[name]
-            value = enabled == positive
-            if self.dialect is None and spelling not in {"noglob", "allexport", "braceexpand"}:
-                # An unnamed bash does not recognize zsh's options; keep that possibility.
-                current = getattr(self, attr)
-                value = value if current == value else None
-            setattr(self, attr, value)
+        if name not in options:
+            harmless = name in HARMLESS_OPTIONS or name.startswith("no") and name[2:] in HARMLESS_OPTIONS
+            if not harmless and (_zsh_option(name) or spelling in BASH_OPTIONS or spelling in DASH_OPTIONS):
+                self.notes.append("a shell option the audit does not model")
+            return
+        attr, positive = options[name]
+        value = enabled == positive
+        if self.dialect is None and spelling not in {"noglob", "allexport", "braceexpand", "errexit", "nounset",
+                                                     "xtrace", "verbose", "noclobber"}:
+            # An unnamed bash does not recognize zsh's options; keep that possibility.
+            current = getattr(self, attr)
+            value = value if current == value else None
+        setattr(self, attr, value)
 
     def posix_mode(self) -> bool | None:
         """bash's POSIX mode: `set -o posix`, or POSIXLY_CORRECT while it is set."""
@@ -5930,10 +7313,14 @@ class _Shell:
             self.nomatch = mode == "zsh"
             self.braceexpand = mode == "zsh"
             self.noglob = False
+            self.noclobber = False
+            self.appendcreate = mode != "zsh"
             self.bsdecho = mode == "sh"
             self.multios = mode == "zsh"
             self.posixbuiltins = mode != "zsh"
             self.posixidentifiers = self.typesettounset = mode != "zsh"
+            self.shnullcmd = mode != "zsh"
+            self.cshnullcmd = False
         else:
             self.notes.append("shell emulation the audit cannot model")
         if "L" in pre:
@@ -5963,62 +7350,93 @@ class _Shell:
     def shellopts(self) -> str:
         """The supported expansion options in bash's live, readonly SHELLOPTS variable."""
         options = {"noglob": self.noglob, "braceexpand": self.braceexpand, "allexport": self.allexport,
-                   "posix": self.posix_mode()}
+                   "posix": self.posix_mode(), "errexit": self.errexit, "nounset": self.nounset,
+                   "xtrace": self.xtrace, "verbose": self.verbose, "noclobber": self.noclobber}
         if any(v is None for v in options.values()):
             return UNKNOWN
         return ":".join(name for name, enabled in options.items() if enabled)
 
-    def set_builtin(self, args: list[str]) -> None:
-        """`set`: `--` (or a first operand) sets the positional parameters; `-a`/`+a` and
-        `-o allexport` turn exporting every assignment on and off."""
-        j, positional, named = 0, None, []
-        while j < len(args):
-            a = args[j]
-            if a in {"--", "-"}:
-                positional = args[j + 1:]
-                break
-            if a in {"-o", "+o"}:
-                if args[j + 1:j + 2]:
-                    self.option(args[j + 1], a == "-o")
-                    named.append(args[j + 1])
-                j += 2
-                continue
-            if a.startswith(("-o", "+o")) and len(a) > 2:
-                self.option(a[2:], a[0] == "-")
-                named.append(a[2:])
-                j += 1
-                continue
-            if a.startswith(("-", "+")) and len(a) > 1:
-                if "a" in a[1:]:
-                    self.allexport = a[0] == "-"
-                if "f" in a[1:]:
-                    if self.dialect == "posix" or self.shoptionletters is True:
-                        self.noglob = a[0] == "-"
-                    elif self.dialect is None or self.shoptionletters is None:
-                        self.noglob = self.noglob if self.noglob == (a[0] == "-") else None
-                if "F" in a[1:] and self.dialect != "posix" and self.shoptionletters is not True:
-                    self.noglob = a[0] == "-" if self.dialect == "zsh" and self.shoptionletters is False else None
-                if "B" in a[1:]:
-                    self.braceexpand = a[0] == "-"
-                if "y" in a[1:] and self.dialect != "posix":
-                    self.option("shwordsplit", a[0] == "-")
-                j += 1
-                continue
-            positional = args[j:]
-            break
-        if positional is not None:
-            self.bind(positional)
+    def set_readings(self) -> list[str]:
+        """How the shells that may run the code read `set`'s words (see SET_LETTERS): "posix" for
+        bash, its sh and dash, "zsh" and, under SH_OPTION_LETTERS, "zshsh"."""
+        kinds = self.kinds()
+        out = ["posix"] if any(k != "zsh" for k in kinds) else []
+        if "zsh" in kinds:
+            out += {False: ["zsh"], True: ["zshsh"]}.get(self.shoptionletters, ["zsh", "zshsh"])
+        return out
+
+    def set_builtin(self, args: list[str], startup: bool = False) -> None:
+        """`set`: `--` (or a first operand) sets the positional parameters; a letter turns an
+        option on (`-`) or off (`+`), as each shell names them (see SET_LETTERS); each `o` takes
+        the next word as an option's name, except that zsh takes the rest of the cluster where
+        letters follow it, and bash lists the options where the next word starts with `-` or `+`;
+        an `o` with no word after it lists the options. Where the shells read the words
+        differently, the audit follows each reading. At a letter or option name it lacks, bash
+        fails, before it changes anything or after what came before (see `_bash_set`; sh exits in
+        the first case, except where `guarding` holds); dash exits there and zsh ends the eval or
+        the shell (see `zsh_special`), each after the letters before it. `startup`: a new shell's own flags (`bash -ec`), where c,
+        s, i and l are the shell's; one it lacks stops it before the code runs, which the audit
+        follows anyway (measured on bash 3.2 and its sh, dash and zsh 5.9)."""
+        readings = self.set_readings()
+        words = {r: _set_words(args, r, startup) for r in readings}
+        if len({w["effects"] for w in words.values()}) > 1:
+            def follow(reading):
+                def run():
+                    if reading != "posix":
+                        self.shoptionletters = reading == "zshsh"
+                    self.as_dialect("posix" if reading == "posix" else "zsh", lambda: self.set_builtin(args, startup))
+                return run
+
+            self.either(*(follow(r) for r in readings))
+            return
+        w, start = words[readings[0]], self.state()
+        for name, on in w["letters"]:
+            if name:
+                self.option(name, on)
+            else:
+                self.notes.append("a shell option the audit does not model")
+        for name, on in w["names"]:
+            self.option(name, on)
+        if w["lists"]:
+            self.output = None  # set lists the options
+        if w["positional"] is not None:
+            self.bind(w["positional"])
         self.set_status(OK)
-        zsh_bad = not all(map(_zsh_option, named))
-        bash_bad = any(n not in BASH_OPTIONS for n in named)
-        dash_bad = any(n not in DASH_OPTIONS for n in named)
+        if startup:
+            return
+        named = [name for name, _ in w["names"]]
+        posix, zsh = words.get("posix", {}), [words[r] for r in readings if r != "posix"]
+        dash_letters = posix.get("dash_missing")
+        bash_usage, bash_done = _bash_set(args) if posix else ([], None)
+        bash_bad = bool(bash_usage) or bash_done is not None
+        zsh_letters = any(z["missing"] for z in zsh)
+        zsh_bad = zsh_letters or not all(map(_zsh_option, named))
+        dash_bad = dash_letters or any(n not in DASH_OPTIONS for n in named)
         if not (zsh_bad or bash_bad or dash_bad):
             return
-        # An option the shell lacks: bash, also in POSIX mode, fails; dash exits, also in an eval;
-        # zsh ends the eval or the shell (see `zsh_special`). Measured on macOS's shells.
-        how = {"bash": "fail" if bash_bad else "allow", "posix": "fail" if bash_bad else "allow",
+        if dash_letters and "dash" in self.kinds() and ("dash" in self.unspecial or self.caught):
+            # dash keeps the letters before the one it lacks, which the audit does not tell apart.
+            self.notes.append("a shell option the audit does not model")
+        # A letter or option name the shell lacks (see `_bash_set`): bash fails, and sh exits at a
+        # letter its first check meets; dash exits, also in an eval; zsh ends the eval or the shell
+        # (see `zsh_special`). Measured on macOS's shells.
+        posix_letter = "fail" if self.guarded else "exit"
+        how = {"bash": "fail" if bash_bad else "allow",
+               "posix": posix_letter if bash_usage else "fail" if bash_bad else "allow",
                "dash": "exit" if dash_bad else "allow", "zsh": self.zsh_special() if zsh_bad else "allow"}
-        self.error_ways(how, lambda write, failed: self.set_status(FAILED) if failed else None)
+
+        def go(write, failed):
+            if failed and bash_bad:
+                self.restore(start)  # bash changed nothing, or what came before where it stopped
+                for is_name, name, on in bash_done or ():
+                    if is_name or SET_LETTERS["bash"][name]:
+                        self.option(name if is_name else SET_LETTERS["bash"][name], on)
+                    else:
+                        self.notes.append("a shell option the audit does not model")
+            if failed:
+                self.set_status(FAILED)
+
+        self.error_ways(how, go)
 
     @staticmethod
     def _dirs(w: _World) -> list[Path]:
@@ -6218,7 +7636,7 @@ class _Shell:
         self.inlined += 1
         try:
             with self.process(verb or "sh"):
-                self.set_builtin(startup)
+                self.set_builtin(startup, startup=True)
                 self.bind(args, zero=word)
                 self.output = ""
                 self.run(content, stdin)
@@ -6467,10 +7885,12 @@ class _Shell:
         END blocks. `stdin_main` says whether standard input is the main input (True), file operands
         are (False), or both may be (None). A plain or `getline var` in a straight-line BEGIN block
         reads the next known record, and the record actions get the records left: none means they
-        never run, and neither do they after a certain `exit` in BEGIN. The records are unknown where
-        the input has unknown parts, the program mentions RS, ARGV or ARGC, an operand assigns RS
-        (`records_unknown`), or a getline reads a file that may be standard input (`-`,
-        `/dev/stdin`, a name the audit cannot work out): record actions then may or may not run.
+        never run, and neither do they after a certain `exit` in BEGIN. They run once per record, so
+        with more than one record a name they or a pattern assign may hold, anywhere in them and in
+        END, what an earlier record left: such names start the record actions unknown. The records
+        are unknown where the input has unknown parts, the program mentions RS, ARGV or ARGC, an
+        operand assigns RS (`records_unknown`), or a getline reads a file that may be standard input
+        (`-`, `/dev/stdin`, a name the audit cannot work out): record actions then may or may not run.
         """
         if not code:
             self.notes.append("awk program is unavailable; its data may supply filenames")
@@ -6582,6 +8002,24 @@ class _Shell:
         builtins = {"atan2", "cos", "sin", "exp", "log", "sqrt", "int", "rand", "srand", "gsub", "sub",
                     "index", "length", "match", "split", "sprintf", "substr", "tolower", "toupper",
                     "systime", "strftime", "mktime", "fflush", "system", "close"}
+        # The names the record actions and patterns may assign, as the walk below assigns them;
+        # None when they call a function, which may assign any.
+        carried: set[str] | None = set()
+        for i, t in enumerate(tokens[:-1]):
+            if kind.get(i) in {"BEGIN", "END"} or carried is None:
+                continue
+            if re.fullmatch(r"[A-Za-z_]\w*", t) and (
+                    tokens[i + 1] in {"=", "++", "--", "+=", "-=", "*=", "/=", "%=", "^="} or
+                    tokens[max(0, i - 1):i] in [["++"], ["--"]]):
+                carried.add(t)
+            elif t == "getline":
+                expr = expression(i + 1, {";", "}"})
+                if expr and re.fullmatch(r"[A-Za-z_]\w*", expr[0]):
+                    carried.add(expr[0])
+            elif t in {"sub", "gsub", "split", "match"} and tokens[i + 1] == "(":
+                carried.update(expression(i + 2, {")"}))
+            elif re.fullmatch(r"[A-Za-z_]\w*", t) and tokens[i + 1] == "(" and t not in builtins | {"if", "while", "for", "print", "printf"}:
+                carried = None
         begun = False
         for i in order:
             t = tokens[i]
@@ -6589,6 +8027,9 @@ class _Shell:
                 # After a certain `exit` in BEGIN no record action runs; END still does.
                 begun, records = True, [] if exits else main
                 line = records[0] if records is not None and len(records) == 1 else None
+                if records is None or len(records) > 1:
+                    # On a later record they read what an earlier one assigned.
+                    known.update({name: None for name in known if carried is None or name in carried})
             if kind[i] in {"record", "pattern"} and records == []:
                 continue  # no record is left for this action, so it never runs
             if re.fullmatch(r"[A-Za-z_]\w*", t) and tokens[i + 1:i + 2] == ["="]:
@@ -6800,7 +8241,7 @@ class _Shell:
             for a in rest:
                 self.add(a, bare=False)
             with self.process(verb):
-                self.set_builtin(startup)
+                self.set_builtin(startup, startup=True)
                 self.bind(rest[1:], zero=rest[0] if rest else None)
                 self.output = ""
                 self.run(code, stdin)
@@ -6812,7 +8253,7 @@ class _Shell:
                 self.notes.append("a program reads code from input the audit does not know")
             if stdin:
                 with self.process(verb):
-                    self.set_builtin(startup)
+                    self.set_builtin(startup, startup=True)
                     self.bind(operands)
                     self.output = ""
                     self.run(stdin)  # shell code on standard input
@@ -6824,7 +8265,7 @@ class _Shell:
 
     def prefixed(self, verb: str, args: list[str], stdin: str | None) -> None:
         """`command` and `builtin` before a command, as measured on macOS bash 3.2, sh, dash and zsh
-        5.9. Both skip functions (and the alias table, which their word is outside of). bash's run
+        5.9. Both skip functions (and aliases) for the selected command word only. bash's run
         the builtin (`builtin`: only a builtin, else they fail) without a POSIX special builtin's
         power to end the shell at an error; an error in code it runs (an eval's, a sourced file's)
         still does. dash has no `builtin`; its `command` turns an error that would end the shell,
@@ -6833,14 +8274,33 @@ class _Shell:
         POSIX_BUILTINS (as `emulate sh` sets it), and then one an error leaves failed; otherwise it
         runs a file: a builtin that macOS has none of (readonly, export, eval, set) is not found,
         and one it has (cd, read, umask: /usr/bin scripts that run it in a new sh; /bin/echo, whose
-        escapes differ) runs in a child process and changes nothing here. `-v` and `-V` describe the
-        command without running it."""
+        escapes differ) runs in a child process and changes nothing here. `builtin -` follows the
+        command after `-` with ordinary function, builtin and file lookup. `-v` and `-V` describe
+        the command without running it. zsh's `builtin` accepts no `--` option: it names a missing
+        builtin literally called `--`."""
         j = 0
         while j < len(args) and args[j].startswith("-") and len(args[j]) > 1:
             j += 1
             if args[j - 1] == "--":
                 break
         opts, rest = args[:j], args[j:]
+        if verb == "builtin" and args[:1] == ["--"] and "zsh" in self.kinds():
+            def no_builtin():
+                self.complain()
+                self.output = ""
+                self.set_status(FAILED)
+            if self.kinds() == ["zsh"]:
+                no_builtin()
+            else:
+                self.either(no_builtin, lambda: self.as_dialect("posix", lambda: self.prefixed(verb, args, stdin)))
+            return
+        if verb == "builtin" and rest[:1] == ["-"] and "zsh" in self.kinds():
+            if self.kinds() != ["zsh"]:
+                self.either(lambda: self.as_dialect("zsh", lambda: self.command(rest[1:], stdin)),
+                            lambda: self.as_dialect("posix", lambda: self.prefixed(verb, args, stdin)))
+                return
+            self.command(rest[1:], stdin)
+            return
         if not rest or verb == "command" and any(set(o[1:]) & {"v", "V"} for o in opts if o != "--"):
             if verb == "builtin" and any(k == "dash" for k in self.kinds()):
                 self.complain()
@@ -6850,15 +8310,10 @@ class _Shell:
         name = rest[0]
         self.output = ""  # what the command prints, from here
 
-        def bare(run=None):
-            # The command with no function or alias of its name.
-            saved = {kind: getattr(self, kind).pop(name, None) for kind in ("functions", "aliases")}
-            try:
-                (run or (lambda: self.command(rest, stdin)))()
-            finally:
-                for kind, alts in saved.items():
-                    if alts is not None and name not in getattr(self, kind):
-                        getattr(self, kind)[name] = alts
+        def bare():
+            # Suppress lookup for the selected word only. A modifier it runs can then select an
+            # ordinary function of the same name, or an eval can call that function in its code.
+            self.command(rest, stdin, lookup=False)
 
         def missing():
             self.complain()
@@ -7026,28 +8481,414 @@ class _Shell:
             self.command(rest, None if verb == "xargs" else stdin)
             if verb in {"xargs", "parallel", "watch"}:
                 self.output = None  # the command runs on other arguments, or again and again
+            if verb == "exec":
+                self.may_end()  # the command replaces the shell, which ends with it
 
 
-def _shell(command: str, workdir: Path, files: dict | None = None) -> _Shell:
+def _shell(command: str, workdir: Path, files: dict | None = None, place: dict | None = None,
+           timeout=MISSING) -> _Shell:
     """Read the command twice: the first pass, taking every cd as one that may have failed, finds
     the directories the command makes wherever it may be (see `_Shell.later`). `files`: what earlier
-    calls wrote, by path (see `_Shell.files`), updated with what this command writes."""
+    calls wrote, by path (see `_Shell.files`), updated with what this command writes. `place`: where
+    the command may start, as `_next_place` left it for the call before ({} for the work directory),
+    updated with where the next call may start. `timeout`: the Bash call's own, if it sets one."""
     files = {} if files is None else files
-    first = _Shell(workdir)
-    first.doubt = True
-    first.files = dict(files)
-    first.run(command)
-    shell = _Shell(workdir)
-    shell.later = first.made_ever
-    shell.wrote_later = first.wrote_ever
-    shell.files = dict(files)
-    shell.run(command)
+    passes = []
+    for doubt in (True, False):
+        shell = _Shell(workdir)
+        if place:
+            shell.set_worlds(list(place["worlds"]))
+            shell.known = place["known"]
+        if doubt:
+            shell.doubt = True
+        else:
+            shell.later = passes[0].made_ever
+            shell.wrote_later = passes[0].wrote_ever
+        shell.files = dict(files)
+        shell.run(command)
+        passes.append(shell)
+    if place is not None:
+        place.update(_next_place(shell, workdir, place, slow=_may_outlast(command, timeout)))
     shell.run_traps(0)
     shell.finish(0)
     shell.flush()  # bash's exit
     files.clear()
     files.update(shell.files)
     return shell
+
+
+def _next_place(shell: _Shell, workdir: Path, place: dict, slow: bool = True) -> dict:
+    """Where the next Claude Code Bash call may start, once `shell` has run (before its EXIT trap,
+    which the shell runs after Claude Code has read where it is, and before `finish`). Claude Code
+    2.1.308 runs a call as `eval CMD && pwd -P >| FILE` and starts the next where FILE says, so where
+    this one ended only if it ran to its end with status 0; after an exit, a failing status, or a
+    call moved to the background at its timeout, the next starts where this one started (measured
+    on 2.1.284 and 2.1.308). So a place where the shell ended with status 0 for certain
+    (a builtin's, as `cd sub; echo` ends) is the only one only if the call cannot outlast its
+    timeout (`slow`, see `_may_outlast`); where it may have failed or run on, the start is one too.
+    A `pwd` the call made a function prints what it likes, so the next start is then unknown; an
+    alias does not, since the shell expanded the wrapper's `pwd` when it read the whole line, before
+    `eval` ran the call (measured on bash 3.2 and zsh 5.9). Claude Code moves a shell that ends
+    outside the directories it allows back to where the session started, the work directory here;
+    the audit does not know which other directories it allows, so a place outside the work
+    directory keeps both."""
+    began = place.get("worlds") or [_World(workdir, None)]
+    worlds = [w for w in shell.worlds if w.status != FAILED]
+    if (slow or shell.exits or not worlds or len(worlds) < len(shell.worlds)
+            or any(w.status != OK for w in worlds)):
+        worlds += began
+    if any(not _under(w.cwd, workdir) for w in worlds):
+        worlds.append(_World(workdir, None))
+    # A new shell: no $OLDPWD of the command's, no pushd stack.
+    worlds = list({(w.cwd, w.primary): _World(w.cwd, None, (), MAYBE, w.primary) for w in worlds}.values())
+    return {"worlds": worlds, "known": shell.known and "pwd" not in shell.functions}
+
+
+# Builtins that return at once on arguments of the size a command line holds (see `_may_outlast`
+# for the arguments that make printf, the typeset family and the others slow, and the expansions
+# that do). `let` is not among them: its every argument is arithmetic, which may evaluate variables.
+QUICK_BUILTINS = {"cd", "chdir", "pushd", "popd", "dirs", "pwd", "true", "false", ":", "echo", "printf",
+                  "export", "unset", "set", "setopt", "unsetopt", "shopt", "shift", "local", "declare", "typeset",
+                  "readonly", "test", "[", "umask", "return", "exit"}
+# A timeout, in milliseconds, that a call of quick builtins finishes within, with a wide margin
+# (measured here: `cd` with a 1 ms timeout was moved to the background, and with 10 ms it finished).
+QUICK_TIMEOUT_MS = 1000
+# A printf format with a width or a precision, which can print far more than the command holds.
+PRINTF_WIDTH = re.compile(r"%[-+ #0']*[0-9*.]")
+# A printf conversion and its letter (length modifiers skipped), in a format with `%%` removed.
+PRINTF_CONVERSION = re.compile(r"%[^A-Za-z%]*[hlLqjzt]*([A-Za-z])")
+# A word that brace expansion may multiply: `{a,b}`, `{1..9}`.
+BRACES = re.compile(r"\{[^{}]*(,|\.\.)")
+# A number written plainly, which no shell's arithmetic reads as a variable.
+PLAIN_NUMBER = re.compile(r"[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?")
+# `[[ ]]`'s operators that evaluate both sides as arithmetic in bash, sh and zsh (`[` and test do
+# not: they reject a word that is not a number, measured here).
+ARITHMETIC_TESTS = {"-eq", "-ne", "-lt", "-le", "-gt", "-ge"}
+# The nodes an arithmetic expression of numbers alone is made of.
+ARITHMETIC_OF_NUMBERS = {"number", "binary_expression", "unary_expression", "parenthesized_expression",
+                         "ternary_expression"}
+# The typeset family's options that make a call slow: zsh's padding (-L, -R, -Z pad the value to
+# the width given), and the integer and float attributes (-i, -E, -F), under which an assignment's
+# value is arithmetic (bash and zsh; zsh's export and readonly take them too, measured here).
+SLOW_TYPESET_OPTIONS = set("LRZiEF")
+
+
+def _literal_word(node) -> bool:
+    return node.type in {"word", "raw_string", "string"} and all(c.type == "string_content" for c in node.named_children)
+
+
+def _word_value(node) -> str | None:
+    """A literal word's value, once the shell removes its quotes and backslashes, or None for a
+    word that expands anything. A backslash in an unquoted word escapes the next character, and in
+    double quotes only `$`, `` ` ``, `"`, `\\` and a newline; a backslash-newline is removed."""
+    if node.type == "number" and not node.named_children:
+        return _text(node)
+    if not _literal_word(node):
+        return None
+    text = _text(node)
+    if node.type == "raw_string":
+        return text[1:-1]
+    if node.type == "string":
+        return re.sub(r'\\([$`"\\\n])', lambda m: "" if m.group(1) == "\n" else m.group(1), text[1:-1])
+    return re.sub(r"\\(.)", lambda m: "" if m.group(1) == "\n" else m.group(1), text, flags=re.S)
+
+
+def _printf_formats(args: list) -> set[int]:
+    """Every place printf's format may be among its arguments: the first, and after each option a
+    shell may read. bash and sh take `-v NAME`, `-vNAME` and then `--`; zsh takes `-v NAME`, `--`,
+    and a word whose letters are all its options (`-vv`) before the format, but reads `-vMOCK` and
+    `-q` as the format; dash takes `--` alone, and bash and dash reject any other option at once
+    (all measured on bash 3.2, sh, dash and zsh 5.9). So after a word that is `--` the next may be
+    the format, and after one starting `-v` either of the next two; each word is read as its value,
+    with its quotes and backslashes removed (`\\-\\-` is `--`). A word that is not literal may be
+    either, so it is a place too, and the caller takes the call as slow."""
+    reach, i = {0}, 0
+    while i < len(args):
+        if i in reach:
+            value = _word_value(args[i])
+            if value == "--":
+                reach.add(i + 1)
+            elif value is not None and value.startswith("-v"):
+                reach.update((i + 1, i + 2))
+        i += 1
+    return {i for i in reach if i < len(args)}
+
+
+def _printf_slow(args: list) -> bool:
+    """Whether a printf call may print far more than it holds or run on: a word that may be its
+    format is not literal or has a width or precision; a format with a numeric conversion is
+    followed by a word that is not a plain number (zsh evaluates each as arithmetic, which may
+    evaluate variables holding expressions: `printf %d x1` prints 2 where x1 is `x0+x0`, measured
+    here); or `-v` names an array element, whose subscript is arithmetic."""
+    for i in sorted(_printf_formats(args)):
+        value = _word_value(args[i])
+        if value is None or PRINTF_WIDTH.search(value):
+            return True
+        if any(m.group(1) in "diouxXeEfFgGaA" for m in PRINTF_CONVERSION.finditer(value.replace("%%", ""))):
+            if not all((v := _word_value(a)) is not None and PLAIN_NUMBER.fullmatch(v) for a in args[i + 1:]):
+                return True
+        if value.startswith("-v"):
+            name = value[2:] if len(value) > 2 else (_word_value(args[i + 1]) if i + 1 < len(args) else "")
+            if name is None or "[" in name:
+                return True
+    return False
+
+
+def _glob_chars(text: str) -> bool:
+    """Whether an unquoted word's text holds a character that pathname expansion reads, unescaped:
+    `*`, `?` or `[`, or zsh's EXTENDED_GLOB `^`, `#` and a `~` after the first character."""
+    i = 0
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] in "*?[^#" or text[i] == "~" and i > 0:
+            return True
+        i += 1
+    return False
+
+
+def _may_glob(node) -> bool:
+    """Whether an expansion's result may undergo pathname expansion, which may walk a whole tree
+    (`x='/*/*/*'; echo $x` in bash, sh and dash, and in zsh under GLOB_SUBST): an expansion that is
+    unquoted, in a word of a command, of `[` or of the typeset family, and not an assignment's value
+    (`local x=*` and `export z=*` do not expand the pattern, measured on bash 3.2 and zsh 5.9), a
+    part of `[[ ]]`, a here-string or part of an enclosing `${...}` (which is checked itself)."""
+    parent = node.parent
+    while parent is not None:
+        if parent.type in {"string", "heredoc_body", "variable_assignment", "arithmetic_expansion", "subscript",
+                           "expansion", "herestring_redirect"}:
+            return False
+        if parent.type == "test_command":
+            return _text(parent.children[0]) != "[["
+        if parent.type in {"command", "declaration_command", "unset_command", "file_redirect"}:
+            return True
+        parent = parent.parent
+    return False
+
+
+def _arithmetic_slow(node) -> bool:
+    """Whether a node evaluates arithmetic that may run on: an arithmetic expansion or `(( ))` of
+    anything but numbers (a name may hold an expression, evaluated in turn: `x20` built by doubling
+    `x0=1; x1='x0+x0'` took 9 s on bash and 24 s on zsh, measured in round 14e), or with `**`
+    (`$((3**4000000000))` took 3.8 s on bash and 4.6 s on zsh, measured here); a subscript other
+    than a number, `@` or `*`; a `${x:offset:length}` whose offset or length is not a number; and
+    `[[ ]]`'s arithmetic comparisons of anything but numbers."""
+    if node.type == "arithmetic_expansion" or node.type == "compound_statement" and _text(node.children[0]) == "((":
+        return "**" in _text(node) or any(c.type not in ARITHMETIC_OF_NUMBERS for c in _walk(node)
+                                          if c.is_named and c is not node)
+    if node.type == "subscript":
+        index = [c for c in node.named_children[1:]]
+        return not (len(index) == 1 and (index[0].type == "number" or _text(index[0]) in {"@", "*"}))
+    if node.type == "expansion":
+        after = False
+        for c in node.children:
+            if not c.is_named and _text(c) == ":":
+                after = True
+            elif after and c.is_named and c.type != "number":
+                return True
+        return False
+    if node.type == "binary_expression" and any(_text(c) in ARITHMETIC_TESTS for c in node.children):
+        test = node.parent
+        while test is not None and test.type != "test_command":
+            test = test.parent
+        return (test is not None and _text(test.children[0]) == "[["
+                and any(c.is_named and c.type not in {"number", "test_operator"} for c in node.children))
+    return False
+
+
+def _may_outlast(command: str, timeout=MISSING) -> bool:
+    """Whether a Bash call may run longer than Claude Code's timeout (which moves it to the
+    background, so that the next call starts where this one started): any call but one of quick
+    builtins, under a timeout left at its default (120 s) or set to a number of at least
+    QUICK_TIMEOUT_MS. A call of quick builtins runs only literal QUICK_BUILTINS names, in every
+    branch and substitution, with no loop, no function defined, no `case` or other pattern match
+    (`[[ x == pattern ]]`, `=~`, `${x#pattern}`), no brace expansion, no `${...}` the grammar cannot
+    read (zsh's flags, as in `${(l:9:)x}`), at most 8 parameter expansions in all (so that no value
+    doubles its way to gigabytes), printf only as `_printf_slow` allows, the typeset family with no
+    option in SLOW_TYPESET_OPTIONS and no name that is not literal or names an array element, no
+    arithmetic that `_arithmetic_slow` finds, zsh's shift, return and exit with plain integers alone
+    (zsh evaluates their arguments as arithmetic, measured here), no pathname expansion (no
+    unescaped glob character in an unquoted word, and no unquoted expansion where `_may_glob` says
+    the shell expands its result), no zsh subscript after a parameter in double quotes (`"$a[x]"`),
+    no xtrace turned on (PS4 is expanded for each command traced), and no redirection that opens a
+    file other than /dev/null (opening a FIFO waits for its other end). It takes `cd` and `test` to
+    return at once, as they do on a local file system."""
+    if timeout is not MISSING and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                                   or not timeout >= QUICK_TIMEOUT_MS):
+        return True
+    root = _BASH.parse(command.encode()).root_node
+    if root.has_error:
+        return True
+    expansions = 0
+    for node in _walk(root):
+        if node.type in {"while_statement", "for_statement", "c_style_for_statement", "function_definition",
+                         "case_statement", "brace_expression", "regex", "extglob_pattern"}:
+            return True
+        if _arithmetic_slow(node):
+            return True
+        if node.type in {"simple_expansion", "expansion", "command_substitution"}:
+            if node.type != "command_substitution":
+                expansions += 1
+                if expansions > 8:
+                    return True
+            special = (node.type == "simple_expansion" and node.named_children
+                       and node.named_children[0].type == "special_variable_name"
+                       and _text(node.named_children[0]) in {"#", "?", "$", "!", "-"}
+                       or node.type == "expansion" and len(node.children) > 1 and _text(node.children[1]) == "#")
+            if not special and _may_glob(node):
+                return True
+        if node.type in {"word", "concatenation"} and BRACES.search(_text(node)):
+            return True
+        if node.type == "word" and node.parent is not None and node.parent.type not in {"variable_assignment", "subscript"} \
+                and _glob_chars(_text(node)):
+            return True
+        if node.type in {"string", "heredoc_body"} and any(
+                a.type == "simple_expansion" and _text(b).startswith("[")
+                for a, b in zip(node.children, node.children[1:])):
+            return True
+        if node.type == "test_command":
+            if any(c.type in {"word", "concatenation"} and set(_text(c)) & set("*?[(") for c in _walk(node)):
+                return True
+            for c in _walk(node):
+                if c.type == "binary_expression" and any(not k.is_named and _text(k) in {"==", "=", "!="}
+                                                         for k in c.children):
+                    if c.named_children and c.named_children[-1].type not in {"string", "raw_string", "word", "number"}:
+                        return True
+                if c.type == "unary_expression" and any(_text(k) == "-v" for k in c.children) and any(
+                        (v := _word_value(k)) is None or "[" in v for k in c.named_children if k.type != "test_operator"):
+                    return True
+        if node.type == "command":
+            name = node.child_by_field_name("name")
+            if (name is None or len(name.named_children) != 1 or name.named_children[0].type != "word"
+                    or _text(name) not in QUICK_BUILTINS):
+                return True
+            args = [c for c in node.children if c.is_named and c.type != "command_name"
+                    and not c.type.endswith("redirect")]
+            values = [_word_value(a) for a in args]
+            if _text(name) == "printf" and _printf_slow(args):
+                return True
+            if _text(name) in {"shift", "return", "exit"} and not all(
+                    v is not None and re.fullmatch(r"[-+]?\d+", v) for v in values):
+                return True
+            if _text(name) in {"set", "setopt", "unsetopt", "shopt"} and any(
+                    v is None or "xtrace" in v.lower().replace("_", "") or v[:1] == "-" and "x" in v[1:]
+                    for v in values):
+                return True
+        if node.type == "variable_assignment":
+            target = node.named_children[0] if node.named_children else None
+            if target is not None and _text(target) == "PS4":
+                return True
+        if node.type == "declaration_command":
+            for c in node.named_children:
+                if c.type in {"variable_assignment", "variable_name"}:
+                    continue
+                value = _word_value(c)
+                if value is None or value[:1] in "-+" and set(value[1:]) & SLOW_TYPESET_OPTIONS or "[" in value:
+                    return True
+        if node.type == "unset_command" and any(
+                c.type != "variable_name" and ((v := _word_value(c)) is None or "[" in v) for c in node.named_children):
+            return True
+        if node.type == "file_redirect":
+            op = "".join(_text(c) for c in node.children if not c.is_named)
+            dest = node.child_by_field_name("destination")
+            target = _text(dest) if dest is not None else ""
+            if not (target == "/dev/null" or op.endswith("&") and (target.isdigit() or target == "-")):
+                return True
+    return False
+
+
+def _unwritable(value) -> bool:
+    """Whether a tool input holds text no file name or argument can hold: a NUL, or a lone surrogate
+    (a JSON escape a transcript may hold that no encoding writes)."""
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return True
+        return "\x00" in value
+    if isinstance(value, dict):
+        return any(_unwritable(k) or _unwritable(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_unwritable(v) for v in value)
+    return False
+
+
+def _strings(value):
+    """Every string in a JSON value, its keys included."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _strings(k)
+            yield from _strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _strings(v)
+
+
+# What ends a URL's host for the WHATWG parser in an http(s) URL, and the code points it rejects in
+# a host (a space, `<`, `^`, a control...): a reading with one names no host, since the parser fails.
+HOST_END = re.compile(r"[/\\?#]")
+HOST_FAILS = re.compile(r"[\x00-\x20<>\[\]^|\x7f]")
+C0_OR_SPACE = "".join(map(chr, range(0x21)))
+
+
+def _web_hosts(text: str):
+    """The host text of each http(s) URL a text may hold, as the WHATWG URL parser, which Node's
+    fetch uses, finds it before it decodes it: from each `http:` or `https:` (in any case, after any
+    character) to the end of the text, and to the first space or quote, each with its tabs and
+    newlines removed as the parser removes them. The parser skips any slashes and backslashes after
+    the scheme, ends the host at a slash, backslash, `?` or `#`, takes it after the last `@`
+    (`http://example.org @127.0.0.1/` is 127.0.0.1's) and before a port. An IPv6 host (`[::1]`) is
+    yielded whole. The parser then lowercases the host, decodes percent escapes, maps it through
+    IDNA and reads IPv4 forms (`127.1`). `exact.remote_url` takes only a dotted name of ASCII
+    letters, digits and hyphens with no IP form and no local suffix, which that decoding leaves the
+    same name (up to case and a final dot) or rejects. The host before a port the parser rejects
+    (`http://example.org:bad/`) stands for a URL that reaches no machine."""
+    for m in re.finditer(r"(?i)https?:", text):
+        rest = text[m.end():]
+        # The parser strips spaces and controls at the ends of what it reads.
+        for reading in (rest.rstrip(C0_OR_SPACE), re.split(r"[\s'\"<>)`]", rest, maxsplit=1)[0]):
+            reading = re.sub(r"[\t\n\r]", "", reading).lstrip("/\\")
+            host = HOST_END.split(reading, maxsplit=1)[0].rpartition("@")[2]
+            if host.startswith("[") and "]" in host:
+                host = host[: host.index("]") + 1]
+            else:
+                host = host.split(":", 1)[0]
+                if not host or HOST_FAILS.search(host):
+                    continue
+            yield host
+
+
+def _scrubbed(value):
+    """A tool input with each NUL and lone surrogate replaced by U+FFFD, which every path and
+    argument can hold. Keys that become alike keep their values apart (a U+FFFD more for each)."""
+    if isinstance(value, str):
+        return re.sub(r"[\x00\ud800-\udfff]", "\ufffd", value)
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            key = _scrubbed(k)
+            while key in out:
+                key += "\ufffd"
+            out[key] = _scrubbed(v)
+        return out
+    if isinstance(value, list):
+        return [_scrubbed(v) for v in value]
+    return value
+
+
+def _shell_command(inp) -> str | None:
+    """A shell call's command as text: a string, or a list of strings taken as one command's argument
+    vector (joined with shlex.join, which a shell splits back into the same words); None for anything
+    else (a missing or null command, or another type), which the audit cannot read."""
+    command = inp.get("command") if isinstance(inp, dict) else None
+    if isinstance(command, str):
+        return command
+    if isinstance(command, list) and command and all(isinstance(w, str) for w in command):
+        return shlex.join(command)
+    return None
 
 
 def shell_paths(command: str, workdir: Path) -> tuple[list[Path], list[tuple[str, str, Path]], list[str]]:
@@ -7063,50 +8904,120 @@ def _tool_calls(line: dict):
     content = msg.get("content") if isinstance(msg, dict) else None
     for part in content if isinstance(content, list) else []:
         if isinstance(part, dict) and part.get("type") == "tool_use":
-            yield part.get("name", "?"), part.get("input") or {}
-    item = line.get("item") or {}
-    if not item or line.get("type") not in {None, "item.completed"}:
-        return  # Codex repeats an item as started and completed; count it once.
+            yield part.get("name", "?"), part.get("input", {})
+    item = line.get("item")
+    event = line.get("type")
+    if item is None or event == "item.started" or event == "item.updated":
+        return  # Codex repeats an item as started, updated and completed; `audit_transcript` counts it once.
+    if not isinstance(item, dict) or not (event is None or event == "item.completed"):
+        yield "codex_item", item  # an item the audit cannot read, or in an event it does not know
+        return
     kind = item.get("type")
-    if kind == "command_execution":
-        yield "shell", {"command": item.get("command", "")}
+    if not isinstance(kind, str):
+        yield "codex_item", item
+    elif kind == "command_execution":
+        yield "shell", {"command": item.get("command")}
     elif kind in {"file_read", "file_change"}:
-        yield kind, item
+        # What the item names; not its status, which changes from start to completion.
+        yield kind, {k: item[k] for k in ("path", "file_path", "changes") if k in item}
     elif kind == "mcp_tool_call":
         yield f"mcp:{item.get('server', '?')}/{item.get('tool', '?')}", item.get("arguments") or {}
     elif kind == "web_search":
-        # The query, and the page it opened (an open_page action has a URL and may have no query).
-        action = item.get("action") if isinstance(item.get("action"), dict) else {}
-        yield "web_search", {"query": item.get("query", ""),
-                             **({"url": str(action["url"])} if action.get("url") else {})}
+        # The query, the page it opened (an open_page action has a URL and may have no query) and
+        # the rest of the action (a search's queries), whose URLs are read as a fetch would read them.
+        # A search starts with an action that names only its kind (`{"type": "other"}`); with no
+        # colon it holds no URL, and kept it would stop the completed item from covering its start.
+        action = item.get("action")
+        if isinstance(action, dict) and set(action) <= {"type"} and ":" not in str(action.get("type", "")):
+            action = None
+        url = action.get("url") if isinstance(action, dict) else None
+        yield "web_search", {"query": item.get("query", ""), **({"url": str(url)} if url else {}),
+                             **({"action": action} if action not in (None, "", [], {}) else {})}
     elif kind == "collab_tool_call":
         yield "collab", item
+    elif kind not in CODEX_NOT_CALLS:
+        yield f"codex:{kind}", item
 
 
-def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: dict | None = None) -> tuple[str, str]:
-    """('web' | 'violation' | 'suspect' | 'local' | 'other', reason) for one tool call. `files`: what
-    earlier calls in the transcript wrote, by path, so that a script written by one call and run by
-    a later one is read as it was written; updated with what this call writes."""
+def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: dict | None = None,
+               start=..., place: dict | None = None) -> tuple[str, str]:
+    """('web' | 'violation' | 'suspect' | 'local' | 'other', reason) for one tool call: the shell
+    model's verdict (`model_call`), except that a shell call it finds local or web is suspect unless
+    it lies in the subset whose reads `exact.outside` knows exactly. `start`: where a shell call may
+    start (see `exact.outside`); by default the work directory for Claude Code's Bash, and unknown
+    for Codex's shell, which may run a command in a directory its transcript does not record.
+    `place`: where the model takes a shell call to start (see `model_call`)."""
+    verdict, why = model_call(tool, inp, workdir, roots, files, place)
+    if tool in {"shell", "Bash"} and verdict in {"local", "web"}:
+        if start is ...:
+            start = [workdir] if tool == "Bash" else None
+        beyond, _ = exact.outside(_shell_command(inp), workdir, start)
+        if beyond:
+            return "suspect", f"{EXACT_REASON}: {beyond}"
+    return verdict, why
+
+
+def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: dict | None = None,
+               place: dict | None = None) -> tuple[str, str]:
+    """The shell model's verdict on one tool call: ('web' | 'violation' | 'suspect' | 'local' |
+    'other', reason). `files`: what earlier calls in the transcript wrote, by path, so that a script
+    written by one call and run by a later one is read as it was written; updated with what this
+    call writes. `place`: for a shell call, where it may start ({} or None: the work directory),
+    updated with where the next may start (see `_next_place`). An input the audit cannot read (not
+    an object, or a shell call without a command it can read) is suspect."""
+    if not isinstance(tool, str):
+        return "suspect", "a tool call without a name the audit can read"
+    if _unwritable(inp):
+        # Read as if each NUL and lone surrogate were another character, for what it reaches: such
+        # a call is suspect, and excludes the run where it names a protected place or is an MCP
+        # call. Where the next Bash call starts is either way (the call may not have run).
+        before = dict(place) if place is not None else None
+        verdict, why = model_call(tool, _scrubbed(inp), workdir, roots, files, place)
+        if place is not None:
+            place.update(worlds=list({(w.cwd, w.primary): w for w in [
+                *(before.get("worlds") or [_World(workdir, None)]), *(place.get("worlds") or [_World(workdir, None)])]}.values()),
+                known=before.get("known", True) and place.get("known", True))
+        if verdict == "violation":
+            return verdict, why
+        return "suspect", "an input with text no file name can hold (a NUL, or a lone surrogate)"
     text = json.dumps(inp) if not isinstance(inp, str) else inp
     outside_urls = URL.sub("", text)
-    if tool.startswith("mcp:") or tool.startswith("mcp__"):
+    if tool.startswith("mcp:") or tool.startswith("mcp__") or tool in MCP_TOOLS:
         return "violation", "MCP tool"
     if tool == "collab":
         return "suspect", "sub-agent call; its work is not in this transcript"
+    if tool == "codex_item" or tool.startswith("codex:"):
+        return "suspect", f"a Codex item the audit does not know ({tool})"
+    if not isinstance(inp, dict):
+        return "suspect", "a tool input the audit cannot read"
     if tool in WEB_TOOLS or tool == "web_search":
         if OWN_REPO.search(text):
             return "suspect", "opens this project's repository on the web"
+        # The URL WebFetch fetches, or the page Codex's search opened, read exactly; a URL elsewhere
+        # in the input (a query, a prompt) as the WHATWG parser would read it (`_web_hosts`).
+        fetched = [inp.get("url")] if tool == "WebFetch" or "url" in inp else []
+        local = next((why for u in fetched if (why := exact.web_url(u)) is not None), None)
+        local = local or next((why for s in _strings(inp) for host in _web_hosts(s)
+                               if (why := exact.remote_url(f"http://{host}/", globs=False)) is not None), None)
+        if local:
+            return "suspect", f"a web call that may reach this machine or its network: {local}"
         return "web", ""
     paths, searches, notes, weak, alt, alt_searches, unknown = [], [], [], [], [], [], []
     literal_paths: set[Path] = set()
     if tool in {"shell", "Bash"}:
-        shell = _shell(inp.get("command", ""), workdir, files)
+        command = _shell_command(inp)
+        if command is None:
+            if place is not None:
+                place.update(worlds=[_World(workdir, None)], known=False)
+            return "suspect", "a shell call without a command the audit can read"
+        timeout = inp.get("timeout", MISSING) if tool == "Bash" and isinstance(inp, dict) else MISSING
+        shell = _shell(command, workdir, files, place, timeout)
         paths, searches, notes, weak = shell.paths, shell.searches, shell.notes, shell.code_paths
         # Paths and searches from where the shell would be had a cd to a missing directory failed.
         alt, alt_searches = shell.alt_paths, shell.alt_searches
         unknown = shell.unknown_paths
         literal_paths = shell.literal_paths
-    elif tool in {"Read", "Edit", "Write", "NotebookEdit", "LS"}:
+    elif tool in {"Read", "Edit", "MultiEdit", "Write", "NotebookEdit", "LS"}:
         p = _resolve(str(inp.get("file_path") or inp.get("path") or inp.get("notebook_path") or ""), workdir,
                      bare=True)
         paths = [p] if p else []
@@ -7117,7 +9028,7 @@ def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: di
                 new = str(inp.get("new_string") or "")
                 files[p] = tuple(None if a is None else a.replace(inp["old_string"], new, -1 if inp.get("replace_all") else 1)
                                  for a in files[p])
-            elif tool in {"Edit", "NotebookEdit"}:
+            elif tool in {"Edit", "MultiEdit", "NotebookEdit"}:
                 files.pop(p, None)  # changed in a way the audit does not follow: read from disk
     elif tool in {"Grep", "Glob"}:
         base = _resolve(str(inp.get("path") or "."), workdir, bare=True) or workdir
@@ -7127,10 +9038,25 @@ def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: di
         if pattern:
             paths += _expand(_normpath(base / pattern))
     elif tool in {"file_read", "file_change"}:
-        for key in ("path", "file_path"):
-            if inp.get(key):
-                p = _resolve(str(inp[key]), workdir, bare=True)
+        named = [inp.get(key) for key in ("path", "file_path")]
+        changes = inp.get("changes")
+        # A list of {path, kind}, as `codex exec --json` writes them, or a mapping from path to change.
+        if isinstance(changes, dict):
+            named += list(changes)
+        elif isinstance(changes, list) and all(isinstance(c, dict) for c in changes):
+            named += [c.get("path") for c in changes]
+        elif changes is not None:
+            return "suspect", "a file change the audit cannot read"
+        if any(n is not None and not isinstance(n, str) for n in named):
+            return "suspect", "a file change the audit cannot read"
+        for name in named:
+            if name:
+                p = _resolve(str(name), workdir, bare=True)
                 paths += [p] if p else []
+    if tool in FILE_TOOLS:
+        # Through a link in the work directory (`up -> ..`), a path there may lead anywhere.
+        paths += [r for p in list(paths) if (r := _real(p, workdir)) != p]
+        searches += [(verb, kind, r) for verb, kind, base in list(searches) if (r := _real(base, workdir)) != base]
     for p in paths:
         for root in roots:
             if _under(p, root) or (p not in literal_paths and _pattern_hits(p, root)):
@@ -7173,41 +9099,229 @@ def check_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: di
                and (id(p) not in weak_ids or p.exists())]
     if outside and TERMS.search(_mask_workdir(outside_urls, workdir)):
         return "suspect", "a path outside the work directory next to a term from these questions"
+    if tool in FILE_TOOLS:
+        beyond = next((p for p in paths if not _under(p, workdir)), None)
+        if beyond is not None:
+            return "suspect", f"a file outside the work directory: {beyond}"
     if tool in {"shell", "Bash"} and URL.search(text) and re.search(r"\b(?:curl|wget)\b", text):
         return "web", ""
-    if paths or tool in {"shell", "Bash", "Read", "Grep", "Glob", "LS", "file_read", "file_change"}:
+    if tool in {"shell", "Bash"} or tool in FILE_TOOLS:
         return "local", ""
-    return "other", ""
+    if tool in QUIET_TOOLS:
+        return "other", ""
+    return "suspect", f"a tool the audit does not know ({tool})"
+
+
+class _JSONFloat(float):
+    """A JSON number with a fraction or an exponent, which keeps its text: Python reads `1e400` and
+    `2e400` both as infinity, and `1e-400` and `2e-400` both as 0."""
+
+    def __new__(cls, text: str):
+        number = super().__new__(cls, text)
+        number.text = text
+        return number
+
+
+JSON_NUMBER = re.compile(r"(-?)(\d+)(?:\.(\d+))?(?:[eE]([-+]?\d+))?")
+
+
+def _exact_number(text: str):
+    """A JSON number's exact value as (sign, digits, exponent): its digits with no zero at either
+    end, as text, and an exponent, an int of any size, so that equal numbers give equal keys however
+    written (1, 1.0 and 1e0; 0 and -0) and no two unequal ones do. An exponent of more digits than
+    Python converts (4,300) stays as written: two such numbers are alike only when written alike,
+    and a completion then covers fewer starts, never more."""
+    sign, whole, frac, exp = JSON_NUMBER.fullmatch(text).groups()
+    digits = (whole + (frac or "")).lstrip("0")
+    stripped = digits.rstrip("0")
+    if not stripped:
+        return ("0", 0)
+    try:
+        shift = int(exp or 0)
+    except ValueError:
+        return ("text", text)
+    return (sign + stripped, shift - len(frac or "") + len(digits) - len(stripped))
+
+
+def _id_key(value):
+    """A Codex item's id as a key: numbers alike only when equal (1 and 1.0), compared exactly as
+    written (2^53 and 2^53 + 1 differ, and so do 1e400 and 2e400; see _JSONFloat and
+    `_exact_number`), lists and objects by their parts' keys (so `[1e400]` and `[2e400]` differ
+    too), anything else by its JSON text. The key is the id's tokens in order, an object's keys
+    sorted, built with a stack of its own so that an id nested as deep as json.loads reads (past
+    5,000 levels) has one: recursion in Python stops near 1,000."""
+    tokens, todo = [], [(False, value)]
+    while todo:
+        done, part = todo.pop()
+        if done:
+            tokens.append(part)
+        elif isinstance(part, list):
+            tokens.append("[")
+            todo.append((True, "]"))
+            todo.extend((False, v) for v in reversed(part))
+        elif isinstance(part, dict):
+            tokens.append("{")
+            todo.append((True, "}"))
+            for k, v in sorted(part.items(), key=lambda kv: kv[0], reverse=True):
+                todo.extend([(False, v), (True, ("key", k))])
+        elif isinstance(part, _JSONFloat):
+            tokens.append(("number", _exact_number(part.text)))
+        elif not isinstance(part, bool) and isinstance(part, int):
+            tokens.append(("number", _exact_number(str(part))))
+        elif isinstance(part, float) and math.isfinite(part):  # a float not read from JSON text
+            tokens.append(("number", _exact_number(format(Decimal(part), "f"))))
+        else:
+            tokens.append(("json", json.dumps(part, sort_keys=True, default=str)))
+    return tuple(tokens)
+
+
+def _covers(done: list, begun: list) -> bool:
+    """Whether a completed Codex item's calls cover a started one's: the same tools, each input the
+    same where the started one gave a value (a search starts with an empty query), apart from an
+    item's status, which changes from start to completion."""
+    if [t for t, _ in done] != [t for t, _ in begun]:
+        return False
+    for (_, a), (_, b) in zip(done, begun):
+        if not (isinstance(a, dict) and isinstance(b, dict)):
+            if a != b:
+                return False
+            continue
+        if any(k != "status" and v not in (None, "", [], {}) and a.get(k) != v for k, v in b.items()):
+            return False
+    return True
 
 
 def audit_transcript(path: Path, workdir: str) -> dict:
     work = Path(workdir) if workdir else Path("/nonexistent-workdir")
     roots = protected_roots()
     files: dict[Path, tuple] = {}  # what the run's calls wrote so far, by path (see `_Shell.files`)
+    # Where the next Claude Code Bash call may start: where the last one ended if it ran to its end
+    # in the foreground with status 0, and otherwise where the last one started (see `_next_place`).
+    # The subset follows it with the places `exact.outside` gives, which hold the start too.
+    bash_start: list[Path] | None = [work]
+    bash_place: dict = {}
     events = calls = web = 0
     lists: dict[str, list] = {"violations": [], "suspect": [], "local_calls": []}
     urls: list[str] = []
-    for raw in path.read_text(errors="replace").splitlines():
-        try:
-            line = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(line, dict):
-            continue
-        events += 1
+    # Codex items started and not yet completed: one that never completes (a killed run) ran all
+    # the same, and is audited as it started. A completion covers the started item with its id,
+    # or, without an id, one whose calls it covers (see `_covers`); any other stays to be audited.
+    started: list[tuple] = []
+
+    def lose_place() -> None:
+        """The next Bash call may start anywhere the audit can tell (a call it could not follow)."""
+        nonlocal bash_start
+        bash_start = None
+        bash_place.update(worlds=[_World(work, None)], known=False)
+
+    def audit_calls(line: dict) -> None:
+        nonlocal calls, web, bash_start
         for tool, inp in _tool_calls(line):
             calls += 1
-            verdict, why = check_call(tool, inp, work, roots, files)
-            text = json.dumps(inp)
+            # A call run in the background leaves the next where it found it (Claude Code reads no
+            # place back from one). The flag is read as JSON's true or false (false if absent); a
+            # call whose flag is anything else (null, 1, "yes") may have done either.
+            background = inp.get("run_in_background", False) if tool == "Bash" and isinstance(inp, dict) else False
+            place = bash_place if background is False else dict(bash_place)
+            try:
+                text = json.dumps(inp, default=str)
+                verdict, why = check_call(tool, inp, work, roots, files,
+                                          **({"start": bash_start, "place": place} if tool == "Bash" else {}))
+                if tool == "Bash":
+                    command = _shell_command(inp)
+                    ended = None if command is None else exact.outside(command, work, bash_start)[1]
+                    if background is not True:
+                        bash_start = ended  # what `outside` returns holds where the call started
+                    if background is not True and background is not False:
+                        bash_place.update(worlds=list({(w.cwd, w.primary): w for w in [
+                            *(bash_place.get("worlds") or [_World(work, None)]), *place.get("worlds", [])]}.values()),
+                            known=bash_place.get("known", True) and place.get("known", True))
+            except Exception as e:  # noqa: BLE001 - a call the audit cannot follow is suspect, never skipped
+                verdict, why = "suspect", f"the audit could not follow this call ({type(e).__name__})"
+                text = repr(inp)
+                if tool == "Bash" and background is not True:
+                    lose_place()
             if verdict == "web":
                 web += 1
-                found = URL.findall(text)
-                urls += found or [f"search: {inp.get('query', '')}"[:200]]
+                found = URLISH.findall(text)
+                urls.extend(found or [f"search: {inp.get('query', '') if isinstance(inp, dict) else ''}"[:200]])
                 continue
-            record = {"tool": tool, "call": text[:4000], **({"why": why} if why else {})}
+            record = {"tool": tool if isinstance(tool, str) else repr(tool), "call": text[:4000],
+                      **({"why": why} if why else {})}
             key = {"violation": "violations", "suspect": "suspect", "local": "local_calls"}.get(verdict)
             if key:
                 lists[key].append(record)
+
+    def audit_line(line, raw: str) -> None:
+        nonlocal events
+        if isinstance(line, list):
+            # No transcript writes a list: it is not an event, and may hold a call the audit does
+            # not know where to find. Its parts are still read, so a call in one is audited.
+            lists["suspect"].append({"tool": "?", "call": raw[:4000], "why": "a transcript line that is not an event"})
+            lose_place()
+            for part in line:
+                audit_line(part, raw)
+            lose_place()  # a Bash call among the parts does not set the next start
+            return
+        if not isinstance(line, dict):
+            lists["suspect"].append({"tool": "?", "call": raw[:4000], "why": "a transcript line that is not an event"})
+            lose_place()
+            return
+        item = line.get("item")
+        event = line.get("type")
+        if isinstance(event, str) and event in EVENT_TYPES:
+            events += 1
+        else:
+            # It may hold a call the audit does not know where to find, and so a Bash call's place.
+            lists["suspect"].append({"tool": "?", "call": raw[:4000],
+                                     "why": "a transcript event of a type the audit does not know"})
+            lose_place()
+        if (event == "item.started" or event == "item.updated") and item is not None:
+            key = _id_key(item.get("id")) if isinstance(item, dict) and "id" in item else None
+            begun = list(_tool_calls({**line, "type": "item.completed"}))
+            # An update stands for the item started (or updated) before whose calls it covers, and
+            # is a start of its own otherwise.
+            same = [i for i, (k, earlier, _) in enumerate(started) if k == key and _covers(begun, earlier)]
+            if event == "item.updated" and same:
+                started[same[0]] = (key, begun, line)
+            else:
+                started.append((key, begun, line))
+        elif event == "item.completed" and item is not None:
+            key = _id_key(item.get("id")) if isinstance(item, dict) and "id" in item else None
+            done = list(_tool_calls(line))
+            same = [i for i, (k, begun, _) in enumerate(started) if k == key and _covers(done, begun)]
+            if same:
+                started.pop(same[0])
+        audit_calls(line)
+
+    # Lines end at a newline alone: JSON text may hold U+2028 and the other characters that
+    # str.splitlines also splits at. Only a line of JSON's own whitespace is no line at all; one of
+    # other whitespace (U+00A0, U+3000, a vertical tab), which json.loads rejects, is suspect.
+    for raw in path.read_text(errors="replace").split("\n"):
+        if not raw.strip(" \t\r\n"):
+            continue
+        try:
+            line = json.loads(raw, parse_float=_JSONFloat)
+        except (ValueError, RecursionError) as e:
+            # A line the audit cannot read (damaged, nested deeper than Python's parser goes, or with
+            # an integer longer than it converts) may hold a call, a Bash call's among them; it is
+            # not an event, so a transcript of nothing else still fails.
+            lists["suspect"].append({"tool": "?", "call": raw[:4000],
+                                     "why": f"a transcript line the audit cannot read ({type(e).__name__})"})
+            lose_place()
+            continue
+        try:
+            audit_line(line, raw)
+        except Exception as e:  # noqa: BLE001 - a line the audit cannot follow is suspect, never skipped
+            lists["suspect"].append({"tool": "?", "call": raw[:4000],
+                                     "why": f"a transcript line the audit cannot follow ({type(e).__name__})"})
+            lose_place()
+    for _, _, line in started:
+        try:
+            audit_calls({**line, "type": "item.completed"})
+        except Exception as e:  # noqa: BLE001
+            lists["suspect"].append({"tool": "?", "call": repr(line)[:4000],
+                                     "why": f"a transcript line the audit cannot follow ({type(e).__name__})"})
     return {
         "events": events,
         "tool_calls": calls,

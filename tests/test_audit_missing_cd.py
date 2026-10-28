@@ -9,11 +9,11 @@ import subprocess
 
 import pytest
 
-from test_review_r4_audit import audit_command
+from test_review_r4_audit import audit_command, model_suspects
 
 
 def run_sh(command, cwd):
-    return subprocess.run(["/bin/sh", "-c", command], cwd=cwd, capture_output=True, text=True, timeout=10)
+    return subprocess.run(["/bin/sh", "-c", command], cwd=cwd, capture_output=True, text=True, timeout=60)
 
 
 @pytest.mark.parametrize("command", [
@@ -24,7 +24,7 @@ def run_sh(command, cwd):
 ])
 def test_cd_to_a_missing_directory_is_not_suspect_by_itself(tmp_path, review_area, command):
     result = audit_command(tmp_path, command, review_area)
-    assert result["passed"] and not result["suspect"] and not result["violations"], result
+    assert result["passed"] and not model_suspects(result) and not result["violations"], result
 
 
 @pytest.mark.parametrize("command", [
@@ -37,8 +37,8 @@ def test_a_read_that_lands_elsewhere_if_the_cd_failed_is_suspect(tmp_path, revie
     proc = run_sh(command, review_area)
     assert "MOCK OTHER ANSWER" in proc.stdout
     result = audit_command(tmp_path, command, review_area)
-    assert result["suspect"] and not result["violations"], result
-    assert "missing at audit time" in result["suspect"][0]["why"], result
+    assert model_suspects(result) and not result["violations"], result
+    assert "missing at audit time" in model_suspects(result)[0]["why"], result
 
 
 def test_and_chain_guards_only_its_own_commands(tmp_path, review_area):

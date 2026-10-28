@@ -20,10 +20,10 @@ from i86 import audit
 ])
 def test_string_values_are_local(review_area, shell, command, category):
     proc = subprocess.run([shell, "-c", command], cwd=review_area,
-                          capture_output=True, text=True, timeout=10, check=True)
+                          capture_output=True, text=True, timeout=60, check=True)
     assert proc.stdout.strip()
     assert "MOCK OTHER ANSWER" not in proc.stdout
-    got, why = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(command)},
+    got, why = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(command)},
                                 review_area, audit.protected_roots())
     assert got == "local", (got, why, category)
 
@@ -67,9 +67,9 @@ def test_round6_honest_research_controls(review_area, shell, command):
     command = command.replace("{python}", "python3")
     env = {**os.environ, "PATH": str(Path(sys.executable).parent) + ":" + os.environ["PATH"]}
     proc = subprocess.run([shell, "-c", command], cwd=review_area,
-                          capture_output=True, text=True, timeout=10, check=True, env=env)
+                          capture_output=True, text=True, timeout=60, check=True, env=env)
     assert proc.stdout.strip()
-    got, why = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(command)},
+    got, why = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(command)},
                                 review_area, audit.protected_roots())
     assert got == "local", (got, why)
 
@@ -81,8 +81,8 @@ def test_deleted_external_scratch_is_not_a_violation(review_area, shell):
     scratch.rmdir()
     command = "cd " + shlex.quote(str(scratch)) + " && cat report.txt"
     proc = subprocess.run([shell, "-c", command], cwd=review_area,
-                          capture_output=True, text=True, timeout=10)
+                          capture_output=True, text=True, timeout=60)
     assert proc.returncode != 0 and not proc.stdout
-    got, why = audit.check_call("shell", {"command": shell + " -c " + shlex.quote(command)},
+    got, why = audit.model_call("shell", {"command": shell + " -c " + shlex.quote(command)},
                                 review_area, audit.protected_roots())
     assert got == "local", (got, why)

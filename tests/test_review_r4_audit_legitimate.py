@@ -11,6 +11,7 @@ import subprocess
 import pytest
 
 from i86 import audit, runners
+from test_review_r4_audit import model_suspects
 
 
 @pytest.fixture
@@ -39,7 +40,7 @@ def classify(tmp_path, command, work):
 def test_search_of_own_file_is_local(tmp_path, own_work, search):
     command = "cd .. && " + search + " / sol-1/report.txt"
     proc = subprocess.run(["/bin/sh", "-c", command], cwd=own_work,
-                          capture_output=True, text=True, check=True, timeout=10)
+                          capture_output=True, text=True, check=True, timeout=60)
     assert proc.stdout
     result = classify(tmp_path, command, own_work)
     assert not result["violations"], result
@@ -52,7 +53,7 @@ def test_search_of_own_file_is_local(tmp_path, own_work, search):
 def test_slash_pattern_with_value_option_is_local(tmp_path, own_work, option):
     command = "rg " + option + " / report.txt"
     proc = subprocess.run(["/bin/sh", "-c", command], cwd=own_work,
-                          capture_output=True, text=True, check=True, timeout=10)
+                          capture_output=True, text=True, check=True, timeout=60)
     assert proc.stdout
     result = classify(tmp_path, command, own_work)
     assert not result["violations"], result
@@ -64,7 +65,7 @@ def test_slash_pattern_with_value_option_is_local(tmp_path, own_work, option):
 ])
 def test_literal_heredoc_data_is_local(tmp_path, own_work, command):
     proc = subprocess.run(["/bin/sh", "-c", command], cwd=own_work,
-                          capture_output=True, text=True, check=True, timeout=10)
+                          capture_output=True, text=True, check=True, timeout=60)
     assert proc.stdout == "cd ..\ncat report.txt\n" or (own_work / "commands.txt").read_text() == (
         "cd ..\nrg certification report.txt\n"
     )
@@ -78,7 +79,7 @@ def test_literal_heredoc_data_is_local(tmp_path, own_work, command):
 ])
 def test_quoted_operator_data_is_local(tmp_path, own_work, command):
     proc = subprocess.run(["/bin/sh", "-c", command], cwd=own_work,
-                          capture_output=True, text=True, check=True, timeout=10)
+                          capture_output=True, text=True, check=True, timeout=60)
     assert proc.stdout
     result = classify(tmp_path, command, own_work)
     assert not result["violations"], result
@@ -107,4 +108,4 @@ def test_research_controls_pass(tmp_path, own_work, command):
 ])
 def test_own_repository_shell_fetch_is_suspect(tmp_path, own_work, command):
     result = classify(tmp_path, command, own_work)
-    assert result["suspect"], result
+    assert model_suspects(result), result
