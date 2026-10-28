@@ -96,9 +96,12 @@ def test_a_line_the_audit_cannot_read_loses_the_next_start(area, tmp_path, betwe
 
 @pytest.mark.parametrize("extra", [{"\u0000": "dc-i86-llm-forecast", "�": "MOCK"},
                                    {"�": "MOCK", "\u0000": "dc-i86-llm-forecast"},
-                                   {"\ud800": "MOCK", "\u0000": "MOCK", "�": "dc-i86-llm-forecast"}])
+                                   {"\ud800": "MOCK", "\u0000": "MOCK", "�": "dc-i86-llm-forecast"}],
+                         ids=["sol", "control-protected-last", "control-three-keys"])
 def test_keys_the_scrub_makes_alike_keep_their_values(area, extra):
-    """Sol F7: both keys became U+FFFD and one value was lost, the one that names this repository."""
+    """Sol F7: both keys became U+FFFD and one value was lost, the one that names this repository.
+    The two controls (round-14c finding 5) pass on 7280074 too: its scrub kept the value inserted
+    last, which there is the protected one."""
     inp = {"file_path": str(area / "MOCK.txt"), **extra}
     assert audit.model_call("Read", inp, area, audit.protected_roots(), {}, {})[0] == "violation"
 

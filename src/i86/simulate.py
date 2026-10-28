@@ -271,7 +271,9 @@ def _tilted(graph: Graph, restrict: dict | None):
 def exact_tilt(graph: Graph, fc: Forecasts, restrict: dict | None, band: tuple[float, float] | None = None):
     """(node id, tilt, breaks) when a restriction can be met by drawing the share exactly (see
     `_tilted`). `tilt(v)` (a _Tilt) is the chance the node takes an allowed value at share v in
-    `band`, times 2^tilt.scale, linear between `breaks`."""
+    `band`, times 2^tilt.scale, linear between `breaks` before rounding (a categorical node's sums
+    each allowed option's interpolated chance, each rounded, which far below 2^-1022 can be 0 at a
+    float where the exact sum is not; dists.sample_share_tilted draws off such floats)."""
     tilted = _tilted(graph, restrict)
     if tilted is None:
         return None

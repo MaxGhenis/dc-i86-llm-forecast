@@ -56,7 +56,9 @@ forecast cells, and the share is drawn from the forecaster's distribution tilted
 within each stretch where the density is constant and the chance linear, by inverting the tilted
 distribution, and in a stretch at most 1,024 floats wide, by drawing among its floats, each in
 proportion to its tilted probability, so that no draw lands where the chance is 0 (a wider stretch
-where the chance rounds to 0 over many floats is first cut to where it is positive). Every draw then
+where the chance rounds to 0 over many floats is first cut to where it is positive, and a draw that
+still lands where the computed chance is 0, as the sum of options' chances that each round to 0 can
+be, moves to the nearest float where it is positive). Every draw then
 counts fully, with weight 1 (the condition's probability is kept apart), and a forecaster that gives
 the condition 1 in 10,000 counts as much as one that gives it 9 in 10; only one that gives it zero
 is left out, and the report says so. For a condition this cannot handle (one on a node that also
@@ -198,7 +200,8 @@ whose input is not an object, or holds text no file name can hold (a NUL, a lone
 call excludes the run where it would with that text replaced), one the audit cannot follow, a
 transcript line it cannot read (cut short, or nested deeper than Python's parser goes) or that is not
 an event, and a Codex event of a type it does not know. A Codex item started, updated and completed
-is one call (ids alike only when equal, numbers by value); one that never completed is audited as it
+is one call (ids alike only when equal, numbers by their exact value as written, in lists and objects
+too); one that never completed is audited as it
 was last started or updated.
 
 Running a file by path counts as reading it, and so does a `file://` URL. These exclude the run:

@@ -8463,6 +8463,28 @@ PRINTF_WIDTH = re.compile(r"%[-+ #0']*[0-9*.]")
 BRACES = re.compile(r"\{[^{}]*(,|\.\.)")
 
 
+def _literal_word(node) -> bool:
+    return node.type in {"word", "raw_string", "string"} and all(c.type == "string_content" for c in node.named_children)
+
+
+def _printf_formats(args: list) -> set[int]:
+    """Where printf's format may be among its arguments: the first (zsh reads `-vNAME` and `-q` as
+    the format), after bash's options (`-v NAME`, `-vNAME`, then `--`), and after zsh's (`-v NAME`,
+    then `--`). Measured on bash 3.2, sh, dash and zsh 5.9; dash takes only `--`."""
+    words = [_text(a).strip("'\"") if _literal_word(a) else None for a in args]
+    i = 0
+    while i < len(words) and words[i] is not None and words[i].startswith("-") and words[i] != "-":
+        if words[i] == "--":
+            i += 1
+            break
+        if not words[i].startswith("-v"):
+            break  # an option bash rejects at once
+        i += 2 if words[i] == "-v" else 1
+    j = 2 if words[:1] == ["-v"] else 0
+    j += 1 if j < len(words) and words[j] == "--" else 0
+    return {0, i, j}
+
+
 def _may_outlast(command: str, timeout=MISSING) -> bool:
     """Whether a Bash call may run longer than Claude Code's timeout (which moves it to the
     background, so that the next call starts where this one started): any call but one of quick
@@ -8471,7 +8493,8 @@ def _may_outlast(command: str, timeout=MISSING) -> bool:
     branch and substitution, with no loop, no function defined, no `case` or other pattern match
     (`[[ x == pattern ]]`, `=~`), no brace expansion, no `${...}` the grammar cannot read (zsh's
     flags, as in `${(l:9:)x}`), at most 8 parameter expansions in all (so that no value doubles its
-    way to gigabytes), printf only with a literal format with no width or precision, the typeset
+    way to gigabytes), printf only with literal words up to its format, and no width or precision in
+    any word a shell may take for the format (see `_printf_formats`), the typeset
     family with no padding option (zsh's -L, -R, -Z), and no redirection that opens a file other than
     /dev/null (opening a FIFO waits for its other end). It takes `cd` and `test` to return at once, as
     they do on a local file system."""
@@ -8502,13 +8525,11 @@ def _may_outlast(command: str, timeout=MISSING) -> bool:
                 return True
             args = [c for c in node.children if c.is_named and c.type != "command_name"
                     and not c.type.endswith("redirect")]
-            if _text(name) == "printf":
-                rest = args[2:] if args and _text(args[0]) == "-v" else args
-                fmt = rest[0] if rest else None
-                if fmt is not None and (fmt.type not in {"word", "raw_string", "string"}
-                                        or any(c.type != "string_content" for c in fmt.named_children)
-                                        or PRINTF_WIDTH.search(_text(fmt))):
-                    return True
+            if _text(name) == "printf" and any(
+                    i < len(args) and (not all(_literal_word(w) for w in args[:i + 1])
+                                       or PRINTF_WIDTH.search(_text(args[i])))
+                    for i in _printf_formats(args)):
+                return True
         if node.type == "declaration_command" and any(
                 c.type == "word" and _text(c)[:1] in "-+" and set(_text(c)[1:]) & set("LRZ") for c in node.children):
             return True
@@ -8845,14 +8866,42 @@ class _JSONFloat(float):
         return number
 
 
+JSON_NUMBER = re.compile(r"(-?)(\d+)(?:\.(\d+))?(?:[eE]([-+]?\d+))?")
+
+
+def _exact_number(text: str):
+    """A JSON number's exact value as (sign, digits, exponent): its digits with no zero at either
+    end, as text, and an exponent, an int of any size, so that equal numbers give equal keys however
+    written (1, 1.0 and 1e0; 0 and -0) and no two unequal ones do. An exponent of more digits than
+    Python converts (4,300) stays as written: two such numbers are alike only when written alike,
+    and a completion then covers fewer starts, never more."""
+    sign, whole, frac, exp = JSON_NUMBER.fullmatch(text).groups()
+    digits = (whole + (frac or "")).lstrip("0")
+    stripped = digits.rstrip("0")
+    if not stripped:
+        return ("0", 0)
+    try:
+        shift = int(exp or 0)
+    except ValueError:
+        return ("text", text)
+    return (sign + stripped, shift - len(frac or "") + len(digits) - len(stripped))
+
+
 def _id_key(value):
     """A Codex item's id as a key: numbers alike only when equal (1 and 1.0), compared exactly as
-    written (2^53 and 2^53 + 1 differ, and so do 1e400 and 2e400; see _JSONFloat), anything else by
-    its JSON text."""
+    written (2^53 and 2^53 + 1 differ, and so do 1e400 and 2e400; see _JSONFloat and
+    `_exact_number`), lists and objects by their parts' keys (so `[1e400]` and `[2e400]` differ
+    too), anything else by its JSON text."""
     if isinstance(value, _JSONFloat):
-        return ("number", Decimal(value.text))
-    if not isinstance(value, bool) and (isinstance(value, int) or isinstance(value, float) and math.isfinite(value)):
-        return ("number", Decimal(value))
+        return ("number", _exact_number(value.text))
+    if not isinstance(value, bool) and isinstance(value, int):
+        return ("number", _exact_number(str(value)))
+    if isinstance(value, float) and math.isfinite(value):  # a float not read from JSON text
+        return ("number", _exact_number(format(Decimal(value), "f")))
+    if isinstance(value, list):
+        return ("list", tuple(_id_key(v) for v in value))
+    if isinstance(value, dict):
+        return ("object", tuple(sorted((k, _id_key(v)) for k, v in value.items())))
     return ("json", json.dumps(value, sort_keys=True, default=str))
 
 
@@ -8936,7 +8985,10 @@ def audit_transcript(path: Path, workdir: str) -> dict:
     def audit_line(line, raw: str) -> None:
         nonlocal events
         if isinstance(line, list):
-            # A line holding a list (no transcript writes one) is read as the events in it.
+            # No transcript writes a list: it is not an event, and may hold a call the audit does
+            # not know where to find. Its parts are still read, so a call in one is audited.
+            lists["suspect"].append({"tool": "?", "call": raw[:4000], "why": "a transcript line that is not an event"})
+            lose_place()
             for part in line:
                 audit_line(part, raw)
             return

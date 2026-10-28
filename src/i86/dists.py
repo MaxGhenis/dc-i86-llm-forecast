@@ -148,11 +148,15 @@ def _cut_zero_ends(a, b, mass, tilt):
     """Segments wider than NARROW_FLOATS cut to where their tilt is positive, where it is 0 on two or
     more floats at one end (a tilt that underflows: a chance rising from 0 to 5e-324 across a
     segment is 0 over its first half), each with the share mass of what is left (the density is
-    constant within a segment), rounded and at least the smallest float. The tilt is taken to be
-    computed in steps that keep its order, as np.interp's are, so that its positive floats inside a
-    segment are contiguous. Only floats inside the segment are read: the tilt may jump at b, the
-    next piece's value or this one's. One float at an end where it is 0 is left to
-    sample_share_tilted's clip."""
+    constant within a segment), rounded and at least the smallest float. The cut is where bisection,
+    between a float of tilt 0 at that end and one of positive tilt at the other, finds a 0 next to
+    a positive float: the end of the zero run where a single rounded interpolation is 0 (a binary
+    node's), or, where the tilt has zeros inside the segment too (a categorical node's chances,
+    each interpolated and rounded on its own, can all be 0 at a float midway), possibly the end of
+    one of those, which then drops the floats between. Only floats inside the segment are read: the
+    tilt may jump at b, the next piece's value or this one's. One float at an end where it is 0 is
+    left to sample_share_tilted's clip, and a draw that still lands where the tilt is 0 is moved
+    (see `_off_zero`)."""
     a, b, mass = a.copy(), b.copy(), mass.copy()
     wide = np.flatnonzero((mass > 0) & (a >= 0) & (_float_counts(a, b) > NARROW_FLOATS))  # see _positions
     if not len(wide):
@@ -182,6 +186,25 @@ def _cut_zero_ends(a, b, mass, tilt):
     return a, b, mass
 
 
+def _off_zero(x: float, a: float, b: float, anchor: float, tilt) -> float:
+    """A float of (a, b] where the tilt is positive in place of x, where it is 0: the nearest within
+    NARROW_FLOATS floats of x (the lower of two as near), or else one found by bisection between x
+    and `anchor`, a float of the segment where the tilt is positive, next to a float of tilt 0."""
+    p, first, last = (int(v) for v in _positions(np.array([x, a, b])))
+    near = np.arange(max(first + 1, p - NARROW_FLOATS), min(last, p + NARROW_FLOATS) + 1, dtype=np.int64)
+    positive = near[np.asarray(tilt(_at(near)), dtype=float) > 0]
+    if len(positive):
+        return float(_at([positive[np.argmin(np.abs(positive - p))]])[0])
+    zero, good = p, int(_positions(np.array([anchor]))[0])
+    while abs(good - zero) > 1:
+        mid = (zero + good) // 2
+        if float(np.asarray(tilt(_at([mid])), dtype=float)[0]) > 0:
+            good = mid
+        else:
+            zero = mid
+    return float(_at([good])[0])
+
+
 def _frexp(q: Fraction) -> tuple[float, int]:
     """A positive fraction as a mantissa in [1/2, 1), rounded to a float, and a power of two."""
     e = q.numerator.bit_length() - q.denominator.bit_length()
@@ -196,8 +219,8 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2
     the tilt is 0, and the tilt's mass Z over the band (below: an integral over the wide segments, a
     sum over the narrow ones' floats).
 
-    `tilt(x)` is vectorized, nonnegative and linear between consecutive points of `breaks` (it may
-    jump at them). The band splits at the CDF's knots and those points into segments where the
+    `tilt(x)` is vectorized, nonnegative and, before rounding, linear between consecutive points of
+    `breaks` (it may jump at them). The band splits at the CDF's knots and those points into segments where the
     density is constant and the tilt linear, from s_a at the left end to s_b at the right, so a
     segment's mass is its share mass times (s_a + s_b) / 2 and, within it, the draw's position t in
     [0, 1] inverts t (s_a + (s_b - s_a) t / 2) / ((s_a + s_b) / 2) = u, rounded to a float and kept
@@ -207,7 +230,11 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2
     before x, x], and has that part of the segment's share mass times tilt(x), held exactly as a
     fraction. Every draw then counts equally under the tilted distribution. A wide segment whose tilt
     is 0 on two or more floats at an end is first cut to the floats where it is positive (see
-    `_cut_zero_ends`), so the clip at its ends has only one float to keep off.
+    `_cut_zero_ends`), so the clip at its ends has only one float to keep off. A wide segment's draw
+    that still lands where the computed tilt is 0 (below 2^-1022 a sum of rounded chances can be 0
+    at a float inside a segment where the exact tilt is positive) moves to the nearest float of its
+    segment where it is positive (see `_off_zero`). Every draw is then where the computed tilt is
+    positive; so near 0, the draws follow the linear tilt only up to its rounding.
 
     Each segment's tilted mass is held as a mantissa and a power of two (frexp), so no product
     underflows however small its factors: the segments are drawn in proportion to their masses
@@ -229,6 +256,9 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2
     x1, x2 = np.where(narrow, a + (b - a) / 2, x1), np.where(narrow, b, x2)  # replaced below
     f1, f2 = np.asarray(tilt(x1), dtype=float), np.asarray(tilt(x2), dtype=float)
     slope = np.where(x2 > x1, (f2 - f1) / np.where(x2 > x1, x2 - x1, 1.0), 0.0)
+    # A wide segment kept below has s_a + s_b > 0, so f1 or f2 is positive: a float of the segment
+    # where the tilt is positive, which `_off_zero` bisects towards.
+    anchor = np.where(f1 > 0, x1, x2)
     sa = np.clip(f1 - slope * (x1 - a), 0.0, None)
     sb = np.clip(f2 + slope * (b - x2), 0.0, None)
     # A narrow segment's floats where the tilt is positive, each with its width times its tilt, exactly
@@ -260,7 +290,7 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2
                  for j in np.flatnonzero(pos)), Fraction(0))
     z = float(exact / 2 / Fraction(2) ** log2_scale)  # Fraction -> float rounds once, to nearest
     kept = np.flatnonzero(rel > 0)
-    a, b, sa, sb, rel = a[kept], b[kept], sa[kept], sb[kept], rel[kept]
+    a, b, sa, sb, rel, anchor = a[kept], b[kept], sa[kept], sb[kept], rel[kept], anchor[kept]
     # Correctly rounded partial sums: a running sum's rounding could leave the bulk of the mass an ulp
     # short of 1 and hand u = 1 - 2^-52 to a segment of negligible weight.
     cq = np.array([math.fsum(rel[: i + 1]) for i in range(len(rel))]) / total
@@ -291,6 +321,9 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2
                 cum.append(float(run / total))
             cum[-1] = 1.0
             x[here] = xs[np.minimum(np.searchsorted(np.array(cum), r[here], side="right"), len(xs) - 1)]
+    wide = np.array([j not in cells for j in kept])[seg]
+    for k in np.flatnonzero(wide & ~(np.asarray(tilt(x), dtype=float) > 0)):
+        x[k] = _off_zero(float(x[k]), float(a[seg[k]]), float(b[seg[k]]), float(anchor[seg[k]]), tilt)
     return x, z
 
 
