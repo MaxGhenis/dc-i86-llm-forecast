@@ -253,7 +253,7 @@ import os
 import re
 import shlex
 from contextlib import contextmanager, nullcontext
-from fractions import Fraction
+from decimal import Decimal
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import unquote
@@ -452,6 +452,13 @@ MCP_TOOLS = {"ListMcpResourcesTool", "ReadMcpResourceTool", "ReadMcpResourceDirT
              "ReadMcpResource", "ReadMcpResourceDir"}
 # Codex items that are not tool calls. An item of any other type is suspect.
 CODEX_NOT_CALLS = {"agent_message", "reasoning", "todo_list", "error"}
+# The transcript events the audit reads: Claude Code's stream-json events (those the committed
+# transcripts hold) and Codex's JSON events. A line of any other type is suspect.
+EVENT_TYPES = {"system", "assistant", "user", "result", "rate_limit_event", "tool_progress",
+               "thread.started", "turn.started", "turn.completed", "turn.failed", "error",
+               "item.started", "item.updated", "item.completed"}
+# A tool input field the call did not set.
+MISSING = object()
 # This project's own public repository. It holds no answers until every run has finished.
 OWN_REPO = re.compile(r"dc-i86-llm-forecast", re.I)
 
@@ -5111,9 +5118,21 @@ class _Shell:
                 children := [c for c in node.named_children if c.type in STATEMENTS]) == 1:
             # A group with one statement passes its inherited input to that statement. A loop
             # or another group may in turn pass it on, without treating inner redirections as
-            # belonging to the pipeline stage around the group.
+            # belonging to the pipeline stage around the group. What `visit` does around a
+            # statement it does here too: `set -x` and `-v` write to the group's standard error
+            # (`set -x; { echo; } 2>&1` prints `+ echo`, measured on bash 3.2), and `set -e` may end
+            # the shell after it; a `!` before it or `&` after it is visit's to follow.
+            inner = children[0]
+            if inner.start_byte in self.negate or inner.next_sibling is not None and inner.next_sibling.type == "&":
+                self.visit(node)
+                return
             with self.child() if node.type == "subshell" else nullcontext():
-                self.statement(children[0], stdin)
+                if not self.worlds:
+                    return
+                if self.xtrace is not False or self.verbose is not False:
+                    self.complain()
+                self.statement(inner, stdin)
+                self.errexit_end(inner)
         else:
             self.visit(node)
 
@@ -8172,12 +8191,13 @@ class _Shell:
                 self.may_end()  # the command replaces the shell, which ends with it
 
 
-def _shell(command: str, workdir: Path, files: dict | None = None, place: dict | None = None) -> _Shell:
+def _shell(command: str, workdir: Path, files: dict | None = None, place: dict | None = None,
+           timeout=MISSING) -> _Shell:
     """Read the command twice: the first pass, taking every cd as one that may have failed, finds
     the directories the command makes wherever it may be (see `_Shell.later`). `files`: what earlier
     calls wrote, by path (see `_Shell.files`), updated with what this command writes. `place`: where
     the command may start, as `_next_place` left it for the call before ({} for the work directory),
-    updated with where the next call may start."""
+    updated with where the next call may start. `timeout`: the Bash call's own, if it sets one."""
     files = {} if files is None else files
     passes = []
     for doubt in (True, False):
@@ -8194,7 +8214,7 @@ def _shell(command: str, workdir: Path, files: dict | None = None, place: dict |
         shell.run(command)
         passes.append(shell)
     if place is not None:
-        place.update(_next_place(shell, workdir, place, slow=_may_outlast(command)))
+        place.update(_next_place(shell, workdir, place, slow=_may_outlast(command, timeout)))
     shell.run_traps(0)
     shell.finish(0)
     shell.flush()  # bash's exit
@@ -8212,10 +8232,12 @@ def _next_place(shell: _Shell, workdir: Path, place: dict, slow: bool = True) ->
     on 2.1.284 and 2.1.308). So a place where the shell ended with status 0 for certain
     (a builtin's, as `cd sub; echo` ends) is the only one only if the call cannot outlast its
     timeout (`slow`, see `_may_outlast`); where it may have failed or run on, the start is one too.
-    A `pwd` the call made a function or an alias prints what it likes, so the next start is then
-    unknown. Claude Code moves a shell that ends outside the directories it allows back to where
-    the session started, the work directory here; the audit does not know which other directories
-    it allows, so a place outside the work directory keeps both."""
+    A `pwd` the call made a function prints what it likes, so the next start is then unknown; an
+    alias does not, since the shell expanded the wrapper's `pwd` when it read the whole line, before
+    `eval` ran the call (measured on bash 3.2 and zsh 5.9). Claude Code moves a shell that ends
+    outside the directories it allows back to where the session started, the work directory here;
+    the audit does not know which other directories it allows, so a place outside the work
+    directory keeps both."""
     began = place.get("worlds") or [_World(workdir, None)]
     worlds = [w for w in shell.worlds if w.status != FAILED]
     if (slow or shell.exits or not worlds or len(worlds) < len(shell.worlds)
@@ -8225,33 +8247,72 @@ def _next_place(shell: _Shell, workdir: Path, place: dict, slow: bool = True) ->
         worlds.append(_World(workdir, None))
     # A new shell: no $OLDPWD of the command's, no pushd stack.
     worlds = list({(w.cwd, w.primary): _World(w.cwd, None, (), MAYBE, w.primary) for w in worlds}.values())
-    return {"worlds": worlds, "known": shell.known and "pwd" not in shell.functions and "pwd" not in shell.aliases}
+    return {"worlds": worlds, "known": shell.known and "pwd" not in shell.functions}
 
 
-# Builtins that return at once whatever their arguments: a call of only these, with no loop, no
-# function and no redirection other than to /dev/null or a descriptor, cannot outlast its timeout.
-QUICK_BUILTINS = {"cd", "chdir", "pushd", "popd", "dirs", "pwd", "true", "false", ":", "echo", "printf", "print",
+# Builtins that return at once on arguments of the size a command line holds (see `_may_outlast`
+# for the arguments that make printf and the typeset family slow, and the expansions that do).
+QUICK_BUILTINS = {"cd", "chdir", "pushd", "popd", "dirs", "pwd", "true", "false", ":", "echo", "printf",
                   "export", "unset", "set", "setopt", "unsetopt", "shopt", "shift", "local", "declare", "typeset",
                   "readonly", "test", "[", "let", "umask", "return", "exit"}
+# A timeout, in milliseconds, that a call of quick builtins finishes within, with a wide margin
+# (measured here: `cd` with a 1 ms timeout was moved to the background, and with 10 ms it finished).
+QUICK_TIMEOUT_MS = 1000
+# A printf format with a width or a precision, which can print far more than the command holds.
+PRINTF_WIDTH = re.compile(r"%[-+ #0']*[0-9*.]")
+# A word that brace expansion may multiply: `{a,b}`, `{1..9}`.
+BRACES = re.compile(r"\{[^{}]*(,|\.\.)")
 
 
-def _may_outlast(command: str) -> bool:
+def _may_outlast(command: str, timeout=MISSING) -> bool:
     """Whether a Bash call may run longer than Claude Code's timeout (which moves it to the
-    background, so that the next call starts where this one started): anything but a call
-    whose every command, in any branch and any substitution, is a literal QUICK_BUILTINS name, with
-    no loop, no function or alias defined, and no redirection that opens a file other than
-    /dev/null (opening a FIFO waits for its other end)."""
+    background, so that the next call starts where this one started): any call but one of quick
+    builtins, under a timeout left at its default (120 s) or set to a number of at least
+    QUICK_TIMEOUT_MS. A call of quick builtins runs only literal QUICK_BUILTINS names, in every
+    branch and substitution, with no loop, no function defined, no `case` or other pattern match
+    (`[[ x == pattern ]]`, `=~`), no brace expansion, no `${...}` the grammar cannot read (zsh's
+    flags, as in `${(l:9:)x}`), at most 8 parameter expansions in all (so that no value doubles its
+    way to gigabytes), printf only with a literal format with no width or precision, the typeset
+    family with no padding option (zsh's -L, -R, -Z), and no redirection that opens a file other than
+    /dev/null (opening a FIFO waits for its other end). It takes `cd` and `test` to return at once, as
+    they do on a local file system."""
+    if timeout is not MISSING and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                                   or not timeout >= QUICK_TIMEOUT_MS):
+        return True
     root = _BASH.parse(command.encode()).root_node
     if root.has_error:
         return True
+    expansions = 0
     for node in _walk(root):
-        if node.type in {"while_statement", "for_statement", "c_style_for_statement", "function_definition"}:
+        if node.type in {"while_statement", "for_statement", "c_style_for_statement", "function_definition",
+                         "case_statement", "brace_expression", "regex", "extglob_pattern"}:
+            return True
+        if node.type in {"simple_expansion", "expansion"}:
+            expansions += 1
+            if expansions > 8:
+                return True
+        if node.type in {"word", "concatenation"} and BRACES.search(_text(node)):
+            return True
+        if node.type == "test_command" and any(c.type in {"word", "concatenation"} and set(_text(c)) & set("*?[(")
+                                               for c in _walk(node)):
             return True
         if node.type == "command":
             name = node.child_by_field_name("name")
             if (name is None or len(name.named_children) != 1 or name.named_children[0].type != "word"
                     or _text(name) not in QUICK_BUILTINS):
                 return True
+            args = [c for c in node.children if c.is_named and c.type != "command_name"
+                    and not c.type.endswith("redirect")]
+            if _text(name) == "printf":
+                rest = args[2:] if args and _text(args[0]) == "-v" else args
+                fmt = rest[0] if rest else None
+                if fmt is not None and (fmt.type not in {"word", "raw_string", "string"}
+                                        or any(c.type != "string_content" for c in fmt.named_children)
+                                        or PRINTF_WIDTH.search(_text(fmt))):
+                    return True
+        if node.type == "declaration_command" and any(
+                c.type == "word" and _text(c)[:1] in "-+" and set(_text(c)[1:]) & set("LRZ") for c in node.children):
+            return True
         if node.type == "file_redirect":
             op = "".join(_text(c) for c in node.children if not c.is_named)
             dest = node.child_by_field_name("destination")
@@ -8298,12 +8359,17 @@ C0_OR_SPACE = "".join(map(chr, range(0x21)))
 
 
 def _web_hosts(text: str):
-    """The hosts the WHATWG URL parser, which Node's fetch uses, reads in the http(s) URLs a text may
-    hold: from each `http:` or `https:` (in any case, after any character) to the end of the text,
-    and to the first space or quote, each with its tabs and newlines removed as the parser removes
-    them. The parser skips any slashes and backslashes after the scheme, ends the host at a slash,
-    backslash, `?` or `#`, takes it after the last `@` (`http://example.org @127.0.0.1/` is
-    127.0.0.1's) and before a port. An IPv6 host (`[::1]`) is yielded whole."""
+    """The host text of each http(s) URL a text may hold, as the WHATWG URL parser, which Node's
+    fetch uses, finds it before it decodes it: from each `http:` or `https:` (in any case, after any
+    character) to the end of the text, and to the first space or quote, each with its tabs and
+    newlines removed as the parser removes them. The parser skips any slashes and backslashes after
+    the scheme, ends the host at a slash, backslash, `?` or `#`, takes it after the last `@`
+    (`http://example.org @127.0.0.1/` is 127.0.0.1's) and before a port. An IPv6 host (`[::1]`) is
+    yielded whole. The parser then lowercases the host, decodes percent escapes, maps it through
+    IDNA and reads IPv4 forms (`127.1`). `exact.remote_url` takes only a dotted name of ASCII
+    letters, digits and hyphens with no IP form and no local suffix, which that decoding leaves the
+    same name (up to case and a final dot) or rejects. The host before a port the parser rejects
+    (`http://example.org:bad/`) stands for a URL that reaches no machine."""
     for m in re.finditer(r"(?i)https?:", text):
         rest = text[m.end():]
         # The parser strips spaces and controls at the ends of what it reads.
@@ -8321,11 +8387,17 @@ def _web_hosts(text: str):
 
 def _scrubbed(value):
     """A tool input with each NUL and lone surrogate replaced by U+FFFD, which every path and
-    argument can hold."""
+    argument can hold. Keys that become alike keep their values apart (a U+FFFD more for each)."""
     if isinstance(value, str):
-        return re.sub(r"[\x00\ud800-\udfff]", "�", value)
+        return re.sub(r"[\x00\ud800-\udfff]", "\ufffd", value)
     if isinstance(value, dict):
-        return {_scrubbed(k): _scrubbed(v) for k, v in value.items()}
+        out = {}
+        for k, v in value.items():
+            key = _scrubbed(k)
+            while key in out:
+                key += "\ufffd"
+            out[key] = _scrubbed(v)
+        return out
     if isinstance(value, list):
         return [_scrubbed(v) for v in value]
     return value
@@ -8462,7 +8534,8 @@ def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: di
             if place is not None:
                 place.update(worlds=[_World(workdir, None)], known=False)
             return "suspect", "a shell call without a command the audit can read"
-        shell = _shell(command, workdir, files, place)
+        timeout = inp.get("timeout", MISSING) if tool == "Bash" and isinstance(inp, dict) else MISSING
+        shell = _shell(command, workdir, files, place, timeout)
         paths, searches, notes, weak = shell.paths, shell.searches, shell.notes, shell.code_paths
         # Paths and searches from where the shell would be had a cd to a missing directory failed.
         alt, alt_searches = shell.alt_paths, shell.alt_searches
@@ -8563,11 +8636,24 @@ def model_call(tool: str, inp: dict, workdir: Path, roots: list[Path], files: di
     return "suspect", f"a tool the audit does not know ({tool})"
 
 
+class _JSONFloat(float):
+    """A JSON number with a fraction or an exponent, which keeps its text: Python reads `1e400` and
+    `2e400` both as infinity, and `1e-400` and `2e-400` both as 0."""
+
+    def __new__(cls, text: str):
+        number = super().__new__(cls, text)
+        number.text = text
+        return number
+
+
 def _id_key(value):
-    """A Codex item's id as a key: numbers that are equal (1 and 1.0) alike, compared exactly
-    (2^53 and 2^53 + 1 differ, and an integer of any size is read), anything else by its JSON text."""
+    """A Codex item's id as a key: numbers alike only when equal (1 and 1.0), compared exactly as
+    written (2^53 and 2^53 + 1 differ, and so do 1e400 and 2e400; see _JSONFloat), anything else by
+    its JSON text."""
+    if isinstance(value, _JSONFloat):
+        return ("number", Decimal(value.text))
     if not isinstance(value, bool) and (isinstance(value, int) or isinstance(value, float) and math.isfinite(value)):
-        return ("number", Fraction(value))
+        return ("number", Decimal(value))
     return ("json", json.dumps(value, sort_keys=True, default=str))
 
 
@@ -8657,10 +8743,17 @@ def audit_transcript(path: Path, workdir: str) -> dict:
             return
         if not isinstance(line, dict):
             lists["suspect"].append({"tool": "?", "call": raw[:4000], "why": "a transcript line that is not an event"})
+            lose_place()
             return
-        events += 1
         item = line.get("item")
         event = line.get("type")
+        if isinstance(event, str) and event in EVENT_TYPES:
+            events += 1
+        else:
+            # It may hold a call the audit does not know where to find, and so a Bash call's place.
+            lists["suspect"].append({"tool": "?", "call": raw[:4000],
+                                     "why": "a transcript event of a type the audit does not know"})
+            lose_place()
         if (event == "item.started" or event == "item.updated") and item is not None:
             key = _id_key(item.get("id")) if isinstance(item, dict) and "id" in item else None
             begun = list(_tool_calls({**line, "type": "item.completed"}))
@@ -8685,13 +8778,14 @@ def audit_transcript(path: Path, workdir: str) -> dict:
         if not raw.strip():
             continue
         try:
-            line = json.loads(raw)
+            line = json.loads(raw, parse_float=_JSONFloat)
         except (ValueError, RecursionError) as e:
             # A line the audit cannot read (damaged, nested deeper than Python's parser goes, or with
-            # an integer longer than it converts) may hold a call; it is not an event, so a
-            # transcript of nothing else still fails.
+            # an integer longer than it converts) may hold a call, a Bash call's among them; it is
+            # not an event, so a transcript of nothing else still fails.
             lists["suspect"].append({"tool": "?", "call": raw[:4000],
                                      "why": f"a transcript line the audit cannot read ({type(e).__name__})"})
+            lose_place()
             continue
         try:
             audit_line(line, raw)

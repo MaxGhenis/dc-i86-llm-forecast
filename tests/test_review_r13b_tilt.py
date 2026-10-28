@@ -71,6 +71,25 @@ def _answers(draw, node, keys):
     return out
 
 
+def drawable(cdf, band, tilt, breaks) -> bool:
+    """Whether some share in the band has both probability and positive tilt, found without the
+    sampler: every float of a segment of at most NARROW_FLOATS floats, and the floats inside a wider
+    one next to its ends (where a tilt linear on the segment is largest; at b itself the tilt may
+    jump to the next piece's value)."""
+    a, b, m = dists.share_segments(GRAPH.share_grid, np.asarray(cdf, dtype=float), GRAPH.share_floor,
+                                   GRAPH.share_ceiling, *band, breaks)
+    for lo, hi, mass in zip(a, b, m):
+        if mass <= 0:
+            continue
+        if dists._float_counts(np.array([lo]), np.array([hi]))[0] <= dists.NARROW_FLOATS:
+            xs = dists._floats_in(float(lo), float(hi))
+        else:
+            xs = np.array([np.nextafter(lo, 1.0), np.nextafter(hi, 0.0)])
+        if np.any(np.asarray(tilt(xs), dtype=float) > 0):
+            return True
+    return False
+
+
 @st.composite
 def _narrow_cases(draw):
     """A node, MOCK answers and an allowed set, and a band whose ends lie within 3,000 floats of the
@@ -109,7 +128,8 @@ def test_no_tilted_draw_lies_where_the_tilt_is_0(case, u):
         x, _ = dists.sample_share_tilted(GRAPH.share_grid, np.asarray(cdf, dtype=float), GRAPH.share_floor,
                                          GRAPH.share_ceiling, *band, np.array(u), tilt, _breaks(GRAPH),
                                          log2_scale=tilt.scale)
-    except ValueError:
-        return  # no segment with both probability and tilt
+    except ValueError:  # round 14a, F1: it raised where a float had both
+        assert not drawable(cdf, band, tilt, _breaks(GRAPH)), (band, answers)
+        return
     assert np.all((x > band[0]) & (x <= band[1])), (band, x)
     assert np.all(np.asarray(tilt(x), dtype=float) > 0), (band, x, tilt(x))

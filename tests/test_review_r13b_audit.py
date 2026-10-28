@@ -162,13 +162,13 @@ def test_the_exit_trap_runs_after_claude_code_reads_where_the_shell_is(area, tmp
 @pytest.mark.parametrize("command, known", [
     ("pwd() { builtin cd MOCK-sub; builtin pwd -P; }", False),
     ("function pwd { echo /; }", False),
-    ("alias pwd='echo /'", False),
+    ("alias pwd='echo /'", True),  # round 14a, F8: the wrapper's `pwd -P` was read before the alias
     ("(pwd() { echo /; })", True),  # a subshell's function ends with it
     ("cd MOCK-sub; pwd", True),
 ])
 def test_a_pwd_function_leaves_the_next_start_unknown(area, command, known):
-    """Opus m5: Claude Code's `pwd -P` runs the call's own `pwd` function or alias, which prints what
-    it likes; the model kept the work directory as a known start."""
+    """Opus m5: Claude Code's `pwd -P` runs the call's own `pwd` function, which prints what it
+    likes; the model kept the work directory as a known start. An alias does not reach it."""
     place: dict = {}
     audit.model_call("Bash", {"command": command}, area, audit.protected_roots(), {}, place)
     assert place["known"] is known, place

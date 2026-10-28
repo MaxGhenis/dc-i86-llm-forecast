@@ -135,9 +135,66 @@ def _float_counts(a: np.ndarray, b: np.ndarray) -> np.ndarray:
                     NARROW_FLOATS + 1)
 
 
+def _positions(x: np.ndarray) -> np.ndarray:
+    """Nonnegative floats' bits, which are in their order (+ 0.0: -0.0 is 0.0)."""
+    return (np.ascontiguousarray(x, dtype=np.float64) + 0.0).view(np.int64)
+
+
+def _at(positions) -> np.ndarray:
+    return np.asarray(positions, dtype=np.int64).view(np.float64)
+
+
+def _cut_zero_ends(a, b, mass, tilt):
+    """Segments wider than NARROW_FLOATS cut to where their tilt is positive, where it is 0 on two or
+    more floats at one end (a tilt that underflows: a chance rising from 0 to 5e-324 across a
+    segment is 0 over its first half), each with the share mass of what is left (the density is
+    constant within a segment), rounded and at least the smallest float. The tilt is taken to be
+    computed in steps that keep its order, as np.interp's are, so that its positive floats inside a
+    segment are contiguous. Only floats inside the segment are read: the tilt may jump at b, the
+    next piece's value or this one's. One float at an end where it is 0 is left to
+    sample_share_tilted's clip."""
+    a, b, mass = a.copy(), b.copy(), mass.copy()
+    wide = np.flatnonzero((mass > 0) & (a >= 0) & (_float_counts(a, b) > NARROW_FLOATS))  # see _positions
+    if not len(wide):
+        return a, b, mass
+    pa, pb = _positions(a[wide]), _positions(b[wide])
+    t = [np.asarray(tilt(_at(p)), dtype=float) for p in (pa + 1, pa + 2, pb - 2, pb - 1)]
+    for i, j in enumerate(wide):
+        left = t[0][i] <= 0 and t[1][i] <= 0 and t[3][i] > 0
+        right = t[3][i] <= 0 and t[2][i] <= 0 and t[0][i] > 0
+        if not (left or right):
+            continue
+        zero, positive = (int(pa[i]) + 2, int(pb[i]) - 1) if left else (int(pb[i]) - 2, int(pa[i]) + 1)
+        while abs(positive - zero) > 1:  # the boundary between the two, by bisection
+            mid = (zero + positive) // 2
+            if float(np.asarray(tilt(_at([mid])), dtype=float)[0]) > 0:
+                positive = mid
+            else:
+                zero = mid
+        old = Fraction(float(b[j])) - Fraction(float(a[j]))
+        if left:
+            a[j] = _at([positive - 1])[0]
+        else:
+            b[j] = _at([positive])[0]
+        # Rounded, but never to 0: the segment keeps share mass where its tilt is positive.
+        kept = float(Fraction(float(mass[j])) * (Fraction(float(b[j])) - Fraction(float(a[j]))) / old)
+        mass[j] = max(kept, float(np.nextafter(0.0, 1.0)))
+    return a, b, mass
+
+
+def _frexp(q: Fraction) -> tuple[float, int]:
+    """A positive fraction as a mantissa in [1/2, 1), rounded to a float, and a power of two."""
+    e = q.numerator.bit_length() - q.denominator.bit_length()
+    e += 1 if q >= Fraction(2) ** e else 0  # now 2^(e-1) <= q < 2^e
+    while q < Fraction(2) ** (e - 1):
+        e -= 1
+    return min(float(q / Fraction(2) ** e), float(np.nextafter(1.0, 0.0))), e
+
+
 def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2_scale: int = 0):
     """Shares in (lo, hi] drawn in proportion to the forecaster's density times `tilt`, never where
-    the tilt is 0, and the tilt's mass Z, the integral of density times tilt over the band.
+    the tilt is 0, and the tilt's mass Z over the band (below: an integral over the wide segments, a
+    sum over the narrow ones' floats).
 
     `tilt(x)` is vectorized, nonnegative and linear between consecutive points of `breaks` (it may
     jump at them). The band splits at the CDF's knots and those points into segments where the
@@ -147,8 +204,10 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2
     off a float at either end where the tilt is 0 (rounding can reach such a float only from within
     one float of it). A segment with at most NARROW_FLOATS floats in it, where that rounding would
     matter, is drawn exactly over its floats: each float x stands for the shares in (the float
-    before x, x], and has that part of the segment's share mass times tilt(x). Every draw then counts
-    equally under the tilted distribution.
+    before x, x], and has that part of the segment's share mass times tilt(x), held exactly as a
+    fraction. Every draw then counts equally under the tilted distribution. A wide segment whose tilt
+    is 0 on two or more floats at an end is first cut to the floats where it is positive (see
+    `_cut_zero_ends`), so the clip at its ends has only one float to keep off.
 
     Each segment's tilted mass is held as a mantissa and a power of two (frexp), so no product
     underflows however small its factors: the segments are drawn in proportion to their masses
@@ -156,12 +215,13 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2
     whose tilted mass is more than 2^1074 times smaller than the largest gets no draws.
 
     `tilt` may return the probability times 2^log2_scale (see simulate._Tilt); Z is then divided by
-    it. Z is the segments' masses times (s_a + s_b) / 2, summed exactly as fractions and rounded once,
-    so it is 0 only if that sum is below about 2.5e-324; the draws are exact all the same. Raises
-    ValueError only if no segment has both share mass and tilt.
+    it. Z sums, exactly as fractions and rounded once, each wide segment's share mass times
+    (s_a + s_b) / 2 and each narrow segment's floats' masses (their share mass times tilt(x), a sum
+    where a wide segment's is an integral), so it is 0 only if that sum is below about 2.5e-324; the
+    draws are exact all the same. Raises ValueError only if no segment has both share mass and tilt.
     """
     a, b, mass = share_segments(grid, cdf, floor, ceiling, lo, hi, breaks)
-    mass = np.clip(mass, 0.0, None)
+    a, b, mass = _cut_zero_ends(a, b, np.clip(mass, 0.0, None), tilt)
     narrow = _float_counts(a, b) <= NARROW_FLOATS
     # The tilt's ends on a wide segment, from two interior points (exact for a linear function, and
     # blind to a jump at either end), extrapolated from where those points rounded to.
@@ -171,21 +231,25 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2
     slope = np.where(x2 > x1, (f2 - f1) / np.where(x2 > x1, x2 - x1, 1.0), 0.0)
     sa = np.clip(f1 - slope * (x1 - a), 0.0, None)
     sb = np.clip(f2 + slope * (b - x2), 0.0, None)
-    # A narrow segment's floats, each with its part of the segment's share mass times its tilt; the
-    # segment's mean tilt, exactly as a fraction, stands for (s_a + s_b) / 2.
+    # A narrow segment's floats where the tilt is positive, each with its width times its tilt, exactly
+    # as fractions (as floats, a tilt of 1e-310 times a width of 1e-17 is 0); the segment's mean
+    # tilt stands for (s_a + s_b) / 2.
     cells, means = {}, {}
     for j in np.flatnonzero(narrow & (mass > 0)):
         xs = _floats_in(float(a[j]), float(b[j]))
         ts = np.clip(np.asarray(tilt(xs), dtype=float), 0.0, None)
-        widths = np.diff(np.concatenate([[a[j]], xs]))  # exact: neighbouring floats
-        cells[j] = (xs, widths * ts)
-        means[j] = (sum((Fraction(float(w)) * Fraction(float(t)) for w, t in zip(widths, ts) if t > 0), Fraction(0))
-                    / (Fraction(float(b[j])) - Fraction(float(a[j]))))
-        sa[j] = sb[j] = float(means[j])
+        edges = [Fraction(float(a[j])), *(Fraction(float(x)) for x in xs)]
+        weights = [(edges[k + 1] - edges[k]) * Fraction(float(t)) for k, t in enumerate(ts)]
+        here = ts > 0
+        cells[j] = (xs[here], [w for w, h in zip(weights, here) if h])
+        means[j] = sum(cells[j][1], Fraction(0)) / (edges[-1] - edges[0])
+        sa[j] = sb[j] = 1.0  # unread: the draws and the masses below use the fractions
     # mass * (s_a + s_b) as mantissa * 2^expo; rel is each relative to the largest.
     fm, em = np.frexp(mass)
     ft, et = np.frexp(sa + sb)
     mant, expo = fm * ft, em + et
+    for j, mean in means.items():
+        mant[j], expo[j] = _frexp(Fraction(float(mass[j])) * 2 * mean) if mean > 0 and mass[j] > 0 else (0.0, 0)
     pos = mant > 0
     if not pos.any():
         raise ValueError(f"no probability on Yes shares in ({lo}, {hi}] where the condition can hold")
@@ -218,11 +282,15 @@ def sample_share_tilted(grid, cdf, floor, ceiling, lo, hi, u, tilt, breaks, log2
     for i, j in enumerate(kept):
         if j in cells:
             xs, weights = cells[j]
-            xs, weights = xs[weights > 0], weights[weights > 0]
             here = seg == i
-            cum = np.array([math.fsum(weights[: k + 1]) for k in range(len(weights))]) / math.fsum(weights)
+            # Each float's cumulative share of the weight, exact and then rounded (which keeps their
+            # order), so a float is drawn only where its weight is positive.
+            run, cum, total = Fraction(0), [], sum(weights, Fraction(0))
+            for w in weights:
+                run += w
+                cum.append(float(run / total))
             cum[-1] = 1.0
-            x[here] = xs[np.minimum(np.searchsorted(cum, r[here], side="right"), len(xs) - 1)]
+            x[here] = xs[np.minimum(np.searchsorted(np.array(cum), r[here], side="right"), len(xs) - 1)]
     return x, z
 
 
