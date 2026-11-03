@@ -26,6 +26,7 @@
     "send_message": 4,
     "wait": 6
    },
+   "served_pages": 151,
    "audit": {
     "events": 42,
     "tool_calls": 8,
@@ -44,7 +45,8 @@
     "suspect": [],
     "local_calls": [],
     "passed": true
-   }
+   },
+   "script_suspect": []
   },
   {
    "thread_id": "01a176e7-a037-7712-aacc-6f31b584871a",
@@ -68,6 +70,7 @@
     "wait": 17,
     "send_message": 7
    },
+   "served_pages": 181,
    "audit": {
     "events": 33,
     "tool_calls": 8,
@@ -86,7 +89,8 @@
     "suspect": [],
     "local_calls": [],
     "passed": true
-   }
+   },
+   "script_suspect": []
   },
   {
    "thread_id": "01a176e7-d3e1-7210-950a-1f6e95467a4c",
@@ -110,6 +114,7 @@
     "wait": 16,
     "send_message": 9
    },
+   "served_pages": 143,
    "audit": {
     "events": 44,
     "tool_calls": 11,
@@ -131,7 +136,8 @@
     "suspect": [],
     "local_calls": [],
     "passed": true
-   }
+   },
+   "script_suspect": []
   },
   {
    "thread_id": "01a176e8-1390-7ee0-bdef-6db6595018e3",
@@ -155,6 +161,7 @@
     "wait": 17,
     "send_message": 8
    },
+   "served_pages": 195,
    "audit": {
     "events": 31,
     "tool_calls": 9,
@@ -174,7 +181,8 @@
     "suspect": [],
     "local_calls": [],
     "passed": true
-   }
+   },
+   "script_suspect": []
   }
  ],
  "missing": [],
@@ -190,6 +198,7 @@
   "different": []
  },
  "web_calls": 36,
+ "served_pages": 670,
  "commands": 0,
  "violations": 0,
  "suspect": 0,

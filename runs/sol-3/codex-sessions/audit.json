@@ -26,6 +26,7 @@
     "wait": 5,
     "send_message": 4
    },
+   "served_pages": 195,
    "audit": {
     "events": 32,
     "tool_calls": 11,
@@ -47,7 +48,8 @@
     "suspect": [],
     "local_calls": [],
     "passed": true
-   }
+   },
+   "script_suspect": []
   },
   {
    "thread_id": "01a176e3-01a3-7920-b4fc-62f6225b2a33",
@@ -71,6 +73,7 @@
     "send_message": 7,
     "wait": 19
    },
+   "served_pages": 118,
    "audit": {
     "events": 29,
     "tool_calls": 8,
@@ -88,7 +91,8 @@
     "suspect": [],
     "local_calls": [],
     "passed": true
-   }
+   },
+   "script_suspect": []
   },
   {
    "thread_id": "01a176e3-34bc-7f22-903f-8adfb7628476",
@@ -111,6 +115,7 @@
     "wait": 10,
     "send_message": 4
    },
+   "served_pages": 204,
    "audit": {
     "events": 23,
     "tool_calls": 12,
@@ -133,7 +138,8 @@
     "suspect": [],
     "local_calls": [],
     "passed": true
-   }
+   },
+   "script_suspect": []
   },
   {
    "thread_id": "01a176e3-79eb-79d3-a44c-4a117f7df857",
@@ -157,6 +163,7 @@
     "wait": 8,
     "send_message": 5
    },
+   "served_pages": 236,
    "audit": {
     "events": 28,
     "tool_calls": 12,
@@ -176,16 +183,17 @@
      "search: site.proanimal.org 2028 2027 ballot measures strategy donations ..."
     ],
     "violations": [],
-    "suspect": [
-     {
-      "tool": "exec script",
-      "call": "text(await tools.web__run({open:[{ref_id:\"https://www.congress.gov/bill/119th-congress/house-bill/7567\"},{ref_id:\"https://www.congress.gov/bill/119th-congress/house-bill/7567/text\"},{ref_id:\"https://lim s.dccouncil.gov/Legislation/B25-0122\"}],click:[{ref_id:\"turn17view0\",id:19}],search_query:[{q:'\"Brookline\" \"foie gras\" \"approved\" \"Attorney General\"'},{q:'site.brooklinema.gov \"8.42\" \"foie\"'}],response_length:\"long\"}));\n",
-      "why": "a web call that may reach this machine or its network: a URL host `lim` other than a dotted name"
-     }
-    ],
+    "suspect": [],
     "local_calls": [],
     "passed": true
-   }
+   },
+   "script_suspect": [
+    {
+     "tool": "exec script",
+     "call": "text(await tools.web__run({open:[{ref_id:\"https://www.congress.gov/bill/119th-congress/house-bill/7567\"},{ref_id:\"https://www.congress.gov/bill/119th-congress/house-bill/7567/text\"},{ref_id:\"https://lim s.dccouncil.gov/Legislation/B25-0122\"}],click:[{ref_id:\"turn17view0\",id:19}],search_query:[{q:'\"Brookline\" \"foie gras\" \"approved\" \"Attorney General\"'},{q:'site.brooklinema.gov \"8.42\" \"foie\"'}],response_length:\"long\"}));\n",
+     "why": "a web call that may reach this machine or its network: a URL host `lim` other than a dotted name"
+    }
+   ]
   },
   {
    "thread_id": "01a176fc-a04b-7e82-91ac-e7b2495c9a43",
@@ -212,6 +220,7 @@
     "followup_task": 2,
     "send_message": 4
    },
+   "served_pages": 192,
    "audit": {
     "events": 43,
     "tool_calls": 11,
@@ -233,7 +242,8 @@
     "suspect": [],
     "local_calls": [],
     "passed": true
-   }
+   },
+   "script_suspect": []
   },
   {
    "thread_id": "01a176fd-8d46-7021-86e2-3e2463e60a44",
@@ -257,6 +267,7 @@
     "wait": 2,
     "send_message": 4
    },
+   "served_pages": 161,
    "audit": {
     "events": 19,
     "tool_calls": 9,
@@ -276,7 +287,8 @@
     "suspect": [],
     "local_calls": [],
     "passed": true
-   }
+   },
+   "script_suspect": []
   },
   {
    "thread_id": "01a176fd-adc5-7df1-9ec3-4ef1eb0fd207",
@@ -300,6 +312,7 @@
     "wait": 4,
     "send_message": 5
    },
+   "served_pages": 183,
    "audit": {
     "events": 33,
     "tool_calls": 18,
@@ -326,7 +339,8 @@
     "suspect": [],
     "local_calls": [],
     "passed": true
-   }
+   },
+   "script_suspect": []
   },
   {
    "thread_id": "01a176fd-c40a-7073-90bb-784ee73363d4",
@@ -350,6 +364,7 @@
     "send_message": 10,
     "wait": 2
    },
+   "served_pages": 171,
    "audit": {
     "events": 25,
     "tool_calls": 11,
@@ -371,7 +386,8 @@
     "suspect": [],
     "local_calls": [],
     "passed": true
-   }
+   },
+   "script_suspect": []
   }
  ],
  "missing": [],
@@ -387,6 +403,7 @@
   "different": []
  },
  "web_calls": 92,
+ "served_pages": 1460,
  "commands": 0,
  "violations": 0,
  "suspect": 1,

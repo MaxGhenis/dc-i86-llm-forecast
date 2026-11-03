@@ -177,11 +177,54 @@ def _audit_record(result) -> bool:
             and isinstance(result.get("violations"), list) and isinstance(result.get("suspect"), list))
 
 
+SESSIONS = "codex-sessions"
+
+
+def _session_audit(run_dir: Path):
+    """A Codex run's audit of every thread of every attempt, sub-agents included
+    (`scripts/audit_codex_sessions.py`): the record, None if the run has none, or "unreadable" if it is
+    not such a record, is another run's, or passes without naming its collected main thread."""
+    path = run_dir / SESSIONS / "audit.json"
+    if not path.exists():
+        return None
+    try:
+        rec = json.loads(path.read_text())
+    except (ValueError, RecursionError):
+        return "unreadable"
+    ok = (isinstance(rec, dict) and rec.get("run") == run_dir.name and isinstance(rec.get("passed"), bool)
+          and isinstance(rec.get("threads"), list)
+          and all(isinstance(t, dict) and isinstance(t.get("audit"), dict)
+                  and all(isinstance(calls, list) and all(isinstance(call, dict) for call in calls)
+                          for calls in (t["audit"].get("suspect"), t.get("script_suspect")))
+                  for t in rec["threads"]))
+    if ok and rec["passed"]:
+        ok = isinstance(rec.get("main_thread"), str) and rec["main_thread"] in {t.get("thread_id") for t in rec["threads"]}
+    return rec if ok else "unreadable"
+
+
+def _hidden_suspects(session: dict) -> list:
+    """The suspect calls of every thread but the collected main thread: its sub-agents', and every
+    thread of an earlier attempt. Only the session logs record them; the transcript audit never sees them."""
+    return [call for t in session["threads"] if t.get("thread_id") != session.get("main_thread")
+            for call in (*t["audit"]["suspect"], *t["script_suspect"])]
+
+
+def _codex_suspects(transcript: list, session: dict) -> list:
+    """A Codex run's suspect calls. Its transcript and its session logs both record the collected main
+    thread's items, so those come from whichever audit lists more. Only the session audit reads that
+    thread's scripts and the pages the web tool served it (`script_suspect`), and the other threads."""
+    main = [t for t in session["threads"] if t.get("thread_id") == session.get("main_thread")]
+    items = [call for t in main for call in t["audit"]["suspect"]]
+    scripts = [call for t in main for call in t["script_suspect"]]
+    return [*max(transcript, items, key=len), *scripts, *_hidden_suspects(session)]
+
+
 def accepted_runs(g, prompt_sha: str, allow_unaudited: bool = False, accept_prior: set[str] = frozenset(),
                   accept_suspect: set[str] = frozenset()) -> dict:
     """Runs with a parsed response, the current prompt's hash, a passing audit with no suspect calls
-    and no prior context about these questions. The operator may read a run's suspect calls, or its
-    prior context, and list it in `accept_suspect` or `accept_prior` to pool it anyway."""
+    and no prior context about these questions; a Codex run also needs a passing audit of its session
+    logs, whose other threads' suspect calls count with the rest. The operator may read a run's suspect
+    calls, or its prior context, and list it in `accept_suspect` or `accept_prior` to pool it anyway."""
     runs = {}
     for d in run_dirs():
         resp = d / "response.json"
@@ -208,9 +251,20 @@ def accepted_runs(g, prompt_sha: str, allow_unaudited: bool = False, accept_prio
             print(f"excluding {d.name}: audit failed", file=sys.stderr)
             continue
         suspect = result["suspect"] if result is not None else []
+        if runners.served_by_codex(meta):
+            session = _session_audit(d)
+            if not isinstance(session, dict):
+                print(f"excluding {d.name}: no readable audit of its session logs (run "
+                      f"scripts/audit_codex_sessions.py {d.name})", file=sys.stderr)
+                continue
+            if not session["passed"] or session.get("violations"):
+                print(f"excluding {d.name}: the audit of its session logs failed (read runs/{d.name}/{SESSIONS}/"
+                      f"audit.json)", file=sys.stderr)
+                continue
+            suspect = _codex_suspects(suspect, session)
         if suspect and d.name not in accept_suspect:
-            print(f"excluding {d.name}: {len(suspect)} suspect call(s) (read them in runs/{d.name}/audit.json; "
-                  f"--accept-suspect {d.name} to include)", file=sys.stderr)
+            print(f"excluding {d.name}: {len(suspect)} suspect call(s) (read them in runs/{d.name}/audit.json and, "
+                  f"for a Codex run, {SESSIONS}/audit.json; --accept-suspect {d.name} to include)", file=sys.stderr)
             continue
         fc = parse(g, json.loads(resp.read_text()))
         disclosed = str(fc.forecaster.get("prior_context") or "")
@@ -232,8 +286,12 @@ def cmd_simulate(args) -> int:
     for rid, m in meta.items():
         m["prior_context"] = runs[rid].forecaster.get("prior_context")
         audit_path = runners.RUNS / rid / "audit.json"
-        if audit_path.exists():
-            m["suspect_calls"] = len(json.loads(audit_path.read_text()).get("suspect", []))
+        suspect = json.loads(audit_path.read_text()).get("suspect", []) if audit_path.exists() else None
+        session = _session_audit(runners.RUNS / rid) if runners.served_by_codex(m) else None
+        if isinstance(session, dict):
+            suspect = _codex_suspects(suspect or [], session)
+        if suspect is not None:
+            m["suspect_calls"] = len(suspect)
     report.write(g, result, meta, OUTPUTS)
     print(f"pooled {len(runs)} run(s) into {OUTPUTS.relative_to(ROOT)}/")
     return 0
@@ -247,11 +305,17 @@ def cmd_prereg(args) -> int:
     for d in run_dirs():
         files += [p for p in (d / "meta.json", d / "response.md", d / "response.json", d / "audit.json",
                               d / "transcript.jsonl") if p.exists()]
+        # A Codex run's audit of its session logs (scripts/audit_codex_sessions.py) and its attempts. The
+        # logs stay out of this public repository; the audit records each one's SHA-256.
+        files += [p for p in (d / SESSIONS / "audit.json", d / SESSIONS / "attempts.json") if p.exists()]
     files += sorted(p for p in OUTPUTS.glob("*") if p.is_file())
     lines = [f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(ROOT)}" for p in files]
     PREREG.mkdir(exist_ok=True)
     sums = PREREG / "SHA256SUMS"
     sums.write_text("\n".join(lines) + "\n")
+    # The previous proof stamps the previous manifest, which its dated folder keeps. `ots stamp` will
+    # not overwrite it, and left in place it would sit beside a manifest it does not prove.
+    (PREREG / "SHA256SUMS.ots").unlink(missing_ok=True)
     print(f"{len(lines)} files hashed into {sums.relative_to(ROOT)}")
     if args.no_stamp:
         return 0

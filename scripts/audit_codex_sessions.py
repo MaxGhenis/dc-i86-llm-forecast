@@ -22,13 +22,17 @@ transcript is the collected attempt's alone. For each Codex run this script:
 4. turns each log's completed items into the `codex exec --json` items `i86 audit` reads (web searches,
    shell commands, messages) and audits them with `audit.audit_transcript`, as `i86 audit` audits a
    transcript. The collected main thread's items must match its transcript's, item by item;
-5. checks the text of every `exec` script as a web call's input: an item records only part of what a
-   `tools.web__run` call opens, and none at all for a call its cell never finished;
-6. flags any tool or record it does not read: an `exec` script tool other than `web__run` and
-   `exec_command`, a script that reaches `tools` other than by a written name, a function other than
-   the sub-agent ones and code mode's `wait`, a record, event or item of a kind it does not convert, a
-   shell command a script calls with no completed item to audit, or a command run outside the work
-   directory;
+5. reads what the items miss. An item records only part of what a `tools.web__run` call opens, nothing
+   of what a click opens, and nothing for a call whose cell never finished. So it checks every `exec`
+   script's text as a web call's input (each URL in it, each page it opens by `ref_id`, any scheme but
+   http(s)), and audits each page the web tool's replies say it served as the item of a call that
+   opened it;
+6. flags any tool or record it does not read: a script that calls a tool other than `tools.web__run`
+   and `tools.exec_command` (code mode's `tools` object also holds the lane account's connector tools,
+   such as GitHub's and ChatGPT Space's), reaches `tools` other than as `tools.<name>`, or can spell or
+   build code as it runs; a function other than the sub-agent ones and code mode's `wait`; a record,
+   event or item of a kind it does not convert; a shell command a script calls with no completed item
+   to audit; or a command run outside the work directory;
 7. writes `runs/<label>/codex-sessions/audit.json`.
 
     .venv/bin/python scripts/audit_codex_sessions.py [LABEL ...] [--lanes DIR]
@@ -59,17 +63,28 @@ from i86 import audit, runners  # noqa: E402
 RUNS = ROOT / "runs"
 LANES = Path.home() / ".subfleet" / "lanes"
 FOLDER = "codex-sessions"
-SCRIPT_TOOLS = {"web__run", "exec_command"}  # what an `exec` script may call: the web, and the shell
+# What an `exec` script may call: the web, and the shell. Codex 0.159's spec for `exec`: "All nested
+# tools are available on the global `tools` object". That object also held the lane account's
+# connector tools (GitHub, ChatGPT Space and more), as the scripts that listed `ALL_TOOLS` show.
+SCRIPT_TOOLS = {"web__run", "exec_command"}
 # The collaboration tools Codex's multi-agent role prompt names, and code mode's `wait`. Codex 0.159's
 # spec for `wait`: "`cell_id` identifies the running `exec` cell to resume"; it waits for, or with
 # `terminate` stops, a cell an `exec` call started, so the cell's calls are that script's and its items.
 FUNCTIONS = {"spawn_agent", "send_message", "followup_task", "wait_agent", "interrupt_agent", "list_agents", "wait"}
 SKIPPED_ITEMS = {"UserMessage", "SubAgentActivity"}  # the brief or a thread's message; sub-agent events
-SCRIPT_ESCAPES = re.compile(r"\brequire\s*\(|\bimport\s*\(|\bfs\.|\bDeno\.|\bprocess\.|\bBun\.")
-# `tools` reached other than as `tools.<name>`: by index, spread, destructuring, an alias or reflection,
-# any of which can call a tool by a name the script builds as it runs.
-TOOLS_UNNAMED = re.compile(r"\btools\s*(?:\?\.\s*)?\[|\.\.\.\s*tools\b|\}\s*=\s*tools\b|=\s*tools\s*(?:[;,)\n]|$)"
-                           r"|\b(?:Object|Reflect)\.\w+\s*\(\s*tools\b|\bglobalThis\b|\beval\s*\(|\bFunction\s*\(")
+# Every `tools` in a script must start a `tools.<name>`; any other (an index, a space or comment before
+# the dot, `?.`, an alias, a spread) can call a tool by a name the script builds as it runs.
+TOOLS_WORD = re.compile(r"\btools\b")
+TOOLS_NAMED = re.compile(r"\btools\.(\w+)\b")
+# Text that can spell a name (a `\u` escape), build code as the script runs, reach the global object or
+# a module, or call a runtime the isolate lacks ("no Node, no file system, no network access").
+SCRIPT_ESCAPES = re.compile(r"\\u|\beval\b|\bFunction\b|\bconstructor\b|\bglobalThis\b|\bimport\b|\brequire\b"
+                            r"|\bfs\.|\bDeno\.|\bprocess\.|\bBun\.")
+REF_ID = re.compile(r"""\bref_id\s*:\s*(["'`])(.*?)\1""")  # the page a web__run call opens, clicks in or searches
+TURN_REF = re.compile(r"turn\d+[a-z]+\d+")  # a page the web tool returned earlier, by its reference
+OTHER_SCHEME = re.compile(r"(?i)(?<![a-z0-9+.\-])(?!https?://)[a-z][a-z0-9+.\-]*://|\bfile:")
+# A page the web tool's reply says it served: "<title> (<url>) \ue200cite\ue202turn3view0\ue201".
+SERVED = re.compile(r"\(([^()\s]+)\)\s*\ue200cite\ue202turn\d+[a-z]+\d+\ue201")
 # What a 0.159 session log holds, besides the calls this script reads. Anything else is flagged.
 RECORDS = {"session_meta", "event_msg", "response_item", "turn_context", "world_state", "token_usage_record",
            "inter_agent_communication_metadata"}
@@ -188,16 +203,40 @@ def web_action(action):
         return action
     out = {k: v for k, v in action.items() if v is not None}
     if isinstance(out.get("type"), str):
-        out["type"] = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", out["type"]).lower()
+        # Each capital after the first character starts a word, as in the names both forms come from.
+        out["type"] = re.sub(r"(?<!^)(?=[A-Z])", "_", out["type"]).lower()
     return out
 
 
 def check_script(code: str, workdir: str) -> tuple[str, str]:
     """The audit's verdict on an `exec` script's text read as a web call's input: every URL in it,
     as `audit` reads a web call's (`_web_hosts`), must name another machine, and none may open this
-    repository. The script runs in a V8 isolate that reaches nothing but `tools`; what it opens on the
-    web is in its `web__run` arguments, which the item for the call records only in part."""
-    return audit.check_call("web_search", {"script": code}, Path(workdir), audit.protected_roots())
+    repository; each page it opens by `ref_id` must be a web address or a page the web tool returned;
+    and it may name no URL but http(s). What a script opens on the web is in its `web__run` arguments,
+    which the item for the call records only in part. `audit` gives a web call "web" or "suspect"."""
+    verdict, why = audit.check_call("web_search", {"script": code}, Path(workdir), audit.protected_roots())
+    if verdict != "web":
+        return verdict, why
+    for ref in REF_ID.finditer(code):
+        if not (re.match(r"(?i)https?://", ref.group(2)) or TURN_REF.fullmatch(ref.group(2))):
+            return "suspect", f"opens {ref.group(2)[:80]!r}, neither a web address nor a page the web tool returned"
+    if OTHER_SCHEME.search(code):
+        return "suspect", "names a URL other than http(s)"
+    return "web", ""
+
+
+def check_page(url: str, workdir: str) -> tuple[str, str]:
+    """The audit's verdict on a page the web tool's reply says it served, read as the item of a call
+    that opened it: a click's page, and a script's, have no item of their own."""
+    return audit.check_call("web_search", {"query": "", "url": url, "action": {"type": "open_page", "url": url}},
+                            Path(workdir), audit.protected_roots())
+
+
+def output_text(output) -> str:
+    """A tool output's text: a string, or the text of each part of a list."""
+    if isinstance(output, list):
+        return "\n".join(str(part.get("text", "")) for part in output if isinstance(part, dict))
+    return output if isinstance(output, str) else ""
 
 
 def convert(path: Path, workdir: str) -> tuple[list[dict], dict]:
@@ -205,6 +244,7 @@ def convert(path: Path, workdir: str) -> tuple[list[dict], dict]:
     lines: list[dict] = []
     found = {"items": collections.Counter(), "script_tools": collections.Counter(),
              "functions": collections.Counter(), "started_threads": [], "flags": [], "script_suspect": []}
+    served: set[str] = set()
     with path.open() as fh:
         for n, raw in enumerate(fh, 1):
             rec = json.loads(raw)
@@ -223,17 +263,29 @@ def convert(path: Path, workdir: str) -> tuple[list[dict], dict]:
                     found["flags"].append(f"line {n}: custom tool {name!r}, which this script does not read")
                     continue
                 code = str(payload.get("input", ""))
-                for tool in re.findall(r"\btools\.(\w+)", code):
-                    found["script_tools"][tool] += 1
-                    if tool not in SCRIPT_TOOLS:
-                        found["flags"].append(f"line {n}: an exec script calls tools.{tool}")
-                if SCRIPT_ESCAPES.search(code):
-                    found["flags"].append(f"line {n}: an exec script reaches past its tools: {code[:200]!r}")
-                if TOOLS_UNNAMED.search(code):
+                named = list(TOOLS_NAMED.finditer(code))
+                for match in named:
+                    found["script_tools"][match.group(1)] += 1
+                    if match.group(1) not in SCRIPT_TOOLS:
+                        found["flags"].append(f"line {n}: an exec script calls tools.{match.group(1)}")
+                starts = {match.start() for match in named}
+                if any(match.start() not in starts for match in TOOLS_WORD.finditer(code)):
                     found["flags"].append(f"line {n}: an exec script reaches tools other than by name: {code[:200]!r}")
+                if SCRIPT_ESCAPES.search(code):
+                    found["flags"].append(f"line {n}: an exec script can spell or build code as it runs, or reach "
+                                          f"past its tools: {code[:200]!r}")
                 verdict, why = check_script(code, workdir)
                 if verdict != "web":
                     found["script_suspect"].append({"tool": "exec script", "call": code[:4000], "why": why})
+            elif kind_of_record == "response_item" and sub in ("custom_tool_call_output", "function_call_output"):
+                # A script's result, or a running cell's that `wait` returns: the pages the web tool served.
+                for url in SERVED.findall(output_text(payload.get("output"))):
+                    if url in served:
+                        continue
+                    served.add(url)
+                    verdict, why = check_page(url, workdir)
+                    if verdict != "web":
+                        found["script_suspect"].append({"tool": "web page", "call": url[:4000], "why": why})
             elif kind_of_record == "response_item" and sub == "function_call":
                 name = payload.get("name")
                 found["functions"][name] += 1
@@ -275,6 +327,7 @@ def convert(path: Path, workdir: str) -> tuple[list[dict], dict]:
     if found["script_tools"]["exec_command"] > found["items"]["CommandExecution"]:
         found["flags"].append(f"{found['script_tools']['exec_command']} tools.exec_command calls in exec scripts, "
                               f"{found['items']['CommandExecution']} completed commands")
+    found["served_pages"] = len(served)
     return lines, found
 
 
@@ -394,20 +447,22 @@ def audit_run(run_dir: Path, lanes: Path) -> dict:
             report["transcript_check"] = check
             if check["only_in_transcript"] or check["only_in_log"] or check["different"]:
                 report["flags"].append(f"{kept.name} the log and the committed transcript record different calls")
-        # The audit of the items, then of the scripts' text (as web calls' inputs), as one record.
-        result["suspect"] += found["script_suspect"]
         root = root_of(tid)
+        # `audit` is the audit of the items, as a transcript's; `script_suspect` lists what only the
+        # session logs show: the scripts' text and the pages the web tool served, read as web calls.
         report["threads"].append({
             "thread_id": tid, "spawned_by": info["spawned_by"], "agent_path": info["agent_path"],
             "attempt": attempt_of.get(root), "collected": root == report["main_thread"],
             "started": info["started"], "file": f"{FOLDER}/{kept.name}", "sha256": sha256(kept),
             "items": dict(found["items"]), "script_tools": dict(found["script_tools"]),
-            "functions": dict(found["functions"]), "audit": result})
+            "functions": dict(found["functions"]), "served_pages": found["served_pages"], "audit": result,
+            "script_suspect": found["script_suspect"]})
     report["missing"] = sorted(set(report["missing"]) | (started - set(threads)))
     report["web_calls"] = sum(t["audit"]["web_calls"] for t in report["threads"])
+    report["served_pages"] = sum(t["served_pages"] for t in report["threads"])
     report["commands"] = sum(t["items"].get("CommandExecution", 0) for t in report["threads"])
     report["violations"] = sum(len(t["audit"]["violations"]) for t in report["threads"])
-    report["suspect"] = sum(len(t["audit"]["suspect"]) for t in report["threads"])
+    report["suspect"] = sum(len(t["audit"]["suspect"]) + len(t["script_suspect"]) for t in report["threads"])
     report["passed"] = (bool(report["threads"]) and report["main_thread"] is not None and not report["missing"]
                         and not report["orphans"] and not report["flags"]
                         and all(t["audit"]["passed"] for t in report["threads"]))
@@ -440,10 +495,11 @@ def main(argv: list[str] | None = None) -> int:
         helpers = sum(1 for t in r["threads"] if t["spawned_by"])
         earlier = sum(1 for t in r["threads"] if not t["collected"])
         print(f"{r['run']}: {'ok' if r['passed'] else 'FAILED'}; {len(r['threads'])} threads ({helpers} sub-agents, "
-              f"{earlier} from earlier attempts), {r['web_calls']} web calls, {r['commands']} commands, "
-              f"{r['violations']} violations, {r['suspect']} suspect, {len(r['missing'])} missing, {len(r['flags'])} flags")
+              f"{earlier} from earlier attempts), {r['web_calls']} web calls, {r['served_pages']} pages served, "
+              f"{r['commands']} commands, {r['violations']} violations, {r['suspect']} suspect, "
+              f"{len(r['missing'])} missing, {len(r['flags'])} flags")
         for t in r["threads"]:
-            for rec in t["audit"]["violations"] + t["audit"]["suspect"]:
+            for rec in t["audit"]["violations"] + t["audit"]["suspect"] + t["script_suspect"]:
                 print(f"    {t['thread_id'][:13]} {rec.get('why', '')}: {rec['call'][:160]}")
         for flag in r["flags"]:
             print(f"    {flag}")

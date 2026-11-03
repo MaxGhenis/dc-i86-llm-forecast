@@ -168,6 +168,13 @@ def read_meta(run_dir: Path) -> dict:
     return json.loads(path.read_text()) if path.exists() else {}
 
 
+def served_by_codex(meta: dict) -> bool:
+    """Whether a Codex lane served the run. Its transcript records only the main thread of the attempt
+    subfleet collected; the lane's session logs, which `scripts/audit_codex_sessions.py` audits, record
+    its sub-agents and every earlier attempt too."""
+    return str(meta.get("lane_id", "")).startswith("codex") or str(meta.get("model_served", "")).startswith("gpt")
+
+
 def write_meta(run_dir: Path, meta: dict) -> None:
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 
