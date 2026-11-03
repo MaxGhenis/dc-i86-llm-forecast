@@ -47,6 +47,7 @@ def test_a_codex_runs_session_audit_and_attempts_are_hashed_and_its_logs_are_not
     """The logs stay out of this public repository, so a manifest that listed them could not be
     checked from it; the audit, which the manifest lists, records each log's SHA-256."""
     prereg = area(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no stamp")))
     sessions = tmp_path / "runs" / "sol-1" / "codex-sessions"
     sessions.mkdir(parents=True)
     (sessions.parent / "meta.json").write_text("MOCK meta\n")

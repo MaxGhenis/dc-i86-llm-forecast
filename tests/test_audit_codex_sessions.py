@@ -297,7 +297,8 @@ def test_each_page_the_web_tool_served_is_audited(area):
     lanes, run, workdir = area
     records = [tool_output(served("https://www.example.org/MOCK") + served("http://192.168.0.1/MOCK", "turn0view1")),
                tool_output(served("https://www.example.org/MOCK", "turn1view0")
-                           + served("https://github.com/MaxGhenis/dc-i86-llm-forecast", "turn1view1"),
+                           + served("https://github.com/MaxGhenis/dc-i86-llm-forecast", "turn1view1")
+                           + served("http://192.168.0.1/MOCK", "turn1view2"),  # served again: one suspect
                            kind="function_call_output")]
     add_parent(lanes, workdir, spawned=(), records=records)
     report = acs.audit_run(run, lanes)
@@ -477,6 +478,26 @@ def test_a_sibling_work_directory_is_not_this_runs(area):
               {**root_meta(workdir + "-elsewhere", "MOCK-mention"), "note": workdir})
     report = acs.audit_run(run, lanes)
     assert [t["thread_id"] for t in report["threads"]] == [PARENT] and report["passed"]
+
+
+@pytest.mark.parametrize("result, expected", [
+    ({"returncode": 0, "stdout": '{"attempts": []}'}, {"attempts": []}),
+    ({"returncode": 1, "stdout": '{"attempts": []}'}, None),
+    ({"returncode": 0, "stdout": "MOCK not JSON"}, None),
+    (OSError("MOCK: no subfleet"), None),
+])
+def test_subfleet_is_asked_for_the_job_and_any_failure_means_no_record(monkeypatch, result, expected):
+    seen = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd)
+        if isinstance(result, Exception):
+            raise result
+        return subprocess.CompletedProcess(cmd, result["returncode"], result["stdout"], "")
+
+    monkeypatch.setattr(acs.subprocess, "run", fake_run)
+    assert acs.subfleet_record(JOB) == expected
+    assert seen == [["subfleet", "runs", "show", JOB, "--json"]]
 
 
 def test_session_logs_stay_out_of_git():

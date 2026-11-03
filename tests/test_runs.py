@@ -167,6 +167,8 @@ def test_a_codex_run_is_pooled_only_with_a_passing_audit_of_its_session_logs(are
     _codex_run(graph, "sol-script", _session(main=[CALL], script=[OTHER]), suspect=[CALL])
     unreadable = {
         "sol-bad": {"passed": True},  # not a session audit: it lists no threads
+        "sol-passed-text": {**_session(), "passed": "false"},
+        "sol-passed-missing": {k: v for k, v in _session().items() if k != "passed"},
         "sol-other-run": {**_session(), "run": "sol-ok"},
         "sol-no-main": {**_session(), "main_thread": None},
         "sol-unknown-main": {**_session(), "main_thread": "MOCK-unknown"},
