@@ -4,3 +4,9 @@ __pycache__/
 .pytest_cache/
 .hypothesis/
 .DS_Store
+# Codex session logs that scripts/audit_codex_sessions.py keeps beside each run's audit. They hold
+# Codex's own instructions, account ids and local paths, so this public repository keeps only their
+# audit (audit.json, which records each log's SHA-256) and the run's attempts (attempts.json).
+runs/*/codex-sessions/*
+!runs/*/codex-sessions/audit.json
+!runs/*/codex-sessions/attempts.json

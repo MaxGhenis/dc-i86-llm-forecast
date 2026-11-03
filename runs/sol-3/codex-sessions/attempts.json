@@ -1,0 +1,28 @@
+{
+ "job_id": "20261025-223151-i86-sol-3",
+ "accepted_attempt_id": "20261025-223151-i86-sol-3/a2",
+ "attempts": [
+  {
+   "attempt_id": "20261025-223151-i86-sol-3/a1",
+   "lane_id": "codex-6",
+   "native_session_id": "01a176e1-e8b9-7563-9321-b32060199955",
+   "state": "failed",
+   "outcome_class": "transient",
+   "outcome_detail": "Codex model at capacity: the provider asked for a different model",
+   "started_at": "2026-10-26T06:23:54.969Z",
+   "finished_at": "2026-10-26T06:38:41.748Z",
+   "model_served": "gpt-6.1-sol"
+  },
+  {
+   "attempt_id": "20261025-223151-i86-sol-3/a2",
+   "lane_id": "codex-3",
+   "native_session_id": "01a176fc-a04b-7e82-91ac-e7b2495c9a43",
+   "state": "succeeded",
+   "outcome_class": "ok",
+   "outcome_detail": "Codex completed with a deliverable",
+   "started_at": "2026-10-26T06:53:45.682Z",
+   "finished_at": "2026-10-26T07:10:49.377Z",
+   "model_served": "gpt-6.1-sol"
+  }
+ ]
+}

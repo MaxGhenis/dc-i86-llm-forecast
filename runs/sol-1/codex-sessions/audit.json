@@ -1,0 +1,377 @@
+{
+ "run": "sol-1",
+ "workdir": "/Users/maxghenis/.cache/dc-i86-llm-forecast/sol-1",
+ "threads": [
+  {
+   "thread_id": "01a176e6-c805-7673-804f-e67e6b83c79d",
+   "spawned_by": null,
+   "agent_path": null,
+   "attempt": "20261025-223010-i86-sol-1/a1",
+   "collected": false,
+   "started": "2026-10-26T06:29:58.409Z",
+   "file": "codex-sessions/rollout-2026-10-25T23-29-58-01a176e6-c805-7673-804f-e67e6b83c79d.jsonl",
+   "sha256": "4c04c84f82dd6e9c47a178e720925ebd804ad6b79adb958f5f913c47c5b16974",
+   "items": {
+    "UserMessage": 1,
+    "AgentMessage": 3,
+    "SubAgentActivity": 6,
+    "Reasoning": 14,
+    "Extension:web.search": 7
+   },
+   "script_tools": {
+    "web__run": 7
+   },
+   "functions": {
+    "spawn_agent": 3,
+    "wait": 5,
+    "followup_task": 1,
+    "send_message": 1
+   },
+   "audit": {
+    "events": 24,
+    "tool_calls": 7,
+    "web_calls": 7,
+    "urls": [
+     "https://www.onpointpolitics.us/forecast/measures/dc/initiative-86",
+     "search: \"DC Voters for Animals\" \"2023\" \"poll\" foie gras ...",
+     "search: DC Board elections 2022 general election initiative 82 yes no total votes 2022 2024 initiative 83 results ...",
+     "search: DC Initiative 86 foie gras 2026 poll election November 3 ...",
+     "search: site.dcboe.org \"2022\" \"General\" \"Turnout\" \"202\" ...",
+     "search: site.electionresults.dcboe.org \"2022\" \"INITIATIVE 82\" \"132,925\" ...",
+     "search: site.proanimal.org Denver \"85%\" poll ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   }
+  },
+  {
+   "thread_id": "01a176e7-edf2-7c73-a325-309856a2f60a",
+   "spawned_by": "01a176e6-c805-7673-804f-e67e6b83c79d",
+   "agent_path": "/root/legal",
+   "attempt": "20261025-223010-i86-sol-1/a1",
+   "collected": false,
+   "started": "2026-10-26T06:31:14.633Z",
+   "file": "codex-sessions/rollout-2026-10-25T23-31-14-01a176e7-edf2-7c73-a325-309856a2f60a.jsonl",
+   "sha256": "7f9fde4465d7793183e27be99986a96728b486ccfd03c273da98da7435224f2e",
+   "items": {
+    "Extension:web.search": 7,
+    "Reasoning": 14,
+    "SubAgentActivity": 5,
+    "AgentMessage": 1
+   },
+   "script_tools": {
+    "web__run": 7
+   },
+   "functions": {
+    "wait": 11,
+    "send_message": 5
+   },
+   "audit": {
+    "events": 22,
+    "tool_calls": 7,
+    "web_calls": 7,
+    "urls": [
+     "search: ",
+     "search: \"Initiative 86\" \"pate\" \"2026\" ...",
+     "search: DC Initiative 86 foie gras 2026 repeal council lawsuit funding fiscal October 2026 ...",
+     "search: site.congress.gov 2026 \"Save Our Bacon\" Farm Food National Security Act ...",
+     "search: site.legis.state.pa.us Pittsburgh foie gras ban 2026 preemption lawsuit ...",
+     "search: site.portland.gov \"force-fed\" \"2026\" \"December\" ...",
+     "search: site.portland.gov 2026 191 foie gras December 1 ordinance ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   }
+  },
+  {
+   "thread_id": "01a176e8-3077-7723-9c7a-51b53014af3d",
+   "spawned_by": "01a176e6-c805-7673-804f-e67e6b83c79d",
+   "agent_path": "/root/direct_outcomes",
+   "attempt": "20261025-223010-i86-sol-1/a1",
+   "collected": false,
+   "started": "2026-10-26T06:31:30.688Z",
+   "file": "codex-sessions/rollout-2026-10-25T23-31-30-01a176e8-3077-7723-9c7a-51b53014af3d.jsonl",
+   "sha256": "b8d8f4d6518195c365113fa2a1915de769bd2fad76f9a24f1b1dedf8f1718c74",
+   "items": {
+    "Reasoning": 18,
+    "Extension:web.search": 9,
+    "SubAgentActivity": 5
+   },
+   "script_tools": {
+    "web__run": 10
+   },
+   "functions": {
+    "wait": 14,
+    "send_message": 5
+   },
+   "audit": {
+    "events": 27,
+    "tool_calls": 9,
+    "web_calls": 9,
+    "urls": [
+     "https://proanimaldc.org/",
+     "search: \"From October to December 2025\" \"foie gras\" ...",
+     "search: \"Prevalence of Foie Gras\" \"Washington\" ...",
+     "search: \"Washington\" \"foie gras\" \"restaurants\" \"Pro-Animal DC\" 2026 40 60 ...",
+     "search: US foie gras ducks annual 2026 2025 350000 force fed Hudson Valley La Belle ...",
+     "search: Washington DC \"chicken liver\" \"menu\" site:lediplomatedc.com ...",
+     "search: Washington DC \"liver mousse\" menu restaurant -site:reddit.com -site:tripadvisor.com ...",
+     "search: site:notus.org foie gras DC June 2026 Colorado ...",
+     "search: site:proanimaldc.org foie gras restaurants Washington DC 2026 ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   }
+  },
+  {
+   "thread_id": "01a176e8-72dd-7b93-a2b1-ac4c076cd1a7",
+   "spawned_by": "01a176e6-c805-7673-804f-e67e6b83c79d",
+   "agent_path": "/root/spillovers",
+   "attempt": "20261025-223010-i86-sol-1/a1",
+   "collected": false,
+   "started": "2026-10-26T06:31:47.712Z",
+   "file": "codex-sessions/rollout-2026-10-25T23-31-47-01a176e8-72dd-7b93-a2b1-ac4c076cd1a7.jsonl",
+   "sha256": "f6d5e498b9a13b31c3b496594801836579e1bebc5aa0e146d8d64ec0dfdd05cb",
+   "items": {
+    "Extension:web.search": 8,
+    "SubAgentActivity": 6,
+    "Reasoning": 8
+   },
+   "script_tools": {
+    "web__run": 9
+   },
+   "functions": {
+    "wait": 9,
+    "send_message": 6
+   },
+   "audit": {
+    "events": 16,
+    "tool_calls": 8,
+    "web_calls": 8,
+    "urls": [
+     "search: \"2025 Annual Impact Report\" \"Pro-Animal\" \"2028\" ...",
+     "search: \"Fur Products Prohibition\" DC 2026 2025 status ...",
+     "search: \"Washington\" \"DC\" \"Fur Products Prohibition Act of 2025\" ...",
+     "search: Pro Animal Future 2026 ballot measures 2028 statewide ...",
+     "search: site:lims.dccouncil.gov \"Fur Products Prohibition\" ...",
+     "search: site:lims.dccouncil.gov \"food\" \"additives\" ...",
+     "search: site:proanimal.org \"2025 Annual Report\" ...",
+     "search: site:proanimal.org 2028 2027 plans campaign statewide ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   }
+  },
+  {
+   "thread_id": "01a17701-272b-7312-b403-0205bcc3075d",
+   "spawned_by": null,
+   "agent_path": null,
+   "attempt": "20261025-223010-i86-sol-1/a2",
+   "collected": true,
+   "started": "2026-10-26T06:58:48.385Z",
+   "file": "codex-sessions/rollout-2026-10-25T23-58-48-01a17701-272b-7312-b403-0205bcc3075d.jsonl",
+   "sha256": "cff752a3593defaaa15f82453cff46b82730bec43eddc7952ea4b5b84b484362",
+   "items": {
+    "UserMessage": 1,
+    "AgentMessage": 5,
+    "SubAgentActivity": 9,
+    "Reasoning": 26,
+    "Extension:web.search": 10
+   },
+   "script_tools": {
+    "web__run": 10
+   },
+   "functions": {
+    "spawn_agent": 3,
+    "wait": 4,
+    "send_message": 2,
+    "followup_task": 1
+   },
+   "audit": {
+    "events": 41,
+    "tool_calls": 10,
+    "web_calls": 10,
+    "urls": [
+     "https://downloads.regulations.gov/FSIS-2024-0010-6287/attachment_2.pdf",
+     "https://guide.michelin.com/us/en/district-of-columbia/restaurants/all-starred",
+     "https://sites.warnercnr.colostate.edu/animalhumanpolicy/ahpc-studies-document-the-prevalence-of-foie-gras-on-menus-and-denver-voters-support-of-a-foie-gras-ban/",
+     "https://stetsonlawreview.org/wp-content/uploads/2024/04/12-VanAllen.373-403.pdf",
+     "https://www.govinfo.gov/content/pkg/BILLS-119s5526rs/html/BILLS-119s5526rs.htm",
+     "search: 2026 farm bill Save Our Bacon Act October 2026 Senate House Prop 12 preemption",
+     "search: DC Initiative 86 foie gras 2026 poll October ...",
+     "search: site.dcboe.org 2022 general election turnout 202 2024 initiative 83 results ...",
+     "search: site.denverite.com 2024 fur slaughterhouse bans results 308 309 58 64 ...",
+     "search: site.electionresults.dcboe.org \"2022\" \"INITIATIVE\" \"82\" \"Yes\" ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   }
+  },
+  {
+   "thread_id": "01a17701-da07-71d3-a17b-2ca563add717",
+   "spawned_by": "01a17701-272b-7312-b403-0205bcc3075d",
+   "agent_path": "/root/legal",
+   "attempt": "20261025-223010-i86-sol-1/a2",
+   "collected": true,
+   "started": "2026-10-26T06:59:32.543Z",
+   "file": "codex-sessions/rollout-2026-10-25T23-59-32-01a17701-da07-71d3-a17b-2ca563add717.jsonl",
+   "sha256": "9cd5a4a7e72dc014bd1848e1e9f4d1a1d612167af3df4f520383e1a1f91a8105",
+   "items": {
+    "Extension:web.search": 12,
+    "Reasoning": 18,
+    "SubAgentActivity": 6,
+    "AgentMessage": 1
+   },
+   "script_tools": {
+    "web__run": 12
+   },
+   "functions": {
+    "send_message": 6,
+    "wait": 4
+   },
+   "audit": {
+    "events": 31,
+    "tool_calls": 12,
+    "web_calls": 12,
+    "urls": [
+     "https://www.govinfo.gov/content/pkg/BILLS-119hr7567eh/html/BILLS-119hr7567eh.htm",
+     "search: ",
+     "search: 'interstate commerce'",
+     "search: DC Initiative 86 force feeding birds 2026 foie gras ban lawsuit council fiscal impact ...",
+     "search: New York foie gras ban October 2026 Court Appeals stay enforcement ...",
+     "search: site.agriculture.senate.gov 2026 \"Bacon\" ...",
+     "search: site.agriculture.senate.gov September 2026 Agricultural Act Save Our Bacon ...",
+     "search: site.congress.gov 2026 Farm Food National Security Act 12006 Save Our Bacon Prop 12 ...",
+     "search: site.dccouncil.gov initiative 82 2025 2026 tipped minimum wage council repeal funding initiative 83 ...",
+     "search: site.portland.gov \"foie\" \"July 1, 2027\" ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   }
+  },
+  {
+   "thread_id": "01a17702-26db-7f60-ae6f-95d452dc6a4e",
+   "spawned_by": "01a17701-272b-7312-b403-0205bcc3075d",
+   "agent_path": "/root/direct",
+   "attempt": "20261025-223010-i86-sol-1/a2",
+   "collected": true,
+   "started": "2026-10-26T06:59:52.156Z",
+   "file": "codex-sessions/rollout-2026-10-25T23-59-52-01a17702-26db-7f60-ae6f-95d452dc6a4e.jsonl",
+   "sha256": "da1ec6b37ec283025631b91d8199d7f79de3379ecbc427c1bdc183d3213fa631",
+   "items": {
+    "Extension:web.search": 14,
+    "SubAgentActivity": 5,
+    "Reasoning": 13,
+    "AgentMessage": 1
+   },
+   "script_tools": {
+    "web__run": 14
+   },
+   "functions": {
+    "wait": 6,
+    "send_message": 5
+   },
+   "audit": {
+    "events": 28,
+    "tool_calls": 14,
+    "web_calls": 14,
+    "urls": [
+     "https://sites.warnercnr.colostate.edu/animalhumanpolicy/ahpc-studies-document-the-prevalence-of-foie-gras-on-menus-and-denver-voters-support-of-a-foie-gras-ban/",
+     "https://www.chezbillysud.com/",
+     "https://www.chezbillysud.com/menus/",
+     "search: \"AHPC\" \"Foie Gras\" \"Washington\" \"2026\" menus ...",
+     "search: \"DC\" \"liver mousse\" \"menus\" site:getbento.com ...",
+     "search: \"How many restaurants in DC sell foie gras?\" ...",
+     "search: \"Le Diplomate\" \"liver\" menu ...",
+     "search: \"Loeb\" \"chopped liver\" \"DC\" ...",
+     "search: \"Pro-Animal DC\" \"restaurants\" \"foie\" ...",
+     "search: \"Washington DC\" \"liver mousse\" menu -site:reddit.com -site:opentable.com -site:menuweb.menu -site:places.singleplatform.com ...",
+     "search: \"Washington DC\" \"p\u00e2t\u00e9\" \"banh\" \"menu\" ...",
+     "search: \"chicken liver\" \"Washington\" \"menu\" -site:allmenus.com -site:roostcafeandbistro.com -site:reddit.com -site:menuweb.menu -site:restaurantguru.com -site:places.singleplatform.com -site:zmenu.com",
+     "search: \"foie gras\" \"United States\" \"500,000\" 2026 ducks ...",
+     "search: site:lediplomatedc.com \"liver\" ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   }
+  },
+  {
+   "thread_id": "01a17702-4cd2-7143-acb6-3f37a686710e",
+   "spawned_by": "01a17701-272b-7312-b403-0205bcc3075d",
+   "agent_path": "/root/spillovers",
+   "attempt": "20261025-223010-i86-sol-1/a2",
+   "collected": true,
+   "started": "2026-10-26T07:00:01.874Z",
+   "file": "codex-sessions/rollout-2026-10-26T00-00-01-01a17702-4cd2-7143-acb6-3f37a686710e.jsonl",
+   "sha256": "2b87b51a7d12981c85ff76d071d5e3d65f34f66cd2d6a2bb6561cc19cc4ebe72",
+   "items": {
+    "Extension:web.search": 13,
+    "Reasoning": 17,
+    "SubAgentActivity": 7,
+    "AgentMessage": 1
+   },
+   "script_tools": {
+    "web__run": 13
+   },
+   "functions": {
+    "send_message": 7,
+    "wait": 4
+   },
+   "audit": {
+    "events": 31,
+    "tool_calls": 13,
+    "web_calls": 13,
+    "urls": [
+     "https://drive.google.com/uc?export=download&id=1Yatx3CNQT3AbutO6cOBlJGE20htLvzkJ",
+     "https://proanimal.org/blog/",
+     "https://proanimaloregon.org/about/",
+     "search: \"District of Columbia\" \"farm animals\" legislation ...",
+     "search: \"Fur Products Prohibition Act of 2023\" \"Nadeau\" ...",
+     "search: District Columbia trans fat ban law food additive ban 2010 ...",
+     "search: Pro Animal Future 2026 Denver foie gras 311 2028 statewide campaign ...",
+     "search: site.proanimal.org \"2028\" statewide ...",
+     "search: site:aspca.org 2026 farm animal state legislation cage free law states ...",
+     "search: site:awionline.org \"2026\" \"cage\" states bill ...",
+     "search: site:governor.wv.gov 2025 food dyes 2354 bill signed ...",
+     "search: site:lims.dccouncil.gov \"farmed\" ...",
+     "search: site:proanimal.org \"2028\" ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   }
+  }
+ ],
+ "missing": [],
+ "flags": [],
+ "orphans": [],
+ "job_id": "20261025-223010-i86-sol-1",
+ "collected_attempt": "20261025-223010-i86-sol-1/a2",
+ "main_thread": "01a17701-272b-7312-b403-0205bcc3075d",
+ "transcript_check": {
+  "items": 10,
+  "only_in_transcript": [],
+  "only_in_log": [],
+  "different": []
+ },
+ "web_calls": 80,
+ "commands": 0,
+ "violations": 0,
+ "suspect": 0,
+ "passed": true
+}

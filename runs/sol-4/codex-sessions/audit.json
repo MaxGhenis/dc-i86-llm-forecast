@@ -1,0 +1,197 @@
+{
+ "run": "sol-4",
+ "workdir": "/Users/maxghenis/.cache/dc-i86-llm-forecast/sol-4",
+ "threads": [
+  {
+   "thread_id": "01a176e6-c865-7e12-9f16-7e9cf17fe595",
+   "spawned_by": null,
+   "agent_path": null,
+   "attempt": "20261025-223151-i86-sol-4/a1",
+   "collected": true,
+   "started": "2026-10-26T06:29:58.598Z",
+   "file": "codex-sessions/rollout-2026-10-25T23-29-58-01a176e6-c865-7e12-9f16-7e9cf17fe595.jsonl",
+   "sha256": "a522e077a91f7de7b88e4aab33faba33762c37843756aaf3ab0896a1a3fb2319",
+   "items": {
+    "UserMessage": 1,
+    "AgentMessage": 5,
+    "SubAgentActivity": 10,
+    "Extension:web.search": 8,
+    "Reasoning": 29
+   },
+   "script_tools": {
+    "web__run": 8
+   },
+   "functions": {
+    "spawn_agent": 3,
+    "send_message": 4,
+    "wait": 6
+   },
+   "audit": {
+    "events": 42,
+    "tool_calls": 8,
+    "web_calls": 8,
+    "urls": [
+     "https://electionresults.dcboe.org/election_results/2022-General-Election",
+     "https://proanimaldc.org/faq/",
+     "https://sites.warnercnr.colostate.edu/animalhumanpolicy/ahpc-study-finds-strong-public-support-for-and-limited-impacts-to-restaurants-from-foie-gras-bans/",
+     "search: DC Initiative 86 foie gras 2026 poll October opposition ...",
+     "search: District Columbia farmed animal fur ban bill 2025 2026 food dyes law ...",
+     "search: site.awionline.org 2026 farm animal state laws cage-free states ...",
+     "search: site.lims.dccouncil.gov \"Fur Products\" \"2025\" ...",
+     "search: site.lims.dccouncil.gov farm animal fur sale ban 2026 ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   }
+  },
+  {
+   "thread_id": "01a176e7-a037-7712-aacc-6f31b584871a",
+   "spawned_by": "01a176e6-c865-7e12-9f16-7e9cf17fe595",
+   "agent_path": "/root/vote_legal",
+   "attempt": "20261025-223151-i86-sol-4/a1",
+   "collected": true,
+   "started": "2026-10-26T06:30:53.791Z",
+   "file": "codex-sessions/rollout-2026-10-25T23-30-53-01a176e7-a037-7712-aacc-6f31b584871a.jsonl",
+   "sha256": "5332c0200ee46c2fd8e39fba6b1b5acc9009d8d8c5773f83dd291f200f160b00",
+   "items": {
+    "Extension:web.search": 8,
+    "Reasoning": 24,
+    "SubAgentActivity": 7,
+    "AgentMessage": 1
+   },
+   "script_tools": {
+    "web__run": 10
+   },
+   "functions": {
+    "wait": 17,
+    "send_message": 7
+   },
+   "audit": {
+    "events": 33,
+    "tool_calls": 8,
+    "web_calls": 8,
+    "urls": [
+     "search: \"Dynata\" \"foie gras\" \"438\" \"question\" ...",
+     "search: \"Initiative 86\" \"poll\" \"78\" ...",
+     "search: \"foie gras\" \"Denver\" \"85%\" survey 2026 ...",
+     "search: DC Initiative 86 foie gras November 2026 poll opposition ...",
+     "search: Denver ordinance 311 2026 foie gras Denver Post opposition endorsement",
+     "search: Initiative 86 foie gras \"Council\" repeal funding lawsuit ...",
+     "search: site.dcboe.org \"2026\" \"478,800\" \"registration\" ...",
+     "search: site.supremecourt.gov \"National Pork\" \"Ross\" \"2023\" opinion ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   }
+  },
+  {
+   "thread_id": "01a176e7-d3e1-7210-950a-1f6e95467a4c",
+   "spawned_by": "01a176e6-c865-7e12-9f16-7e9cf17fe595",
+   "agent_path": "/root/restaurant_baselines",
+   "attempt": "20261025-223151-i86-sol-4/a1",
+   "collected": true,
+   "started": "2026-10-26T06:31:07.042Z",
+   "file": "codex-sessions/rollout-2026-10-25T23-31-07-01a176e7-d3e1-7210-950a-1f6e95467a4c.jsonl",
+   "sha256": "77f66556fdf7b32384218dc7afe352fa62c0fcd7443acdadd2126caf86d0d606",
+   "items": {
+    "Extension:web.search": 11,
+    "Reasoning": 32,
+    "SubAgentActivity": 9,
+    "AgentMessage": 1
+   },
+   "script_tools": {
+    "web__run": 11
+   },
+   "functions": {
+    "wait": 16,
+    "send_message": 9
+   },
+   "audit": {
+    "events": 44,
+    "tool_calls": 11,
+    "web_calls": 11,
+    "urls": [
+     "https://proanimal.org/7-facts-the-foie-gras-industry-doesnt-want-you-to-know/",
+     "https://sites.warnercnr.colostate.edu/animalhumanpolicy/ahpc-studies-document-the-prevalence-of-foie-gras-on-menus-and-denver-voters-support-of-a-foie-gras-ban/",
+     "https://www.bistro-dujour.com/",
+     "search: ",
+     "search: \"Hudson Valley Foie Gras\" \"ducks\" \"week\" site:hudsonvalleyfoiegras.com ...",
+     "search: \"Hudson Valley\" \"ducks\" \"annually\" ...",
+     "search: Bistro du Jour Washington DC official menu chicken liver mousse ...",
+     "search: Pro-Animal DC foie gras restaurants Washington DC 2026 73 menus Colorado State University study ...",
+     "search: Washington DC \"liver pate\" menu restaurant official ...",
+     "search: site:hudsonvalleyfoiegras.com ducks \"350,000\" ...",
+     "search: site:lediplomatedc.com \"liver\" ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   }
+  },
+  {
+   "thread_id": "01a176e8-1390-7ee0-bdef-6db6595018e3",
+   "spawned_by": "01a176e6-c865-7e12-9f16-7e9cf17fe595",
+   "agent_path": "/root/spillovers",
+   "attempt": "20261025-223151-i86-sol-4/a1",
+   "collected": true,
+   "started": "2026-10-26T06:31:23.285Z",
+   "file": "codex-sessions/rollout-2026-10-25T23-31-23-01a176e8-1390-7ee0-bdef-6db6595018e3.jsonl",
+   "sha256": "1d64ff0fd4c3ab2a0bb7e7a6c1a2f94bb30bd87662d26ba5bce52794789106fe",
+   "items": {
+    "Reasoning": 21,
+    "Extension:web.search": 9,
+    "SubAgentActivity": 8,
+    "AgentMessage": 1
+   },
+   "script_tools": {
+    "web__run": 9
+   },
+   "functions": {
+    "wait": 17,
+    "send_message": 8
+   },
+   "audit": {
+    "events": 31,
+    "tool_calls": 9,
+    "web_calls": 9,
+    "urls": [
+     "search: \"Fur Products Prohibition Act of 2023\" status DC ...",
+     "search: \"Washington DC\" \"fur sales\" ban bill ...",
+     "search: \"foie gras\" \"Portland\" \"June\" \"2026\" \"effective\" ...",
+     "search: Pro Animal Future 2026 Denver foie gras 311 ballot 2026 statewide 2028 ...",
+     "search: site.proanimalfuture.org 2026 2028 campaign strategy ...",
+     "search: site:dcvfa.com fur free DC 2026 bill ...",
+     "search: site:lims.dccouncil.gov \"Food\" \"dye\" \"2026\" ...",
+     "search: site:portland.gov \"foie gras\" \"2026\" \"effective\" ...",
+     "search: site:portland.gov/council/documents \"force-fed\" \"180\" \"2026\" ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   }
+  }
+ ],
+ "missing": [],
+ "flags": [],
+ "orphans": [],
+ "job_id": "20261025-223151-i86-sol-4",
+ "collected_attempt": "20261025-223151-i86-sol-4/a1",
+ "main_thread": "01a176e6-c865-7e12-9f16-7e9cf17fe595",
+ "transcript_check": {
+  "items": 8,
+  "only_in_transcript": [],
+  "only_in_log": [],
+  "different": []
+ },
+ "web_calls": 36,
+ "commands": 0,
+ "violations": 0,
+ "suspect": 0,
+ "passed": true
+}
