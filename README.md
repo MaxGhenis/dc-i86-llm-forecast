@@ -119,8 +119,10 @@ Then collect, check, audit and pool:
 
 `simulate` is deterministic given the committed responses and the seed, and each run's draws depend
 only on its own label. On arm64 (Apple silicon) with Python 3.13.9 and numpy 2.5.4,
-`.venv/bin/i86 simulate --accept-suspect sol-3` reproduces `outputs/` byte for byte; an x86_64 build
-(Python 3.13.13, the same numpy) moves three values in `summary.json` in their last digit. The `claude` backend runs Claude Code in bare mode, which skips hooks, memory and
+`.venv/bin/i86 simulate --accept-suspect sol-3` reproduces `outputs/` byte for byte. An x86_64 build
+(Python 3.13.13, the same numpy) moves three values in `summary.json` in their last digit.
+
+The `claude` backend runs Claude Code in bare mode, which skips hooks, memory and
 CLAUDE.md files but needs `ANTHROPIC_API_KEY`. A response that fails `check` is not repaired: dispatch
 a fresh run under a new label. Once any answer is in `runs/`, `dispatch` refuses a new run unless it is
 marked `--late`, and the report flags late runs.
@@ -250,31 +252,41 @@ A Codex run's transcript holds only the collected attempt's main thread. Under C
 `codex exec --json` leaves out the sub-agents a forecaster spawns, which make tool calls of their own.
 When an attempt fails, subfleet runs the brief again in the same work directory and keeps the
 transcript of the attempt it collects. The lanes' session logs record every thread, and
-`scripts/audit_codex_sessions.py` audits them. It finds every thread that worked in a run's work
+`scripts/audit_codex_sessions.py` audits them. It finds every thread that started in a run's work
 directory, audits each one's calls as `i86 audit` audits a transcript, and checks the collected main
-thread's calls against the transcript's, item by item. Each main thread must belong to one of the
-job's attempts, each attempt's session must have a log, and the transcript must record the collected
-attempt's main thread. A violation in any thread fails the run, and every thread's suspect calls
-count toward the run's, including an earlier attempt's.
+thread's calls against the transcript's, item by item.
+
+The script fails a run when a main thread belongs to none of the job's attempts or when an attempt
+that started left no log. It also fails a run whose transcript records any thread but the collected
+attempt's main thread. A thread whose `spawn_agent` calls do not match the sub-agents it started fails
+the run too, as do two logs of one thread that differ. A violation in any thread fails the run, and
+every thread's suspect calls count toward the run's, including an earlier attempt's.
 
 On these lanes the model calls the web tool from JavaScript cells, and a log's items record only part
 of what a cell opens. So the script also reads each cell's code as a web call's input and audits every
 page the web tool says it served. It flags a cell that calls any tool but the web tool and the shell,
-reaches `tools` other than by name, or can build code as it runs. It writes
-`runs/<label>/codex-sessions/audit.json`, with each log's SHA-256, and `attempts.json`, subfleet's
-record of the job's attempts. The logs themselves hold the lanes' account identifiers and local paths
-and stay out of this repository. `simulate` pools a Codex run only when this audit passes, and counts
-its suspect calls along with the transcript's.
+reaches `tools` other than by name, or names a global the cells' runtime lacks. It also flags `eval`,
+`Function`, `constructor` and other words that can build code or reach a prototype, whether a cell
+writes one out or spells it from strings. A cell that does not parse as JavaScript passes only when
+its log shows the runtime refused to compile it. The script reads cells without running them, so a
+cell that builds a name as it runs and indexes an object with it could still hide a call.
+
+The script writes `runs/<label>/codex-sessions/audit.json`, with each log's SHA-256, and
+`attempts.json`, subfleet's record of the job's attempts. The logs themselves hold the lanes' account
+identifiers and local paths, and `.gitignore` keeps them out of this repository. `simulate` pools a
+Codex run only when this audit passed. It checks that verdict against the audit's threads, the
+transcript and subfleet's record of the attempts, and counts the run's suspect calls along with the
+transcript's.
 
 The four GPT-6.1 Sol runs left 24 threads: 18 sub-agents and six main threads, since sol-1 and sol-3
 each made a second attempt after the first stopped with "Selected model is at capacity". Together
-they made 251 web calls, 39 of them in the transcripts, and no shell commands, and the web tool
-served 4,092 pages, all at addresses the audit accepts. The audit fails no call and flags one as
-suspect: a sub-agent in sol-3's first attempt asked the web tool to open
+they made 251 web calls, 39 of them in the transcripts, and no shell commands. The audit accepts the
+address of every page the web tool served them and fails no call. It flags one call as suspect: a
+sub-agent in sol-3's first attempt asked the web tool to open
 `https://lim s.dccouncil.gov/Legislation/B25-0122`, with a space inside the Council's `lims` host
 name. The audit cannot tell where a host named `lim` leads; the web tool answered "Unable to resolve
-open call due to invalid ref_id argument" and served no page for it. `simulate --accept-suspect sol-3`
-pools sol-3 into the committed outputs.
+open call due to invalid ref_id argument" and served no page for it. After reading that call, a
+reader pooled sol-3 into the committed outputs with `simulate --accept-suspect sol-3`.
 
 ## Files
 
