@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import hashlib
 import json
 import re
@@ -182,8 +183,9 @@ SESSIONS = "codex-sessions"
 
 def _session_audit(run_dir: Path):
     """A Codex run's audit of every thread of every attempt, sub-agents included
-    (`scripts/audit_codex_sessions.py`): the record, None if the run has none, or "unreadable" if it is
-    not such a record, is another run's, or passes without naming its collected main thread."""
+    (`scripts/audit_codex_sessions.py`): the record; None if the run has none; "unreadable" if it is
+    not such a record or is another run's; or, for a record that says it passed but does not hold up
+    (`_session_problem`), why not."""
     path = run_dir / SESSIONS / "audit.json"
     if not path.exists():
         return None
@@ -197,9 +199,92 @@ def _session_audit(run_dir: Path):
                   and all(isinstance(calls, list) and all(isinstance(call, dict) for call in calls)
                           for calls in (t["audit"].get("suspect"), t.get("script_suspect")))
                   for t in rec["threads"]))
-    if ok and rec["passed"]:
-        ok = isinstance(rec.get("main_thread"), str) and rec["main_thread"] in {t.get("thread_id") for t in rec["threads"]}
-    return rec if ok else "unreadable"
+    if not ok:
+        return "unreadable"
+    return (_session_problem(run_dir, rec) or rec) if rec["passed"] else rec
+
+
+def _transcript_thread(path: Path) -> str | None:
+    """The thread a `codex exec --json` transcript records (its first `thread.started` event)."""
+    if not path.is_file():
+        return None
+    for raw in path.read_text(errors="replace").split("\n"):
+        try:
+            line = json.loads(raw)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(line, dict) and line.get("type") == "thread.started":
+            return str(line.get("thread_id"))
+    return None
+
+
+def _session_problem(run_dir: Path, rec: dict) -> str | None:
+    """Why a session audit that says it passed does not hold up, or None. The gate reads the verdict
+    again rather than trust it: no flags, missing threads or orphans; each thread passed its own audit
+    with no violation; each parent among the threads, and each thread's `spawn_agent` calls as many as
+    the threads that name it as their parent; totals that add up; and as its main thread, the thread
+    the transcript records. With attempts on record (`attempts.json`), meta.json's attempt must be the
+    one subfleet accepted, with the main thread as its session; each attempt that started must name a
+    session among the threads, and each main thread must be an attempt's session. With none, the run
+    has one main thread, from the job's first attempt."""
+    threads = rec["threads"]
+    ids = {t.get("thread_id") for t in threads}
+    for key in ("flags", "missing", "orphans"):
+        if rec.get(key) != []:
+            return f"its {key!r} field is not an empty list"
+    if not all(t["audit"].get("passed") is True and t["audit"].get("violations") == [] for t in threads):
+        return "one thread's own audit failed"
+    if any(t.get("spawned_by") is not None and t["spawned_by"] not in ids for t in threads):
+        return "one thread's parent is not among its threads"
+    children = collections.Counter(t.get("spawned_by") for t in threads)
+    for t in threads:
+        calls = t["functions"].get("spawn_agent", 0) if isinstance(t.get("functions"), dict) else None
+        if calls != children[t.get("thread_id")]:
+            return "one thread's spawn_agent calls do not match the threads that name it as their parent"
+
+    def total(values) -> int | None:
+        return sum(values) if all(type(v) is int for v in values) else None
+
+    items = [t["items"] if isinstance(t.get("items"), dict) else {} for t in threads]
+    totals = {"web_calls": total([t["audit"].get("web_calls") for t in threads]),
+              "served_pages": total([t.get("served_pages") for t in threads]),
+              "commands": total([i.get("CommandExecution", 0) for i in items]),
+              "violations": 0, "suspect": sum(len(t["audit"]["suspect"]) + len(t["script_suspect"]) for t in threads)}
+    for key, value in totals.items():
+        if value is None or type(rec.get(key)) is not int or rec[key] != value:
+            return f"its {key} do not add up over its threads"
+    main = rec.get("main_thread")
+    if not isinstance(main, str) or main not in ids:
+        return "it names no main thread among its threads"
+    if main != _transcript_thread(run_dir / "transcript.jsonl"):
+        return "its main thread is not the thread the transcript records"
+    roots = {t.get("thread_id") for t in threads if t.get("spawned_by") is None}
+    collected = runners.read_meta(run_dir).get("attempt_id")
+    kept = run_dir / SESSIONS / "attempts.json"
+    if not kept.exists():
+        if len(roots) != 1:
+            return f"it has no attempts on record and {len(roots)} main threads"
+        if collected is not None and not str(collected).endswith("/a1"):
+            return f"it has no attempts on record, and the run collected {collected}, not its job's first attempt"
+        return None
+    try:
+        record = json.loads(kept.read_text())
+    except (ValueError, RecursionError):
+        return "its attempts.json does not parse"
+    listed = record.get("attempts") if isinstance(record, dict) else None
+    if not isinstance(listed, list) or not all(isinstance(a, dict) for a in listed):
+        return "its attempts.json lists no attempts"
+    if record.get("accepted_attempt_id") != collected or rec.get("collected_attempt") != collected:
+        return f"the run collected {collected}, not the attempt subfleet accepted and the audit names"
+    sessions = {a.get("attempt_id"): a.get("native_session_id") for a in listed}
+    if sessions.get(collected) != main:
+        return "its main thread is not the collected attempt's session"
+    if any((a.get("native_session_id") or a.get("started_at")) and a.get("native_session_id") not in ids
+           for a in listed):
+        return "an attempt that started names no session among its threads"
+    if not roots <= set(sessions.values()):
+        return "a main thread among its threads is no attempt's session"
+    return None
 
 
 def _hidden_suspects(session: dict) -> list:
@@ -253,8 +338,12 @@ def accepted_runs(g, prompt_sha: str, allow_unaudited: bool = False, accept_prio
         suspect = result["suspect"] if result is not None else []
         if runners.served_by_codex(meta):
             session = _session_audit(d)
-            if not isinstance(session, dict):
+            if session is None or session == "unreadable":
                 print(f"excluding {d.name}: no readable audit of its session logs (run "
+                      f"scripts/audit_codex_sessions.py {d.name})", file=sys.stderr)
+                continue
+            if isinstance(session, str):
+                print(f"excluding {d.name}: the audit of its session logs says it passed, but {session} (run "
                       f"scripts/audit_codex_sessions.py {d.name})", file=sys.stderr)
                 continue
             if not session["passed"] or session.get("violations"):
@@ -300,6 +389,12 @@ def cmd_simulate(args) -> int:
 PREREG = ROOT / "prereg"
 
 
+def _keeps(folder: Path, sums: Path, proof: Path) -> bool:
+    """Whether a dated folder holds the same manifest and proof as `prereg/`, byte for byte."""
+    return all((folder / p.name).is_file() and p.is_file() and (folder / p.name).read_bytes() == p.read_bytes()
+               for p in (sums, proof))
+
+
 def cmd_prereg(args) -> int:
     files = [ROOT / "graph" / "graph.yaml", PROMPT_PATH, TEMPLATE_PATH, *sorted((ROOT / "context").iterdir())]
     for d in run_dirs():
@@ -311,11 +406,15 @@ def cmd_prereg(args) -> int:
     files += sorted(p for p in OUTPUTS.glob("*") if p.is_file())
     lines = [f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(ROOT)}" for p in files]
     PREREG.mkdir(exist_ok=True)
-    sums = PREREG / "SHA256SUMS"
+    sums, proof = PREREG / "SHA256SUMS", PREREG / "SHA256SUMS.ots"
+    # The previous proof stamps the previous manifest. `ots stamp` will not overwrite it, and left in
+    # place it would sit beside a manifest it does not prove, so it goes; but first a dated folder must
+    # keep both, byte for byte, or the proof would survive only in git's history.
+    if proof.exists() and not any(_keeps(d, sums, proof) for d in PREREG.iterdir() if d.is_dir()):
+        raise SystemExit(f"{proof.relative_to(ROOT)} and its manifest are in no dated folder: copy both into "
+                         f"{PREREG.relative_to(ROOT)}/<date>-<name>/ and run prereg again")
     sums.write_text("\n".join(lines) + "\n")
-    # The previous proof stamps the previous manifest, which its dated folder keeps. `ots stamp` will
-    # not overwrite it, and left in place it would sit beside a manifest it does not prove.
-    (PREREG / "SHA256SUMS.ots").unlink(missing_ok=True)
+    proof.unlink(missing_ok=True)
     print(f"{len(lines)} files hashed into {sums.relative_to(ROOT)}")
     if args.no_stamp:
         return 0

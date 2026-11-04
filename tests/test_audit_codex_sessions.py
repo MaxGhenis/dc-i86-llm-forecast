@@ -1,17 +1,21 @@
 """scripts/audit_codex_sessions.py finds every Codex thread behind a run, ties each main thread to a
 subfleet attempt, keeps its log and audits it. MOCK session logs, transcripts and subfleet records in
-temporary directories; the tests never run subfleet or any other command."""
+temporary directories; the tests never run subfleet or any other command. The pooling gate
+(`cli._session_audit`) reads every audit a test writes and must reach the script's verdict."""
 
 import importlib.util
 import json
 import re
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
+
+from i86 import cli
 
 spec = importlib.util.spec_from_file_location(
     "audit_codex_sessions", Path(__file__).parent.parent / "scripts" / "audit_codex_sessions.py")
@@ -21,6 +25,7 @@ spec.loader.exec_module(acs)
 PARENT, HELPER = "MOCK-parent-thread", "MOCK-helper-thread"
 EARLIER, EARLIER_HELPER = "MOCK-earlier-thread", "MOCK-earlier-helper-thread"
 JOB = "MOCK-job-sol-1"
+CITE = "cite{}"  # the web tool's cite marker: "citeturn0view0" between private-use characters
 
 
 def write_log(lanes: Path, name: str, meta: dict, items=(), records=()) -> Path:
@@ -48,27 +53,41 @@ def web(query: str, action: dict | None = None) -> dict:
             "action": action or {"type": "search", "queries": [query]}, "results": []}
 
 
-def command(cmd: str, cwd: str) -> dict:
-    return {"type": "CommandExecution", "id": f"MOCK-{cmd}", "command": ["/bin/zsh", "-lc", cmd],
+def command(cmd: str, cwd: str, item_id: str | None = None) -> dict:
+    return {"type": "CommandExecution", "id": item_id or f"MOCK-{cmd}", "command": ["/bin/zsh", "-lc", cmd],
             "cwd": f"file://{cwd}", "status": "completed", "exit_code": 0, "aggregated_output": ""}
 
 
-def exec_call(code: str) -> dict:
-    return {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "input": code}}
+def exec_call(code: str, call_id: str | None = None) -> dict:
+    payload = {"type": "custom_tool_call", "name": "exec", "input": code}
+    return {"type": "response_item", "payload": {**payload, "call_id": call_id} if call_id else payload}
 
 
-def tool_output(text: str, kind: str = "custom_tool_call_output") -> dict:
+def tool_output(text: str, kind: str = "custom_tool_call_output", call_id: str | None = None) -> dict:
     """A script's result (or, as a function_call_output, a running cell's that `wait` returns)."""
-    return {"type": "response_item", "payload": {"type": kind, "output": [{"type": "input_text", "text": text}]}}
+    payload = {"type": kind, "output": [{"type": "input_text", "text": text}]}
+    return {"type": "response_item", "payload": {**payload, "call_id": call_id} if call_id else payload}
+
+
+def refusal(call_id: str) -> dict:
+    """A script's output as Codex reports one that V8 refused to compile."""
+    return {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": call_id, "output": [
+        {"type": "input_text", "text": "Script failed\nWall time 0.0 seconds\nOutput:\n"},
+        {"type": "input_text", "text": "Script error:\nSyntaxError: MOCK unexpected token"}]}}
 
 
 def served(url: str, ref: str = "turn0view0") -> str:
     """A page as the web tool's reply cites it."""
-    return f"MOCK page ({url})\ncite{ref} [wordlim: 200] MOCK text"
+    return f"MOCK page ({url})\n{CITE.format(ref)} [wordlim: 200] MOCK text"
 
 
-def function_call(name: str) -> dict:
-    return {"type": "response_item", "payload": {"type": "function_call", "name": name, "arguments": "{}"}}
+def function_call(name: str, namespace: str | None = "collaboration") -> dict:
+    """A function call as a session log records it: a sub-agent tool in its namespace, or (with no
+    namespace) code mode's `wait`."""
+    payload = {"type": "function_call", "name": name, "arguments": "{}"}
+    if namespace is not None:
+        payload["namespace"] = namespace
+    return {"type": "response_item", "payload": payload}
 
 
 def root_meta(workdir: str, thread: str = PARENT, timestamp: str = "2026-11-03T18:10:00Z") -> dict:
@@ -94,11 +113,21 @@ def write_transcript(run: Path, thread: str, items=()) -> None:
 @pytest.fixture
 def area(tmp_path, monkeypatch):
     """A MOCK collected Codex run with no attempts on record, its transcript, and a log from an
-    unrelated job in the lanes. No test may start a process."""
+    unrelated job in the lanes. No test may start a process, and the gate must read each audit the
+    script writes as passing exactly when the script says it passed."""
     def no_process(*args, **kwargs):
         raise AssertionError(f"the tests run no command: {args}")
 
+    script_audit = acs.audit_run
+
+    def audit_run(run_dir: Path, lanes: Path) -> dict:
+        report = script_audit(run_dir, lanes)
+        verdict = cli._session_audit(run_dir)
+        assert isinstance(verdict, dict) and verdict["passed"] is report["passed"], verdict
+        return report
+
     monkeypatch.setattr(acs.subprocess, "run", no_process)
+    monkeypatch.setattr(acs, "audit_run", audit_run)
     workdir = str(tmp_path / "work" / "sol-1")
     Path(workdir).mkdir(parents=True)
     run = tmp_path / "runs" / "sol-1"
@@ -115,19 +144,23 @@ def area(tmp_path, monkeypatch):
 
 
 def add_parent(lanes: Path, workdir: str, spawned=(HELPER,), records=(), items=None) -> Path:
+    """The collected main thread's log: its items, one `spawn_agent` call and a started event for each
+    sub-agent in `spawned`, and any other `records`."""
     items = [search("MOCK main query")] if items is None else items
-    return write_log(lanes, "rollout-MOCK-parent.jsonl", root_meta(workdir), records=records,
+    return write_log(lanes, "rollout-MOCK-parent.jsonl", root_meta(workdir),
+                     records=[*records, *[function_call("spawn_agent") for _ in spawned]],
                      items=[*items, *[started(t) for t in spawned]])
 
 
 def with_record(monkeypatch, run: Path, attempts, accepted: str = f"{JOB}/a2", collected: str = f"{JOB}/a2"):
-    """Give the MOCK run a subfleet job whose attempts are (attempt id, session, state)."""
+    """Give the MOCK run a subfleet job whose attempts are (attempt id, session, state), each of which
+    started unless a fourth item says when (None: it never did)."""
     meta = json.loads((run / "meta.json").read_text())
     meta.update(job_id=JOB, attempt_id=collected)
     (run / "meta.json").write_text(json.dumps(meta))
     record = {"job": {"accepted_attempt_id": accepted},
-              "attempts": [{"attempt_id": aid, "native_session_id": sid, "state": state, "lane_id": "codex-9"}
-                           for aid, sid, state in attempts]}
+              "attempts": [{"attempt_id": a[0], "native_session_id": a[1], "state": a[2], "lane_id": "codex-9",
+                            "started_at": a[3] if len(a) > 3 else "2026-11-03T18:00:00Z"} for a in attempts]}
     monkeypatch.setattr(acs, "subfleet_record", lambda job: record if job == JOB else None)
     return record
 
@@ -135,7 +168,7 @@ def with_record(monkeypatch, run: Path, attempts, accepted: str = f"{JOB}/a2", c
 def add_earlier_attempt(lanes: Path, workdir: str, helper_items=()) -> None:
     """A failed first attempt in the same work directory: its main thread and one sub-agent."""
     write_log(lanes, "rollout-MOCK-earlier.jsonl", root_meta(workdir, EARLIER, "2026-11-03T18:00:00Z"),
-              items=[search("MOCK earlier query"), started(EARLIER_HELPER)])
+              records=[function_call("spawn_agent")], items=[search("MOCK earlier query"), started(EARLIER_HELPER)])
     write_log(lanes, "rollout-MOCK-earlier-helper.jsonl",
               helper_meta(workdir, EARLIER_HELPER, EARLIER, "2026-11-03T18:00:30Z"),
               items=[search("MOCK earlier helper query"), *helper_items])
@@ -199,11 +232,24 @@ def test_tools_records_and_places_the_script_does_not_read_are_flagged(area):
 
 def test_code_modes_wait_and_the_sub_agent_tools_are_read(area):
     lanes, run, workdir = area
-    names = ["spawn_agent", "send_message", "followup_task", "wait_agent", "interrupt_agent", "list_agents", "wait"]
-    add_parent(lanes, workdir, spawned=(), records=[function_call(name) for name in names])
+    names = ["send_message", "followup_task", "wait_agent", "interrupt_agent", "list_agents"]
+    add_parent(lanes, workdir, records=[*[function_call(name) for name in names], function_call("wait", None)])
+    write_log(lanes, "rollout-MOCK-helper.jsonl", helper_meta(workdir), items=[search("MOCK helper query")])
     report = acs.audit_run(run, lanes)
     assert report["flags"] == [] and report["passed"]
-    assert report["threads"][0]["functions"] == {name: 1 for name in names}
+    parent = next(t for t in report["threads"] if t["thread_id"] == PARENT)
+    assert parent["functions"] == {name: 1 for name in [*names, "wait", "spawn_agent"]}
+
+
+@pytest.mark.parametrize("name, namespace", [("send_message", "MOCK_connector"), ("wait", "collaboration"),
+                                             ("spawn_agent", None)])
+def test_a_function_is_read_only_in_its_own_namespace(area, name, namespace):
+    """Review finding 8: a connector's function of the same name is not a sub-agent tool."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), records=[function_call(name, namespace)])
+    report = acs.audit_run(run, lanes)
+    assert f"function {name!r} in namespace {namespace!r}, which this script does not read" in " ".join(report["flags"])
+    assert not report["passed"]
 
 
 def test_a_rerun_after_the_lane_prunes_its_logs_audits_the_kept_copies(area):
@@ -228,6 +274,16 @@ def test_a_kept_log_is_final(area):
         acs.audit_run(run, lanes)
 
 
+@pytest.mark.parametrize("line, flag", [("{MOCK", "does not parse"), ("[1]", "is not a record")])
+def test_a_log_line_that_is_not_a_record_is_flagged(area, line, flag):
+    lanes, run, workdir = area
+    parent = add_parent(lanes, workdir, spawned=())
+    with parent.open("a") as fh:
+        fh.write(line + "\n")
+    report = acs.audit_run(run, lanes)
+    assert f"rollout-MOCK-parent.jsonl line 3 {flag}" in report["flags"] and not report["passed"]
+
+
 def test_a_plain_web_script_passes(area):
     lanes, run, workdir = area
     code = ('text(await tools.web__run({search_query: [{q: "MOCK query"}], '
@@ -236,6 +292,27 @@ def test_a_plain_web_script_passes(area):
     report = acs.audit_run(run, lanes)
     assert report["flags"] == [] and report["suspect"] == 0 and report["passed"]
     assert report["threads"][0]["script_tools"] == {"web__run": 1}
+
+
+@pytest.mark.parametrize("code", [
+    # The pattern of sol-3's keys: strings built around values, with a piece that is part of no name
+    # the script denies.
+    'const cells = ["a", "b"]; const m = {}; for (let i = 0; i < cells.length; i++) { const s = "x"; '
+    'm["yes_" + cells[i] + "|" + s] = i; m[`no_${cells[i]}`] = i - 1; } text(JSON.stringify(m))',
+    'const xs = [1, 2, 3]; text(xs[xs.length - 1], xs[0], ({a: 1})["a"])',
+    'const {a, b: [c = 1, ...rest]} = {a: 1, b: [2]}; text(a + c + rest.length)',
+    'async function f(q) { return await tools.web__run({search_query: [{q}]}); } '
+    'try { text(await f("MOCK")); } catch (e) { text(String(e)); }',
+    'class Store { get() { return 1; } } text(new Store().get(), ALL_TOOLS.map((t) => t.name).join(","))',
+    'setTimeout(() => text("MOCK"), 0); for (const [k, v] of Object.entries({MOCK: 1})) text(k, v)',
+    'const r = await tools.web__run({open: [{ref_id: `turn0view0`}, {"ref_id": "https://www.example.org/MOCK"}]}); '
+    'text(r)',
+])
+def test_a_script_that_uses_only_the_language_and_the_web_tool_passes(area, code):
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), records=[exec_call(code)])
+    report = acs.audit_run(run, lanes)
+    assert report["flags"] == [] and report["suspect"] == 0 and report["passed"]
 
 
 @pytest.mark.parametrize("code", [
@@ -258,6 +335,7 @@ def test_a_script_that_reaches_tools_other_than_by_name_is_flagged(area, code):
 
 @pytest.mark.parametrize("code", [
     "text(await \\u0074ools.mcp__codex_apps__github_fetch_file({path: 'MOCK'}))",
+    'text("\\x74ools")',
     'text((0, eval)("MOCK"))',
     'text(new Function("return MOCK")())',
     'text([].map.constructor("return MOCK")())',
@@ -268,12 +346,93 @@ def test_a_script_that_reaches_tools_other_than_by_name_is_flagged(area, code):
     'text(process.env.MOCK)',
     'text(Bun.file("MOCK"))',
     'text(fs.readFileSync("MOCK"))',
+    # Review finding 1: a getter on every object's prototype hands back the global object.
+    'Object.defineProperty(Object.prototype, "g", {get() { return this; }});\n'
+    'await g["to" + "ols"]["mcp__codex_apps__github_fetch_file"]({});',
+    'Object.__defineGetter__("g", () => 1)',
+    'text(Object.__lookupGetter__("g"))',
+    'Object.defineProperty({}, "g", {value: 1})',
+    'Object.defineProperties({}, {})',
+    'text(Object.getPrototypeOf([]))',
+    'text(Object.getOwnPropertyDescriptor(Object, "MOCK"))',
+    'text(Object.setPrototypeOf({}, null))',
+    'text(Array.prototype)',
+    'text({}.__proto__)',
+    'text(Reflect.ownKeys({}))',
+    'text(new Proxy({}, {}))',
+    'const o = {get g() { return 1; }}',
+    'class A { static set g(v) {} }',
 ])
 def test_a_script_that_can_spell_or_build_code_is_flagged(area, code):
     lanes, run, workdir = area
     add_parent(lanes, workdir, spawned=(), records=[exec_call(code)])
     report = acs.audit_run(run, lanes)
     assert any("can spell or build code" in flag for flag in report["flags"]) and not report["passed"]
+
+
+@pytest.mark.parametrize("code, problem", [
+    # Review finding 1: a split "constructor" reaches the Function constructor, which builds code.
+    ('[]["con" + "structor"]["con" + "structor"]("return to" + "ols")()["mcp__codex_apps__github_fetch_file"]({})',
+     "indexes with 'constructor'"),
+    ('const o = {}; text(await o["to" + "ols"].web__run({}))', "indexes with 'tools'"),
+    ('const o = {}; text(o[`${"__pro"}to__`])', "indexes with '__proto__'"),
+    ('const w = `to${"ols"}`; text(w)', "builds the string 'tools'"),
+    ('const o = {get ["g"]() { return 1; }}; text(o.g)', "defines an accessor"),
+    ("text(this)", "uses this"),
+    ("text(MOCK_global)", "names 'MOCK_global', which it does not declare"),
+    ("with ({}) { text(1) }", "uses with"),
+    ('const o = {}; const k = "a"; text(o[k.repeat(1)])', "a key this script cannot read"),
+    ("Error.prepareStackTrace = (e, f) => f; text(1)", "names prepareStackTrace"),
+])
+def test_a_script_that_reaches_past_its_tools_is_flagged_from_its_syntax(area, code, problem):
+    """None of these holds a word the text checks look for; the syntax tree shows what each does."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), records=[exec_call(code)])
+    report = acs.audit_run(run, lanes)
+    flags = " ".join(report["flags"])
+    assert problem in flags and "can spell or build code" not in flags and not report["passed"]
+
+
+@pytest.mark.parametrize("code, problem", [
+    ("const t = tools; text(t)", "reaches tools other than as tools.web__run or tools.exec_command"),
+    ("text(tools[0])", "reaches tools other than as tools.web__run or tools.exec_command"),
+    ("text(await tools.mcp__codex_apps__github_fetch_file({}))", "reaches tools other than as tools.web__run"),
+    ("text(await tools?.web__run({}))", "reaches tools other than as tools.web__run"),
+    ("text([].map.constructor)", "names constructor"),
+    ('text(({})["__proto__"])', "indexes with '__proto__'"),
+    ("text(eval)", "names 'eval', which it does not declare"),
+    ("text(globalThis)", "names 'globalThis', which it does not declare"),
+    ("const o = {set s(v) {}}", "defines an accessor"),
+])
+def test_the_syntax_check_reads_each_rule_on_its_own(code, problem):
+    """The text checks flag these too; the syntax check must not lean on them."""
+    src = code.encode()
+    assert any(problem in found for found in acs.cell_problems(acs._JS.parse(src), src))
+
+
+def test_a_script_too_deep_to_read_is_flagged(area):
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), records=[exec_call("text(" + " + ".join(['"MOCK"'] * 3000) + ")")])
+    report = acs.audit_run(run, lanes)
+    assert any("nests too deeply for this script to read" in flag for flag in report["flags"])
+    assert not report["passed"]
+
+
+@pytest.mark.parametrize("replies, passes", [
+    (["refused"], True), ([], False), (["result"], False), (["refused", "refused"], False),
+    (["refused elsewhere"], False), (["type error"], False), (["three parts"], False)])
+def test_a_script_the_grammar_cannot_parse_passes_only_as_one_v8_refused(area, replies, passes):
+    lanes, run, workdir = area
+    type_error, three_parts = refusal("MOCK-call"), refusal("MOCK-call")
+    type_error["payload"]["output"][1]["text"] = "Script error:\nTypeError: MOCK"
+    three_parts["payload"]["output"].append({"type": "input_text", "text": "MOCK more"})
+    outputs = {"refused": refusal("MOCK-call"), "result": tool_output("MOCK result", call_id="MOCK-call"),
+               "refused elsewhere": refusal("MOCK-other-call"), "type error": type_error, "three parts": three_parts}
+    records = [exec_call("text(await tools.web__run({)", "MOCK-call"), *[outputs[r] for r in replies]]
+    add_parent(lanes, workdir, spawned=(), records=records)
+    report = acs.audit_run(run, lanes)
+    flagged = any("does not parse as JavaScript" in flag for flag in report["flags"])
+    assert flagged is not passes and report["passed"] is passes
 
 
 @pytest.mark.parametrize("args, why", [
@@ -293,6 +452,28 @@ def test_a_scripts_urls_are_read_as_a_web_calls_input(area, args, why):
     assert report["suspect"] == 1 and report["flags"] == [] and report["passed"]
 
 
+@pytest.mark.parametrize("code, why", [
+    ('text(await tools.web__run({open: [{"ref_id": "/etc/hosts"}]}))', "neither a web address"),
+    ("text(await tools.web__run({open: [{'ref_id': '/etc/hosts'}]}))", "neither a web address"),
+    ('const ref_id = "/MOCK"; text(await tools.web__run({open: [{ref_id}]}))', "holds in a variable"),
+    ('const r = "/MOCK"; text(await tools.web__run({open: [{ref_id: r}]}))', "not one string written out"),
+    ('text(await tools.web__run({open: [{"ref_id": "file" + ":///etc/hosts"}]}))', "neither a web address"),
+    ('text(await tools.web__run({open: [{ref_id: "https://www.example.org/" + "MOCK"}]}))', "not one string"),
+    ('text(await tools.web__run({open: [{ref_id: `https://www.example.org/${"MOCK"}`}]}))', "not one string"),
+    ('const r = "/MOCK"; text(await tools.web__run({open: [{["ref_id"]: r}]}))', "not one string written out"),
+    ('const o = {}; o.ref_id = "/MOCK"; text(await tools.web__run({open: [o]}))', "a ref_id member"),
+    ('const o = {}; o["ref_id"] = "/MOCK"; text(await tools.web__run({open: [o]}))', "a ref_id member"),
+])
+def test_a_page_a_script_opens_must_be_one_string_written_out(area, code, why):
+    """Review finding 4: a `ref_id` under a quoted key, held in a variable, or built from pieces."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), records=[exec_call(code)])
+    report = acs.audit_run(run, lanes)
+    [suspect] = report["threads"][0]["script_suspect"]
+    assert suspect["tool"] == "exec script" and why in suspect["why"]
+    assert report["suspect"] == 1 and report["passed"]
+
+
 def test_each_page_the_web_tool_served_is_audited(area):
     lanes, run, workdir = area
     records = [tool_output(served("https://www.example.org/MOCK") + served("http://192.168.0.1/MOCK", "turn0view1")),
@@ -309,12 +490,63 @@ def test_each_page_the_web_tool_served_is_audited(area):
     assert report["suspect"] == 2 and report["passed"]
 
 
+def test_a_page_cited_after_an_escaped_newline_is_audited(area):
+    """Review finding 2: a script that prints the web tool's reply as JSON leaves `\\n` between a page's
+    address and its cite marker; an empty "()" names no page, and a link inside a page has a marker of
+    its own."""
+    lanes, run, workdir = area
+    text = (json.dumps(served("http://127.0.0.1:8080/MOCK"), ensure_ascii=False)
+            + f" MOCK () {CITE.format('turn1view0')} MOCK link cite9†MOCK anchor")
+    add_parent(lanes, workdir, spawned=(), records=[tool_output(text)])
+    report = acs.audit_run(run, lanes)
+    [suspect] = report["threads"][0]["script_suspect"]
+    assert (suspect["tool"], suspect["call"]) == ("web page", "http://127.0.0.1:8080/MOCK")
+    assert report["served_pages"] == 1 and report["flags"] == [] and report["passed"]
+
+
+@pytest.mark.parametrize("text", [
+    f"MOCK page {CITE.format('turn0view0')}",
+    "MOCK entityMOCK",
+    f"MOCK (https://www.example.org/MOCK) {CITE.format('MOCK')}",
+])
+def test_a_cite_marker_this_script_cannot_read_is_flagged(area, text):
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), records=[tool_output(text)])
+    report = acs.audit_run(run, lanes)
+    assert "a tool's reply holds 1 cite marker(s) this script does not read" in " ".join(report["flags"])
+    assert not report["passed"]
+
+
 def test_a_shell_command_a_script_ran_with_no_item_is_flagged(area):
     lanes, run, workdir = area
     add_parent(lanes, workdir, spawned=(), records=[exec_call('text(await tools.exec_command({cmd: "echo MOCK"}))')])
     report = acs.audit_run(run, lanes)
     assert "1 tools.exec_command calls in exec scripts, 0 completed commands" in " ".join(report["flags"])
     assert not report["passed"]
+
+
+def test_every_script_that_calls_the_shell_is_suspect(area):
+    """Review finding 3: one script runs two commands, so the counts match although the second script's
+    command has no item; each script is suspect, and the shell rules read the command it names."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir)
+    records = [exec_call('for (const c of ["true", "true"]) await tools.exec_command({cmd: c});'),
+               exec_call('await tools.exec_command({cmd: "cat ~/.ssh/MOCK_key"});')]
+    write_log(lanes, "rollout-MOCK-helper.jsonl", helper_meta(workdir), records=records,
+              items=[command("true", workdir), command("true", workdir, "MOCK-true-2")])
+    report = acs.audit_run(run, lanes)
+    helper = next(t for t in report["threads"] if t["thread_id"] == HELPER)
+    whys = [s["why"] for s in helper["script_suspect"]]
+    assert len(whys) == 2 and "only a command's completed item says what ran" in whys[0]
+    assert "calls tools.exec_command with 'cat ~/.ssh/MOCK_key' (suspect: " in whys[1]
+    assert report["flags"] == [] and report["suspect"] == 2 and report["passed"]
+
+
+def test_a_command_a_script_names_is_read_by_the_shell_rules():
+    code = f'await tools.exec_command({{cmd: "cat " + "{acs.ROOT / "README.md"}"}})'
+    tree = acs._JS.parse(code.encode())
+    verdict, why = acs.check_script(code, "/MOCK/work", tree)
+    assert verdict == "suspect" and "(violation: " in why
 
 
 def test_web_actions_compare_as_the_transcript_writes_them(area):
@@ -421,6 +653,69 @@ def test_main_threads_must_match_the_attempts(area, monkeypatch, case):
     assert not report["passed"]
 
 
+@pytest.mark.parametrize("started_at, passes", [("2026-11-03T18:00:00Z", False), (None, True)])
+def test_an_attempt_that_started_must_name_its_session(area, monkeypatch, started_at, passes):
+    """Review finding 6, gap A: an earlier attempt that started with no session on record could have
+    left threads no log is known for; one that never started has none."""
+    lanes, run, workdir = area
+    with_record(monkeypatch, run, [(f"{JOB}/a1", None, "failed", started_at), (f"{JOB}/a2", PARENT, "succeeded")])
+    add_parent(lanes, workdir, spawned=())
+    report = acs.audit_run(run, lanes)
+    assert (f"subfleet records no session for attempt {JOB}/a1, which started" in report["flags"]) is not passes
+    assert report["passed"] is passes
+
+
+@pytest.mark.parametrize("collected, passes", [(None, True), (f"{JOB}/a1", True), (f"{JOB}/a2", False)])
+def test_without_attempts_on_record_a_run_must_have_collected_its_jobs_first(area, collected, passes):
+    """Review finding 6, gap B: with no record, nothing says what an earlier attempt left."""
+    lanes, run, workdir = area
+    if collected:
+        meta = json.loads((run / "meta.json").read_text())
+        (run / "meta.json").write_text(json.dumps({**meta, "attempt_id": collected}))
+    add_parent(lanes, workdir, spawned=())
+    report = acs.audit_run(run, lanes)
+    assert any("not its job's first attempt" in flag for flag in report["flags"]) is not passes
+    assert report["passed"] is passes
+
+
+def test_two_logs_of_one_thread_must_hold_the_same_bytes(area):
+    """Review finding 6, gap D: a second log of a thread is the same log only if it matches the first."""
+    lanes, run, workdir = area
+    parent = add_parent(lanes, workdir, spawned=())
+    shutil.copyfile(parent, parent.with_name("rollout-MOCK-parent-copy.jsonl"))
+    assert acs.audit_run(run, lanes)["passed"]
+    write_log(lanes, "rollout-MOCK-parent-edited.jsonl", root_meta(workdir),
+              items=[search("MOCK main query"), search("MOCK added query")])
+    report = acs.audit_run(run, lanes)
+    assert any(f"both hold thread {PARENT}, and they differ" in flag for flag in report["flags"])
+    assert not report["passed"]
+
+
+@pytest.mark.parametrize("case, flag", [
+    ("cut", "names the work directory but does not parse"),
+    ("other record", "names the work directory but is not a session's record"),
+    ("no id", "a session in the work directory with no thread id"),
+    ("sub-agent source as a string", "gives a source this script cannot read"),
+    ("other source", "gives a source this script cannot read"),
+])
+def test_a_log_in_the_work_directory_this_script_cannot_read_is_flagged(area, case, flag):
+    """Review findings 6 (gap E) and 9: such a log is flagged, not skipped, and does not stop the audit."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    first = {
+        "cut": json.dumps({"type": "session_meta", "payload": root_meta(workdir, "MOCK-odd")})[:-10],
+        "other record": json.dumps({"type": "MOCK_record", "payload": {"cwd": workdir}}),
+        "no id": json.dumps({"type": "session_meta", "payload": {"cwd": workdir, "source": "exec"}}),
+        "sub-agent source as a string": json.dumps(
+            {"type": "session_meta", "payload": {**root_meta(workdir, "MOCK-odd"), "source": {"subagent": "MOCK"}}}),
+        "other source": json.dumps(
+            {"type": "session_meta", "payload": {**root_meta(workdir, "MOCK-odd"), "source": "MOCK-cli"}}),
+    }[case]
+    (lanes / "codex-9" / "sessions" / "2026" / "11" / "03" / "rollout-MOCK-odd.jsonl").write_text(first + "\n")
+    report = acs.audit_run(run, lanes)
+    assert any(flag in f for f in report["flags"]) and not report["passed"]
+
+
 def test_a_transcript_of_another_thread_fails(area, monkeypatch):
     lanes, run, workdir = area
     with_record(monkeypatch, run, TWO_ATTEMPTS)
@@ -452,7 +747,7 @@ def test_a_grandchild_thread_belongs_to_its_attempt(area, monkeypatch):
     lanes, run, workdir = area
     with_record(monkeypatch, run, [(f"{JOB}/a2", PARENT, "succeeded")])
     add_parent(lanes, workdir)
-    write_log(lanes, "rollout-MOCK-helper.jsonl", helper_meta(workdir),
+    write_log(lanes, "rollout-MOCK-helper.jsonl", helper_meta(workdir), records=[function_call("spawn_agent")],
               items=[search("MOCK helper query"), started("MOCK-grandchild")])
     write_log(lanes, "rollout-MOCK-grandchild.jsonl",
               helper_meta(workdir, "MOCK-grandchild", HELPER, "2026-11-03T18:11:00Z"),
@@ -463,11 +758,33 @@ def test_a_grandchild_thread_belongs_to_its_attempt(area, monkeypatch):
 
 
 def test_a_thread_whose_parent_has_no_log_fails(area):
+    """Review finding 7: the orphan's own audit passes, so only the orphan rule fails the run."""
     lanes, run, workdir = area
     add_parent(lanes, workdir, spawned=())
-    write_log(lanes, "rollout-MOCK-orphan.jsonl", helper_meta(workdir, "MOCK-orphan", "MOCK-gone"))
+    write_log(lanes, "rollout-MOCK-orphan.jsonl", helper_meta(workdir, "MOCK-orphan", "MOCK-gone"),
+              items=[search("MOCK orphan query")])
     report = acs.audit_run(run, lanes)
-    assert report["orphans"] == ["MOCK-orphan"] and not report["passed"]
+    assert report["orphans"] == ["MOCK-orphan"] and report["flags"] == [] and report["missing"] == []
+    assert all(t["audit"]["passed"] for t in report["threads"]) and not report["passed"]
+
+
+def test_a_threads_spawn_calls_must_match_the_sub_agents_it_started(area):
+    """Review finding 6: each sub-agent comes from one `spawn_agent` call."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, records=[function_call("spawn_agent")])  # two calls, one sub-agent
+    write_log(lanes, "rollout-MOCK-helper.jsonl", helper_meta(workdir), items=[search("MOCK helper query")])
+    report = acs.audit_run(run, lanes)
+    assert report["flags"] == [f"thread {PARENT} made 2 spawn_agent calls and started 1 sub-agents"]
+    assert not report["passed"]
+
+
+def test_a_sub_agent_must_name_the_thread_that_started_it(area):
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    write_log(lanes, "rollout-MOCK-helper.jsonl", helper_meta(workdir), items=[search("MOCK helper query")])
+    report = acs.audit_run(run, lanes)
+    assert report["flags"] == [f"thread {PARENT} started [], but ['{HELPER}'] name it as their parent"]
+    assert not report["passed"]
 
 
 def test_a_sibling_work_directory_is_not_this_runs(area):
@@ -540,3 +857,33 @@ def test_a_command_compares_the_same_however_it_is_quoted(argv):
 
     double = " ".join('"' + re.sub(r'(["\\])', r"\\\1", word) + '"' for word in argv)
     assert acs._calls(line(shlex.join(argv))) == acs._calls(line(double))
+
+
+@given(pieces=st.lists(st.text(max_size=6), min_size=1, max_size=4))
+@example(pieces=["\U0001f600", "\u2028\\"])
+def test_a_constant_string_folds_to_what_the_script_builds(pieces):
+    """Property: a sum of string literals, each written as JSON writes it (escapes JavaScript reads the
+    same way, surrogate pairs included), and a template of them both fold to the string they build."""
+    template = "`" + "".join("${" + json.dumps(p) + "}" for p in pieces) + "`"
+    for expr in (" + ".join(json.dumps(p) for p in pieces), template):
+        src = f"x = {expr};".encode()
+        tree = acs._JS.parse(src)
+        assert not tree.root_node.has_error
+        assignment = tree.root_node.named_children[0].named_children[0]
+        assert acs._fold(assignment.child_by_field_name("right"), src) == "".join(pieces)
+
+
+@given(data=st.data())
+def test_an_index_that_can_build_a_denied_name_is_flagged(data):
+    """Property: split a name the script denies into pieces, write at least one of them out as a string
+    and hold the rest in variables; an index with their sum, or with a template of them, is flagged."""
+    word = data.draw(st.sampled_from(sorted(acs.SPELLED)))
+    cuts = sorted(data.draw(st.sets(st.integers(1, len(word) - 1), max_size=3)))
+    pieces = [word[i:j] for i, j in zip([0, *cuts], [*cuts, len(word)])]
+    written = data.draw(st.lists(st.booleans(), min_size=len(pieces), max_size=len(pieces)).filter(any))
+    parts = [json.dumps(p) if w else f"v{i}" for i, (p, w) in enumerate(zip(pieces, written))]
+    held = "".join(f"const v{i} = {json.dumps(p)}; " for i, (p, w) in enumerate(zip(pieces, written)) if not w)
+    for key in (" + ".join(parts), "`" + "".join("${" + part + "}" for part in parts) + "`"):
+        src = f"{held}const o = {{}}; text(o[{key}]);".encode()
+        problems = acs.cell_problems(acs._JS.parse(src), src)
+        assert any(problem.startswith("indexes with") for problem in problems), (src, problems)

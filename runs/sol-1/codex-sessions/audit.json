@@ -27,7 +27,7 @@
     "followup_task": 1,
     "send_message": 1
    },
-   "served_pages": 124,
+   "served_pages": 144,
    "audit": {
     "events": 24,
     "tool_calls": 7,
@@ -295,7 +295,7 @@
     "wait": 6,
     "send_message": 5
    },
-   "served_pages": 175,
+   "served_pages": 196,
    "audit": {
     "events": 28,
     "tool_calls": 14,
@@ -386,7 +386,7 @@
   "different": []
  },
  "web_calls": 80,
- "served_pages": 1308,
+ "served_pages": 1349,
  "commands": 0,
  "violations": 0,
  "suspect": 0,

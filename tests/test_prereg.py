@@ -1,21 +1,25 @@
 """`i86 prereg` hashes what a reader can check from this repository, and replaces the previous proof
-instead of leaving it beside a manifest it does not prove. MOCK files in a temporary root."""
+instead of leaving it beside a manifest it does not prove, once a dated folder keeps both. MOCK files
+in a temporary root."""
 
 import argparse
+
+import pytest
 
 from i86 import cli, runners
 
 
-def area(tmp_path, monkeypatch):
+def area(tmp_path, monkeypatch, dated=True):
     """A MOCK repository root: map, prompt, template and brief, no runs or outputs, and a previous
-    manifest with its proof."""
+    manifest with its proof, which a dated folder keeps unless `dated` is false."""
     for rel in ("graph/graph.yaml", "prompts/forecaster.md", "schemas/template.json", "context/brief.md"):
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel).write_text(f"MOCK {rel}\n")
     prereg = tmp_path / "prereg"
-    prereg.mkdir()
-    (prereg / "SHA256SUMS").write_text("MOCK OLD MANIFEST\n")
-    (prereg / "SHA256SUMS.ots").write_text("MOCK OLD PROOF\n")
+    for folder in (prereg / "2026-01-01-MOCK", prereg) if dated else (prereg,):
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "SHA256SUMS").write_text("MOCK OLD MANIFEST\n")
+        (folder / "SHA256SUMS.ots").write_text("MOCK OLD PROOF\n")
     monkeypatch.setattr(cli, "ROOT", tmp_path)
     monkeypatch.setattr(cli, "PROMPT_PATH", tmp_path / "prompts" / "forecaster.md")
     monkeypatch.setattr(cli, "TEMPLATE_PATH", tmp_path / "schemas" / "template.json")
@@ -69,4 +73,30 @@ def test_hashing_without_a_stamp_drops_the_old_proof(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no stamp")))
     assert cli.cmd_prereg(argparse.Namespace(no_stamp=True)) == 0
     assert not (prereg / "SHA256SUMS.ots").exists()
+    assert "graph/graph.yaml" in (prereg / "SHA256SUMS").read_text()
+    assert (prereg / "2026-01-01-MOCK" / "SHA256SUMS.ots").read_text() == "MOCK OLD PROOF\n"
+
+
+@pytest.mark.parametrize("folder", [None, "MOCK OTHER PROOF\n", "MOCK OLD PROOF\n"])
+def test_a_proof_no_dated_folder_keeps_stops_prereg(tmp_path, monkeypatch, folder):
+    """Review finding 11: without a dated copy of the proof and of the manifest it stamps, byte for
+    byte, `prereg` would leave the proof only in git's history. It stops before it writes anything."""
+    prereg = area(tmp_path, monkeypatch, dated=False)
+    if folder is not None:  # a dated folder with another proof, or with this proof and another manifest
+        (prereg / "2026-01-01-MOCK").mkdir()
+        (prereg / "2026-01-01-MOCK" / "SHA256SUMS.ots").write_text(folder)
+        (prereg / "2026-01-01-MOCK" / "SHA256SUMS").write_text("MOCK OTHER MANIFEST\n")
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no stamp")))
+    with pytest.raises(SystemExit, match="in no dated folder"):
+        cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
+    assert (prereg / "SHA256SUMS.ots").read_text() == "MOCK OLD PROOF\n"
+
+
+def test_a_first_manifest_needs_no_dated_folder(tmp_path, monkeypatch):
+    prereg = area(tmp_path, monkeypatch, dated=False)
+    for name in ("SHA256SUMS", "SHA256SUMS.ots"):
+        (prereg / name).unlink()
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no stamp")))
+    assert cli.cmd_prereg(argparse.Namespace(no_stamp=True)) == 0
     assert "graph/graph.yaml" in (prereg / "SHA256SUMS").read_text()

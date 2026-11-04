@@ -164,7 +164,7 @@
     "wait": 8,
     "send_message": 7
    },
-   "served_pages": 179,
+   "served_pages": 196,
    "audit": {
     "events": 30,
     "tool_calls": 13,
@@ -204,7 +204,7 @@
   "different": []
  },
  "web_calls": 43,
- "served_pages": 654,
+ "served_pages": 671,
  "commands": 0,
  "violations": 0,
  "suspect": 0,
