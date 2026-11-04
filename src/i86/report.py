@@ -119,7 +119,10 @@ def markdown(graph: Graph, result: dict, meta: dict) -> str:
         "",
         "'Same at every cell' and 'Same at 49.5% and 50.5%' are the shares of a run's question-and-state "
         "groups whose answers are identical across cells; high values can mean copied answers. 'Suspect "
-        "calls' counts tool calls the audit flagged for reading without excluding the run. 'Prior context' "
+        "calls' counts tool calls the audit flagged for a reader to check, and `simulate` pools a run with any "
+        "only after a reader admits it with `--accept-suspect`. For a run on a Codex lane, the count also "
+        "takes in the calls that only its session logs hold: its sub-agents', its earlier attempts' and its "
+        "scripts' (`codex-sessions/audit.json`). 'Prior context' "
         "is what the forecaster reported seeing, before research, beyond the brief. 'late' runs were "
         "dispatched after other answers were in the repository; 'recovered' runs were reported lost by "
         "their supervisor, and their answer is the final message in the run's own transcript.",

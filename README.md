@@ -112,12 +112,15 @@ Then collect, check, audit and pool:
 .venv/bin/i86 recover LABEL  # take a finished agent's answer from its own transcript when subfleet reports the run lost
 .venv/bin/i86 check        # parse and validate every response
 .venv/bin/i86 audit        # check each transcript's tool calls
+.venv/bin/python scripts/audit_codex_sessions.py  # check each Codex run's sub-agents and earlier attempts
 .venv/bin/i86 simulate     # pool the accepted runs into outputs/ (see Independence for exclusions)
 .venv/bin/i86 prereg       # hash everything into prereg/SHA256SUMS and timestamp it
 ```
 
 `simulate` is deterministic given the committed responses and the seed, and each run's draws depend
-only on its own label. The `claude` backend runs Claude Code in bare mode, which skips hooks, memory and
+only on its own label. On arm64 (Apple silicon) with Python 3.13.9 and numpy 2.5.4,
+`.venv/bin/i86 simulate --accept-suspect sol-3` reproduces `outputs/` byte for byte; an x86_64 build
+(Python 3.13.13, the same numpy) moves three values in `summary.json` in their last digit. The `claude` backend runs Claude Code in bare mode, which skips hooks, memory and
 CLAUDE.md files but needs `ANTHROPIC_API_KEY`. A response that fails `check` is not repaired: dispatch
 a fresh run under a new label. Once any answer is in `runs/`, `dispatch` refuses a new run unless it is
 marked `--late`, and the report flags late runs.
@@ -243,20 +246,52 @@ anything is for a reader to judge from the call and the model's reasons before t
 The audit catches accidental and casual reads. A forecaster set on hiding one could make the read
 look like a call the model misreads, and then only the reader of the suspect calls stands in the way.
 
+A Codex run's transcript holds only the collected attempt's main thread. Under Codex CLI 0.159,
+`codex exec --json` leaves out the sub-agents a forecaster spawns, which make tool calls of their own.
+When an attempt fails, subfleet runs the brief again in the same work directory and keeps the
+transcript of the attempt it collects. The lanes' session logs record every thread, and
+`scripts/audit_codex_sessions.py` audits them. It finds every thread that worked in a run's work
+directory, audits each one's calls as `i86 audit` audits a transcript, and checks the collected main
+thread's calls against the transcript's, item by item. Each main thread must belong to one of the
+job's attempts, each attempt's session must have a log, and the transcript must record the collected
+attempt's main thread. A violation in any thread fails the run, and every thread's suspect calls
+count toward the run's, including an earlier attempt's.
+
+On these lanes the model calls the web tool from JavaScript cells, and a log's items record only part
+of what a cell opens. So the script also reads each cell's code as a web call's input and audits every
+page the web tool says it served. It flags a cell that calls any tool but the web tool and the shell,
+reaches `tools` other than by name, or can build code as it runs. It writes
+`runs/<label>/codex-sessions/audit.json`, with each log's SHA-256, and `attempts.json`, subfleet's
+record of the job's attempts. The logs themselves hold the lanes' account identifiers and local paths
+and stay out of this repository. `simulate` pools a Codex run only when this audit passes, and counts
+its suspect calls along with the transcript's.
+
+The four GPT-6.1 Sol runs left 24 threads: 18 sub-agents and six main threads, since sol-1 and sol-3
+each made a second attempt after the first stopped with "Selected model is at capacity". Together
+they made 251 web calls, 39 of them in the transcripts, and no shell commands, and the web tool
+served 4,092 pages, all at addresses the audit accepts. The audit fails no call and flags one as
+suspect: a sub-agent in sol-3's first attempt asked the web tool to open
+`https://lim s.dccouncil.gov/Legislation/B25-0122`, with a space inside the Council's `lims` host
+name. The audit cannot tell where a host named `lim` leads; the web tool answered "Unable to resolve
+open call due to invalid ref_id argument" and served no page for it. `simulate --accept-suspect sol-3`
+pools sol-3 into the committed outputs.
+
 ## Files
 
 - `graph/graph.yaml`: the map: nodes, cells, states and resolution criteria.
 - `context/`: the measure's text and the CFO's fiscal impact statement, given to every forecaster.
 - `prompts/forecaster.md`: the generated prompt; `schemas/template.json`: the response template.
 - `runs/<label>/`: each run's prompt (and the prompt as sent), metadata, verbatim answer, transcript,
-  parsed response and audit.
+  parsed response and audit; for a Codex run, `codex-sessions/` holds the audit of its session logs
+  and subfleet's record of its attempts.
+- `scripts/audit_codex_sessions.py`: the audit of Codex runs' session logs.
 - `outputs/`: pooled summaries (`summary.md`, `summary.json`, `nodes.csv`, `runs.csv`).
 - `src/i86/`: graph loading, response checks, samplers, simulator, pooling, report, runners and audit.
 - `tests/`: property-based tests of the samplers and simulator invariants; differential tests of the
   decisive-ballot formula against its closed form and of the weighted conditionals against plain
   filtering; audit cases, including every bypass found in review, the shell model against bash and zsh
   on generated programs, and the exact subset against bash, zsh, sh, dash and Claude Code's shell;
-  and the staging and pooling rules. `test_review_r3_*.py` to
+  the session-log audit on MOCK logs; and the staging and pooling rules. `test_review_r3_*.py` to
   `test_review_r6_*.py` are the independent reviews' probes, kept as regression tests. Test responses
   are labelled MOCK.
 
