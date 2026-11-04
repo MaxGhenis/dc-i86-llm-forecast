@@ -10,37 +10,41 @@ transcript is the collected attempt's alone. For each Codex run this script:
 
 1. finds every thread that started in the run's work directory: each main thread (a session
    `codex exec` started there) and every thread spawned from one, at any depth, in the lanes' logs and
-   the copies already kept (so a rerun after a lane prunes its logs gives the same audit). Each thread
-   a log says it started must have a log, each thread's `spawn_agent` calls must match the sub-agents
-   it started and the threads that name it as their parent, each thread must descend from a main thread
-   with no cycle, and two logs of one thread must hold the same bytes. A thread started there when its
-   log's first line is a session's record whose `cwd` is the work directory, however its JSON spells
-   it, once both paths are normalized. This script compares paths as text, so it misses a thread whose
-   log records another path to the folder, such as a symlink to it. A log this script cannot open is
-   flagged; so is one that names the work directory anywhere (as UTF-8, UTF-16 or UTF-32 text, with
-   JSON's escapes such as `\\/` and `\\u002f` decoded) though its first line gives no absolute path for
-   where its thread started (a path with a NUL, or a character UTF-8 cannot encode, counts as none), a
-   session in a path that names the work directory but is another, and a session there that gives no
-   thread id or a source, start time or agent path this script cannot read;
+   the copies already kept (so a rerun after a lane prunes its logs gives the same audit). This script
+   flags each folder on the way to the lanes' logs that it cannot list: a log in it could hold one of
+   the run's threads. Each thread a log says it started must have a log, each thread's `spawn_agent`
+   calls must match the sub-agents it started and the threads that name it as their parent, each thread
+   must descend from a main thread with no cycle, and two logs of one thread must hold the same bytes. A
+   thread started there when its log's first line is a session's record whose `cwd` is the work
+   directory, however its JSON spells it, once this script normalizes both paths. This script compares
+   paths as text, so it misses a thread whose log records another path to the folder, such as a symlink
+   to it. This script flags a log it cannot open, a log that names the work directory anywhere (as
+   UTF-8, UTF-16 or UTF-32 text, with JSON's escapes such as `\\/` and `\\u002f` decoded) though its
+   first line gives no absolute path for where its thread started (a path with a NUL, or a character
+   UTF-8 cannot encode, counts as none), a session in a path that names the work directory but is
+   another, and a session there that gives no thread id or a source, start time or agent path this
+   script cannot read;
 2. reads the run's attempts from subfleet (`subfleet runs show JOB --json`) and keeps them in
-   `runs/<label>/codex-sessions/attempts.json`, never replacing a different record; a kept file that is
-   not a regular file of JSON holding a list of attempts stops the script. The record must
-   list the job's attempts a1, a2 and on. Each main thread must be the session of one of them, each
-   attempt that started must name a session of its own with a log, a main thread, and the collected
-   attempt's main thread must be the thread the committed transcript records. Without attempts on
-   record, a run may have one main thread only, and must have collected its job's first attempt;
-3. copies the logs into `runs/<label>/codex-sessions/`, never replacing a different file. A kept copy
-   that is not a regular file, or that this script cannot read, stops it, and so does a
-   `codex-sessions` that is not a folder, or an `audit.json` there that is not a regular file or that
-   this script cannot write (a link is neither: it would take the writes wherever it leads).
-   `.gitignore` keeps the logs out of this public repository; `audit.json`
-   records each one's SHA-256;
+   `runs/<label>/codex-sessions/attempts.json`, as a new file where nothing is yet, never replacing a
+   different record; a kept file that is not a regular file of JSON holding a list of attempts stops the
+   script. The record must list the job's attempts a1, a2 and on. Each main thread must be the session
+   of one of them, each attempt that started must name a session of its own with a log, a main thread,
+   and the collected attempt's main thread must be the thread the committed transcript records. Without
+   attempts on record, a run may have one main thread only, and must have collected its job's first
+   attempt;
+3. copies the logs into `runs/<label>/codex-sessions/`, each as a new file where nothing is yet, never
+   replacing a different file. A kept copy that is not a regular file, or that this script cannot read,
+   stops it, and so does a `codex-sessions` that is not a folder or that this script cannot list or
+   write in, or an `audit.json` there that is not a regular file or that this script cannot write (a
+   link is neither: it would take the writes wherever it leads). `.gitignore` keeps the logs out of this
+   public repository; `audit.json` records each one's SHA-256;
 4. turns each log's completed items into the `codex exec --json` items `i86 audit` reads (web searches,
    shell commands, messages) and audits them with `audit.audit_transcript`, as `i86 audit` audits a
    transcript. The collected main thread's items must match its transcript's, item by item, as
    `audit` reads their calls (a message's line can hold one) and keys their ids (numbers exactly),
    and the transcript may hold no other line but the thread's one start, events of its turns that
-   hold no call, and items that each complete with the calls they started with;
+   hold no call, and items that each complete with the calls they started with. A line that starts or
+   updates an item may hold no call in its `message`, which `audit` counts there and then;
 5. reads what the items miss. An item records only part of what a `tools.web__run` call opens, nothing
    of what a click opens, and nothing for a call whose cell never finished. So it checks every `exec`
    script's text, and each string the script writes out or builds from constants with its escapes
@@ -63,7 +67,8 @@ transcript is the collected attempt's alone. For each Codex run this script:
    command a script calls with no completed item to audit; or a command run outside the work directory
    or in a folder this script cannot place (a relative path, a file URL that names another host, or a
    path with a `..` part);
-7. writes `runs/<label>/codex-sessions/audit.json`.
+7. writes `runs/<label>/codex-sessions/audit.json` as a new file beside the old one and renames it into
+   place, so another name of the old file (a hard link) keeps its bytes.
 
 The checks in 5 and 6 read each script without running it, so a script written to hide a call can
 still get past them: one that builds a name as it runs and indexes an object with it, say. What a
@@ -78,7 +83,10 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
 import decimal
+import errno
+import fnmatch
 import hashlib
 import json
 import math
@@ -86,7 +94,6 @@ import os
 import posixpath
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -103,6 +110,8 @@ from i86 import audit, runners  # noqa: E402
 
 RUNS = ROOT / "runs"
 LANES = Path.home() / ".subfleet" / "lanes"
+# Where a lane's Codex keeps its session logs, under the lanes folder: one folder per part.
+LOG_PARTS = ("*", "sessions", "*", "*", "*", "rollout-*.jsonl")
 FOLDER = "codex-sessions"
 # How many levels of objects and arrays a log line may nest. The Sol runs' logs nest at most 9; a line
 # that nests nearly as deep as Python's parser reads (about 10,000 here) can parse and then stop a
@@ -285,6 +294,43 @@ def _nests_deeper_than(value, levels: int) -> bool:
     return False
 
 
+def _names(folder: Path) -> list[str] | None:
+    """The names of what a folder holds; None when the path names no folder (nothing there, a file, or a
+    link that leads nowhere or in a loop). A folder this script cannot list raises OSError."""
+    try:
+        with os.scandir(folder) as entries:
+            return [entry.name for entry in entries]
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            return None
+        raise
+
+
+def session_logs(lanes: Path) -> tuple[list[Path], list[str]]:
+    """The lanes' session logs, the paths `lanes.glob("*/sessions/*/*/*/rollout-*.jsonl")` finds (hidden
+    names and links to folders among them), and each folder on the way that this script cannot list.
+    `glob` passes over such a folder without a word, but a log of the run's could be in it."""
+    folders, problems = [lanes], []
+    for part in LOG_PARTS:
+        if part == "sessions":  # a name, not a pattern: `glob` goes straight to it, as this does
+            folders = [folder / part for folder in folders]
+            continue
+        found = []
+        for folder in folders:
+            try:
+                names = _names(folder)
+            except OSError as error:
+                where = folder.relative_to(lanes).as_posix() if folder != lanes else "the lanes folder"
+                problems.append(f"{where}: this script cannot list this folder ({type(error).__name__}), and a "
+                                "log in it could hold one of the run's threads")
+                continue
+            found += [folder / name for name in names or () if fnmatch.fnmatchcase(name, part)]
+        folders = found
+    return sorted(folders), problems
+
+
 def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list[str]]:
     """Every session log among `paths` whose thread started in `workdir`, by thread id, and what the
     search could not read. A thread started there when its log's first line parses (`_record`) as a
@@ -357,9 +403,42 @@ def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list
     return found, problems
 
 
+def _create(path: Path, data: bytes) -> None:
+    """Write `data` to a new file at `path`. Anything already there, a link included, stops it
+    (FileExistsError), so it writes through nothing. A write that fails, up to the last bytes the file
+    takes when it closes, leaves no part of `data`."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)  # as `open(path, "xb")` makes one
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        raise
+
+
+def _replace(path: Path, data: bytes) -> None:
+    """Write `data` to `path` as a new file: first to a file of its own beside `path`, then renamed into
+    its place. This script never writes through what stood at `path`, so another name of that file (a
+    hard link) keeps its bytes, and `path` never holds part of `data`."""
+    fd, part = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".part")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            mask = os.umask(0)
+            os.umask(mask)
+            os.fchmod(fh.fileno(), 0o666 & ~mask)  # as `open` makes a file, not mkstemp's owner-only mode
+            fh.write(data)
+        os.replace(part, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(part)
+        raise
+
+
 def keep(src: Path, dest_dir: Path) -> Path:
     """Copy a log into the run's folder, append-only: an existing copy must be a regular file that
-    matches byte for byte. One that is not, or that cannot be read, stops the script."""
+    matches byte for byte. One that is not, or that cannot be read, stops the script, and so does a copy
+    it cannot write; it writes a new copy only where nothing stands."""
     dest = dest_dir / src.name
     if os.path.lexists(dest):
         if not os.path.isfile(dest):  # a folder, a pipe that would block, or a link to nothing
@@ -372,8 +451,12 @@ def keep(src: Path, dest_dir: Path) -> Path:
         if differs:
             raise SystemExit(f"{dest} differs from {src}; the kept copy is final")
         return dest
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(src, dest)
+    try:
+        data = src.read_bytes()
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        _create(dest, data)
+    except OSError as error:
+        raise SystemExit(f"this script cannot keep {src} as {dest} ({type(error).__name__})") from None
     return dest
 
 
@@ -418,8 +501,11 @@ def attempts(run_dir: Path, meta: dict) -> dict | None:
         return old
     if fresh is None:
         return None
-    kept.parent.mkdir(parents=True, exist_ok=True)
-    kept.write_text(json.dumps(fresh, indent=1) + "\n")
+    try:
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        _create(kept, (json.dumps(fresh, indent=1) + "\n").encode())
+    except OSError as error:
+        raise SystemExit(f"this script cannot write {kept} ({type(error).__name__})") from None
     return fresh
 
 
@@ -1074,13 +1160,14 @@ def _id_and_calls(line: dict) -> tuple:
 
 def check_transcript(transcript: Path, log_lines: list[dict]) -> dict:
     """Whether the committed transcript records the same calls as the main thread's log, item by item,
-    and no other line from which `audit` reads a call. Each completed item is compared by its id. An
-    item started or updated must complete with the calls it started with, paired as `audit` pairs
-    them: `audit` audits one that never completes as it started. Every other line must be the thread's
-    one start or a turn's event, from which `audit` reads no call. A line that breaks these rules (an
-    item that is not an object, an event of another type or of none, a tool call in a message) or that
-    this script cannot read could hold a call, so it counts, by its number, as one only the transcript
-    holds."""
+    and no other line from which `audit` reads a call. Each completed item is compared by its id, with
+    any call in its line's `message`. An item started or updated must complete with the calls it
+    started with, paired as `audit` pairs them: `audit` audits one that never completes as it started.
+    Its line may hold no call in a `message`, which `audit` audits there and then, as a call of its own.
+    Every other line must be the thread's one start or a turn's event, from which `audit` reads no call.
+    A line that breaks these rules (an item that is not an object, an event of another type or of none,
+    a tool call in a message) or that this script cannot read could hold a call, so it counts, by its
+    number, as one only the transcript holds."""
     unread: list[int] = []
     completed: list[dict] = []
     begun: list[tuple] = []  # items started or updated and not yet completed: (id, calls, line number)
@@ -1094,6 +1181,8 @@ def check_transcript(transcript: Path, log_lines: list[dict]) -> dict:
             if same:
                 begun.pop(same[0])
         elif event in ("item.started", "item.updated") and isinstance(item, dict):
+            if list(audit._tool_calls(line)):  # a call in the line's `message`; a start's item yields none
+                unread.append(number)
             key, calls = _id_and_calls({**line, "type": "item.completed"})
             same = [i for i, (k, earlier, _) in enumerate(begun) if k == key and audit._covers(calls, earlier)]
             if event == "item.updated" and same:
@@ -1109,7 +1198,7 @@ def check_transcript(transcript: Path, log_lines: list[dict]) -> dict:
     mine, theirs = _calls(log_lines), _calls(completed)
     return {"items": sum(len(calls) for _, calls in theirs.values()),
             "only_in_transcript": [*sorted(name for key, (name, _) in theirs.items() if key not in mine),
-                                   *(f"line {n}" for n in sorted(unread))],
+                                   *(f"line {n}" for n in sorted(set(unread)))],
             "only_in_log": sorted(name for key, (name, _) in mine.items() if key not in theirs),
             "different": sorted(name for key, (name, calls) in theirs.items()
                                 if key in mine and calls != mine[key][1])}
@@ -1145,13 +1234,21 @@ def audit_run(run_dir: Path, lanes: Path) -> dict:
     out = run_dir / FOLDER / "audit.json"
     if os.path.islink(out) or os.path.lexists(out) and not os.path.isfile(out):  # a folder, or a pipe that would block
         raise SystemExit(f"{out} is not a regular file, so this script will not write the audit over it")
+    try:
+        kept_names = _names(run_dir / FOLDER) or []
+    except OSError as error:
+        raise SystemExit(f"this script cannot list {run_dir / FOLDER} ({type(error).__name__}); the kept copies "
+                         "are final") from None
     workdir = meta.get("workdir")
-    logs = [*sorted(lanes.glob("*/sessions/*/*/*/rollout-*.jsonl")), *sorted((run_dir / FOLDER).glob("rollout-*.jsonl"))]
+    lane_logs, unlisted = session_logs(lanes)
+    logs = [*lane_logs, *sorted(run_dir / FOLDER / name for name in kept_names
+                                if fnmatch.fnmatchcase(name, LOG_PARTS[-1]))]
     if isinstance(workdir, str) and workdir.startswith("/"):
         threads, problems = find_threads(logs, workdir)
     else:
         threads = {}
         problems = [f"the run gives {json.dumps(workdir)[:200]} as its work directory, not an absolute path"]
+    problems = [*unlisted, *problems]
     roots = sorted((t for t, v in threads.items() if v["spawned_by"] is None), key=lambda t: threads[t]["started"] or "")
     report = {"run": run_dir.name, "workdir": workdir, "threads": [], "missing": [], "flags": list(problems),
               "orphans": sorted(t for t, v in threads.items() if v["spawned_by"] and v["spawned_by"] not in threads)}
@@ -1265,10 +1362,12 @@ def audit_run(run_dir: Path, lanes: Path) -> dict:
     report["passed"] = (bool(report["threads"]) and report["main_thread"] is not None and not report["missing"]
                         and not report["orphans"] and not report["flags"]
                         and all(t["audit"]["passed"] for t in report["threads"]))
-    (run_dir / FOLDER).mkdir(parents=True, exist_ok=True)
     try:
-        out.write_text(json.dumps(report, indent=1) + "\n")
-    except OSError as error:  # a file the system will not let this script write
+        (run_dir / FOLDER).mkdir(parents=True, exist_ok=True)
+        if os.path.lexists(out) and not os.access(out, os.W_OK):  # a file the system will not let this script write
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(out))
+        _replace(out, (json.dumps(report, indent=1) + "\n").encode())
+    except OSError as error:
         raise SystemExit(f"this script cannot write {out} ({type(error).__name__})") from None
     return report
 

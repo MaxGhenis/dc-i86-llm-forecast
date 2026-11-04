@@ -102,6 +102,40 @@ def test_a_run_file_prereg_cannot_read_stops_it(tmp_path, monkeypatch, name):
     assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
 
 
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches any folder")
+def test_a_sessions_folder_prereg_cannot_search_stops_it(tmp_path, monkeypatch):
+    """Review 8: prereg cannot tell what sits in a run's `codex-sessions` folder when it may not search
+    it, and the folder could hold the audit and the attempts it hashes, so it stops, by name, before it
+    writes a manifest that leaves them out."""
+    prereg = area(tmp_path, monkeypatch)
+    sessions = tmp_path / "runs" / "sol-1" / "codex-sessions"
+    sessions.mkdir(parents=True)
+    (sessions.parent / "meta.json").write_text("MOCK meta\n")
+    (sessions / "audit.json").write_text("MOCK\n")
+    sessions.chmod(0o600)
+    match = r"prereg cannot read runs/sol-1/codex-sessions/audit\.json \(PermissionError\)"
+    try:
+        with pytest.raises(SystemExit, match=match):
+            cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+    finally:
+        sessions.chmod(0o700)
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
+
+
+def test_a_sessions_entry_that_is_a_file_holds_nothing_for_prereg_to_hash(tmp_path, monkeypatch):
+    """Nothing can sit below a file, so prereg finds no audit or attempts in a run whose `codex-sessions`
+    is a file, and hashes the run's other files."""
+    prereg = area(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no stamp")))
+    run = tmp_path / "runs" / "sol-1"
+    run.mkdir(parents=True)
+    (run / "meta.json").write_text("MOCK meta\n")
+    (run / "codex-sessions").write_text("MOCK not a folder\n")
+    assert cli.cmd_prereg(argparse.Namespace(no_stamp=True)) == 0
+    manifest = (prereg / "SHA256SUMS").read_text()
+    assert "  runs/sol-1/meta.json\n" in manifest and "codex-sessions" not in manifest
+
 def test_hashing_without_a_stamp_drops_the_old_proof(tmp_path, monkeypatch):
     prereg = area(tmp_path, monkeypatch)
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no stamp")))

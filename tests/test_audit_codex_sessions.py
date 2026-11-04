@@ -3,6 +3,7 @@ subfleet attempt, keeps its log and audits it. MOCK session logs, transcripts an
 temporary directories; the tests never run subfleet or any other command. The pooling gate
 (`cli._session_audit`) reads every audit a test writes and must reach the script's verdict."""
 
+import errno
 import importlib.util
 import json
 import math
@@ -15,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from hypothesis import example, given, settings
+from hypothesis import event, example, given, settings
 from hypothesis import strategies as st
 
 from i86 import cli
@@ -368,6 +369,126 @@ def test_a_run_whose_kept_folder_is_not_a_folder_stops_the_audit(area, kind):
         acs.audit_run(run, lanes)
     assert not any(elsewhere.iterdir())
 
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists any folder")
+def test_a_kept_folder_this_script_cannot_list_stops_the_audit(area):
+    """Review 8: `glob` read a `codex-sessions` it could not list as one that keeps no log. This script
+    lists the folder itself, and one it cannot list stops it: the kept copies are final."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    assert acs.audit_run(run, lanes)["passed"]
+    folder = run / "codex-sessions"
+    folder.chmod(0o300)  # it may write in the folder and reach what it holds, but not list it
+    try:
+        with pytest.raises(SystemExit, match=r"cannot list .*codex-sessions \(PermissionError\); the kept copies"):
+            acs.audit_run(run, lanes)
+    finally:
+        folder.chmod(0o755)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes in any folder")
+@pytest.mark.parametrize("left, why", [
+    ("a new log to keep", r"this script cannot keep .*rollout-MOCK-parent\.jsonl as .* \(PermissionError\)"),
+    ("a new record of attempts", r"this script cannot write .*attempts\.json \(PermissionError\)"),
+    ("only the audit", r"this script cannot write .*audit\.json \(PermissionError\)")])
+def test_a_kept_folder_this_script_cannot_write_in_stops_the_audit(area, monkeypatch, left, why):
+    """Review 8: in a `codex-sessions` the system will not let this script write in, keeping a new log,
+    keeping subfleet's record of attempts or writing the audit stops it with the reason, instead of an
+    error from writing, and it leaves the folder as it found it."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    if left == "a new record of attempts":
+        with_record(monkeypatch, run, [(f"{JOB}/a1", PARENT, "succeeded")], accepted=f"{JOB}/a1",
+                    collected=f"{JOB}/a1")
+    folder = run / "codex-sessions"
+    if left == "only the audit":
+        assert acs.audit_run(run, lanes)["passed"]
+    else:
+        folder.mkdir()
+    before = {name: (folder / name).read_bytes() for name in os.listdir(folder)}
+    folder.chmod(0o555)
+    try:
+        with pytest.raises(SystemExit, match=why):
+            acs.audit_run(run, lanes)
+    finally:
+        folder.chmod(0o755)
+    assert {name: (folder / name).read_bytes() for name in os.listdir(folder)} == before
+
+
+def test_the_audit_is_a_new_file_so_another_name_of_the_old_one_keeps_its_bytes(area):
+    """Review 8: a second name of the file at `audit.json` (a hard link to a file outside the run's
+    folder, say) took the audit when this script wrote that file over. The script writes the audit to a
+    new file and renames it into place, so the other name keeps its bytes. It leaves no part file, and
+    the new file has the mode `open` gives one."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    folder = run / "codex-sessions"
+    folder.mkdir()
+    outside = run.parent / "MOCK-outside.md"
+    outside.write_text("MOCK untouched\n")
+    os.link(outside, folder / "audit.json")
+    report = acs.audit_run(run, lanes)
+    assert report["passed"]
+    assert outside.read_text() == "MOCK untouched\n"
+    assert json.loads((folder / "audit.json").read_text()) == report
+    assert sorted(os.listdir(folder)) == ["audit.json", "rollout-MOCK-parent.jsonl"]
+    mask = os.umask(0)
+    os.umask(mask)
+    assert (folder / "audit.json").stat().st_mode & 0o777 == 0o666 & ~mask
+
+
+def test_a_new_file_is_written_through_nothing_and_whole_or_not_at_all(tmp_path):
+    """`_create` stops at anything at its path, a link included; `_replace` takes the place of what
+    stood at its path without writing through it. A write that fails leaves no part of the data and no
+    part file (an object `write` refuses stands in for a failure part way)."""
+    target = tmp_path / "MOCK-target.md"
+    target.write_text("MOCK untouched\n")
+    link = tmp_path / "MOCK-link.json"
+    link.symlink_to(target)
+    with pytest.raises(FileExistsError):
+        acs._create(link, b"MOCK new\n")
+    acs._replace(link, b"MOCK new\n")
+    assert target.read_text() == "MOCK untouched\n"
+    assert not link.is_symlink() and link.read_bytes() == b"MOCK new\n"
+    for write, path in ((acs._create, tmp_path / "MOCK-new.json"), (acs._replace, link)):
+        with pytest.raises(TypeError):
+            write(path, object())
+    assert link.read_bytes() == b"MOCK new\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["MOCK-link.json", "MOCK-target.md"]
+
+
+
+def test_a_write_whose_last_bytes_fail_as_the_file_closes_leaves_nothing(tmp_path, monkeypatch):
+    """A file takes its last buffered bytes when it closes, and that can fail (a full disk, say). Then
+    `_create` leaves no file and `_replace` leaves the old one, and neither leaves a part file."""
+    real = os.fdopen
+
+    class FailsAsItCloses:
+        def __init__(self, fh):
+            self.fh = fh
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.fh.close()
+            raise OSError(errno.ENOSPC, "MOCK: no space left for the last bytes")
+
+        def write(self, data):
+            return self.fh.write(data)
+
+        def fileno(self):
+            return self.fh.fileno()
+
+    monkeypatch.setattr(acs.os, "fdopen", lambda fd, mode: FailsAsItCloses(real(fd, mode)))
+    old = tmp_path / "MOCK-old.json"
+    old.write_text("MOCK old\n")
+    with pytest.raises(OSError, match="MOCK: no space"):
+        acs._create(tmp_path / "MOCK-new.json", b"MOCK new\n")
+    with pytest.raises(OSError, match="MOCK: no space"):
+        acs._replace(old, b"MOCK new\n")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["MOCK-old.json"]
+    assert old.read_text() == "MOCK old\n"
 
 @pytest.mark.parametrize("line, flag", [
     ("{MOCK", "does not parse"),
@@ -1032,6 +1153,32 @@ def test_a_start_that_no_completion_covers_fails(area, lines, unread):
     assert not report["passed"]
 
 
+@pytest.mark.parametrize("completes", [True, False], ids=["completes", "never completes"])
+@pytest.mark.parametrize("kind", ["item.started", "item.updated"])
+def test_a_start_or_an_update_whose_line_holds_a_call_fails(area, kind, completes):
+    """Review 8: `audit` audits a tool use in a start's or an update's `message` there and then, as a call
+    of its own, and pairs the line's item and that call with a completion that covers them. The check
+    paired them alike but compared no such call, so a message's start whose line held the search's own
+    call passed beside the completed search, though `audit` read two calls from the transcript and one
+    from the log. Such a line now counts, by its number and once, as one only the transcript holds,
+    whether or not its item completes."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    item = web("MOCK main query")
+    call = next(acs.audit._tool_calls({"type": "item.completed", "item": item}))[1]
+    quiet = item["id"] if completes else "MOCK-never-completes"
+    lines = [{"type": "thread.started", "thread_id": PARENT}, {"type": "turn.started"},
+             {"type": kind, "item": {"id": quiet, "type": "agent_message", "text": "MOCK"},
+              "message": {"content": [{"type": "tool_use", "name": "web_search", "input": call}]}},
+             {"type": "item.completed", "item": item}, {"type": "turn.completed"}]
+    (run / "transcript.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+    assert acs.audit.audit_transcript(run / "transcript.jsonl", workdir)["tool_calls"] >= 2
+    report = acs.audit_run(run, lanes)
+    assert report["transcript_check"] == {"items": 1, "only_in_transcript": ["line 3"], "only_in_log": [],
+                                          "different": []}
+    assert not report["passed"]
+
+
 @pytest.mark.parametrize("levels, passes", [(64, True), (65, False)])
 def test_a_transcript_line_nests_at_most_depth_levels(area, levels, passes):
     lanes, run, workdir = area
@@ -1334,6 +1481,123 @@ def test_a_log_whose_whole_text_this_script_cannot_read_is_flagged(area, monkeyp
     report = acs.audit_run(run, lanes)
     assert report["flags"] == ["rollout-MOCK-extra.jsonl: this script cannot open it (PermissionError)"]
     assert not report["passed"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists any folder")
+@pytest.mark.parametrize("folder, shown", [
+    ("", "the lanes folder"), ("codex-10", "codex-10/sessions"), ("codex-10/sessions", "codex-10/sessions"),
+    ("codex-10/sessions/2026", "codex-10/sessions/2026"), ("codex-10/sessions/2026/11", "codex-10/sessions/2026/11"),
+    ("codex-10/sessions/2026/11/03", "codex-10/sessions/2026/11/03")])
+def test_a_folder_of_the_lanes_this_script_cannot_list_is_flagged(area, folder, shown):
+    """Review 8: `glob` passes over a folder it cannot list without a word, so a second main thread whose
+    log sat in one went unread and the run passed. The listing flags each folder on the way to the logs
+    that it cannot list, by its path under the lanes folder, and the run fails."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    extra = write_log(lanes, "rollout-MOCK-extra.jsonl", root_meta(workdir, "MOCK-extra"),
+                      items=[search("MOCK extra query")])
+    day = lanes / "codex-10" / "sessions" / "2026" / "11" / "03"
+    day.mkdir(parents=True)
+    extra.rename(day / extra.name)
+    (lanes / folder).chmod(0)
+    try:
+        report = acs.audit_run(run, lanes)
+    finally:
+        (lanes / folder).chmod(0o755)
+    assert (f"{shown}: this script cannot list this folder (PermissionError), and a log in it could hold one of "
+            "the run's threads") in report["flags"]
+    assert not report["passed"]
+
+
+def lane_tree(data, folder: Path, parts: tuple, spare: list[Path]) -> None:
+    """Fill `folder` with what Hypothesis draws for the rest of a log's path (`parts`): folders, files,
+    links to folders elsewhere (each in a folder of `spare`'s), to nothing and to themselves, hidden
+    names, and names the logs' pattern matches or nearly matches."""
+    part, rest = parts[0], parts[1:]
+    if part == "sessions":
+        # `glob` goes straight to the name, so on a file system that ignores case it finds `Sessions` too.
+        names = [data.draw(st.sampled_from(["sessions", "Sessions"]))]
+    elif rest:
+        names = data.draw(st.lists(st.sampled_from(["2026", "11", ".MOCK", "MOCK"]), min_size=1, max_size=2,
+                                   unique=True))
+    else:
+        names = data.draw(st.lists(st.sampled_from(["rollout-a.jsonl", "rollout-.jsonl", ".rollout-b.jsonl",
+                                                    "ROLLOUT-C.JSONL", "rollout-d.json", "MOCK.jsonl"]),
+                                   min_size=1, max_size=3, unique=True))
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        # Folders and files most of the time, so that most trees hold logs.
+        kinds = (["folder"] * 8 + ["file", "link to a folder", "link to nothing", "link to itself"] if rest
+                 else ["file"] * 3 + ["folder", "link to nothing"])
+        kind = data.draw(st.sampled_from(kinds if part != "sessions" else [*kinds, "nothing"]))
+        path = folder / name
+        if kind == "folder":
+            lane_tree(data, path, rest, spare) if rest else path.mkdir()
+        elif kind == "file":
+            path.write_text("MOCK\n")
+        elif kind == "link to a folder":
+            target = spare[0] / str(len(spare))
+            spare.append(target)
+            lane_tree(data, target, rest, spare)
+            path.symlink_to(target)
+        elif kind == "link to nothing":
+            path.symlink_to(folder / "MOCK-gone")
+        elif kind == "link to itself":
+            path.symlink_to(path)
+
+
+@settings(deadline=None, max_examples=100)
+@given(data=st.data())
+def test_the_lanes_listing_finds_what_glob_finds(data):
+    """Differential: in folders this script can list, `session_logs` finds the paths `glob` finds (links
+    to folders, hidden names and entries of every kind among them) and flags nothing."""
+    with tempfile.TemporaryDirectory() as tmp:
+        lanes = Path(tmp) / "lanes"
+        lane_tree(data, lanes, acs.LOG_PARTS, [Path(tmp) / "elsewhere"])
+        found = sorted(lanes.glob("/".join(acs.LOG_PARTS)))
+        event(f"glob finds {min(len(found), 3)}{'+' if len(found) > 3 else ''} logs")
+        assert acs.session_logs(lanes) == (found, [])
+
+
+def test_the_lanes_listing_passes_over_loops_and_sorts_what_it_finds(tmp_path, monkeypatch):
+    """Fixed cases for the differential above, which its drawn trees reach only now and then. Links in a
+    loop, to nothing or to a file name no folder, so `glob` passes over them and this script flags
+    nothing. And `os.scandir` yields names in no set order, so the listing sorts the logs it finds:
+    here the system lists each folder last name first."""
+    lanes = tmp_path / "lanes"
+    for lane in ("codex-1", "codex-2"):
+        day = lanes / lane / "sessions" / "2026" / "11" / "03"
+        day.mkdir(parents=True)
+        for name in ("rollout-a.jsonl", "rollout-b.jsonl"):
+            (day / name).write_text("MOCK\n")
+    (lanes / "codex-loop").symlink_to(lanes / "codex-loop")
+    (lanes / "codex-1" / "sessions" / "2027").symlink_to(lanes / "codex-1" / "sessions" / "2027")
+    (lanes / "codex-gone").symlink_to(tmp_path / "MOCK-gone")
+    (lanes / "codex-file").write_text("MOCK\n")
+    found = sorted(lanes.glob("/".join(acs.LOG_PARTS)))
+    assert len(found) == 4
+    real = os.scandir
+
+    class LastNameFirst:
+        def __init__(self, path):
+            self.entries = real(path)
+
+        def __enter__(self):
+            return iter(sorted(self.entries, key=lambda entry: entry.name, reverse=True))
+
+        def __exit__(self, *exc):
+            self.entries.close()
+
+    monkeypatch.setattr(acs.os, "scandir", LastNameFirst)
+    assert acs.session_logs(lanes) == (found, [])
+
+
+def test_lanes_that_hold_no_folder_hold_no_log(tmp_path):
+    """A lanes folder that is not there, or a file, holds no log, as `glob` finds none: the audit then
+    reads only the kept copies."""
+    assert acs.session_logs(tmp_path / "MOCK-gone") == ([], [])
+    (tmp_path / "MOCK-file").write_text("MOCK\n")
+    assert acs.session_logs(tmp_path / "MOCK-file") == ([], [])
 
 
 @pytest.mark.parametrize("workdir", [None, "", "MOCK/work/sol-1", ["/MOCK/work/sol-1"]],
@@ -2008,3 +2272,75 @@ def test_a_run_with_any_field_changed_gets_a_verdict_the_gate_shares(data):
         write_logs(lanes, logs)
         (run / "transcript.jsonl").write_text("".join(json.dumps(line) + "\n" for line in transcript))
         acs.audit_run(run, lanes)
+
+
+def test_a_record_whose_thread_drops_a_suspect_call_does_not_hold_up(area):
+    """Review 8: a sub-agent that opens a page on this machine makes a suspect call, which keeps the run
+    out of the pool until a reader accepts it. A record edited to drop that call, its total lowered to
+    match, said it passed, and the gate pooled the run: it let a thread's audit sort fewer calls than it
+    read. The gate now finds that such a record does not hold up."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir)
+    write_log(lanes, "rollout-MOCK-helper.jsonl", helper_meta(workdir),
+              items=[search("MOCK helper query", {"type": "open_page", "url": "http://127.0.0.1/MOCK"})])
+    report = acs.audit_run(run, lanes)
+    assert report["passed"] and report["suspect"] == 1
+    next(t for t in report["threads"] if t["thread_id"] == HELPER)["audit"]["suspect"] = []
+    report["suspect"] = 0
+    (run / "codex-sessions" / "audit.json").write_text(json.dumps(report, indent=1) + "\n")
+    assert cli._session_audit(run) == ("one thread's audit sorts more or fewer calls than it read, or lists web "
+                                       "addresses that do not match its web calls")
+
+
+TOOL_USES = st.sampled_from([None] * 4 + ["the search's call", "a shell call"])  # most lines hold none
+
+
+def with_message(line: dict, use, item: dict) -> dict:
+    """A transcript line with a tool use in its `message`: the call `audit` reads from `item`, or a shell
+    call; none for None."""
+    if use is None:
+        return line
+    tool, inp = (next(acs.audit._tool_calls({"type": "item.completed", "item": item})) if use == "the search's call"
+                 else ("Bash", {"command": "cat MOCK.md"}))
+    return {**line, "message": {"content": [{"type": "tool_use", "name": tool, "input": inp}]}}
+
+
+@settings(deadline=None, max_examples=150)
+@given(data=st.data())
+def test_a_transcript_the_check_passes_holds_as_many_calls_for_audit_as_the_log(data):
+    """Property (differential against `audit_transcript`): whenever the check of the transcript finds no
+    call in one place only and none that differs, `audit` reads as many calls from the transcript as
+    from the main thread's log. The transcript's lines: each search's start, update and completion (a
+    start under the search's id may be a message's), each with or without a call in its `message`, a
+    completed message, turns' events, and a second start of the thread."""
+    with tempfile.TemporaryDirectory() as tmp, pytest.MonkeyPatch.context() as monkeypatch:
+        lanes, run, workdir = make_area(Path(tmp), monkeypatch)
+        queries = [f"MOCK query {i}" for i in range(data.draw(st.integers(0, 2), label="searches"))]
+        add_parent(lanes, workdir, spawned=(), items=[search(q) for q in queries])
+        lines = [{"type": "thread.started", "thread_id": PARENT}, {"type": "turn.started"}]
+        for query in queries:
+            item = web(query)
+            quiet = {"id": item["id"], "type": "agent_message", "text": "MOCK"}
+            for kind in ("item.started", "item.updated"):
+                begun = data.draw(st.sampled_from([None, None, item, {**item, "query": "", "action": {"type": "other"}},
+                                                   quiet]), label=kind)
+                if begun is not None:
+                    lines.append(with_message({"type": kind, "item": begun}, data.draw(TOOL_USES), item))
+            for _ in range(data.draw(st.sampled_from([1, 1, 1, 0, 2]), label="completions")):
+                lines.append(with_message({"type": "item.completed", "item": item}, data.draw(TOOL_USES), item))
+        others = [with_message({"type": "item.completed", "item": {"id": "MOCK-message", "type": "agent_message",
+                                                                   "text": "MOCK"}}, data.draw(TOOL_USES), web("MOCK")),
+                  with_message({"type": "turn.completed"}, data.draw(TOOL_USES), web("MOCK")),
+                  {"type": "thread.started", "thread_id": PARENT}]
+        for other in data.draw(st.lists(st.sampled_from(others), max_size=2), label="others"):
+            lines.insert(data.draw(st.integers(2, len(lines)), label="where"), other)
+        lines.append({"type": "turn.completed"})
+        (run / "transcript.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+        report = acs.audit_run(run, lanes)
+        check = report["transcript_check"]
+        clean = not (check["only_in_transcript"] or check["only_in_log"] or check["different"])
+        event(f"the check passes the transcript of {len(queries)} searches" if clean else "the check flags it")
+        if clean:
+            main = next(t for t in report["threads"] if t["thread_id"] == PARENT)
+            assert acs.audit.audit_transcript(run / "transcript.jsonl", workdir)["tool_calls"] == len(queries)
+            assert main["audit"]["tool_calls"] == len(queries) == check["items"]

@@ -100,4 +100,11 @@ After `2026-11-04-served/`:
   it. So does a link, anything but a regular file, or a file it cannot write in place of
   `audit.json`. `prereg` stops at a file it cannot read. Re-auditing the four Sol runs leaves every
   `codex-sessions/audit.json` and `attempts.json` byte for byte the same.
+- `simulate` now requires each thread's web, suspect and local calls to add up to its calls. The
+  audit flags a folder of the lanes it cannot list, and a transcript line that starts or updates an
+  item with a call in its `message`. It stops when it cannot list or write in `codex-sessions/`. It
+  writes each kept copy and `attempts.json` only where nothing sits yet, and writes `audit.json` to a
+  new file that it renames into place. `prereg` stops at a run's file in a folder it may not search.
+  Re-auditing the four Sol runs leaves every `codex-sessions/audit.json` and `attempts.json` byte for
+  byte the same.
 - Every file in this manifest still matches.

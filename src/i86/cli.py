@@ -215,11 +215,15 @@ def _nests_deeper_than(value, levels: int) -> bool:
 
 
 def _json_file(path: Path):
-    """The JSON value a file holds; ABSENT if nothing is at `path`; UNREADABLE if what is there is not a
-    regular file (a folder, or a pipe that would block), cannot be read or decoded, does not parse, or
-    nests more than DEPTH levels."""
-    if not os.path.lexists(path):
+    """The JSON value a file holds; ABSENT if nothing is at `path`; UNREADABLE if this check cannot tell
+    what is there (in a folder it may not search), or what is there is not a regular file (a folder, or
+    a pipe that would block), cannot be read or decoded, does not parse, or nests more than DEPTH levels."""
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
         return ABSENT
+    except OSError:
+        return UNREADABLE
     if not os.path.isfile(path):
         return UNREADABLE
     try:
@@ -294,9 +298,10 @@ def _thread_problem(t: dict) -> str | None:
     `codex-sessions`, as the script names each kept log, a SHA-256, and calls in the form the audits
     write them. Its own audit must count the events and calls its items make: the script turns each web
     search, command, message and reasoning item into one line of the stream it audits, and `audit` reads
-    one call from each search and command. `audit` lists each call it does not
-    read as a web call, or counts it as neither, and gives each web call one address or more. And the
-    thread's scripts may call the shell no more often than its commands completed."""
+    one call from each search and command. `audit` reads each such call as a web call or lists it as a
+    suspect or a local call (or a violation, which a passing thread has none of), so those add up to its
+    calls, and it gives each web call one address or more. And the thread's scripts may call the shell
+    no more often than its commands completed."""
     items, own = t["items"], t["audit"]
     if set(t) != THREAD_KEYS or set(own) != AUDIT_KEYS:
         return "one thread's entry or its audit has other fields than the script writes"
@@ -314,10 +319,11 @@ def _thread_problem(t: dict) -> str | None:
             type(own["tool_calls"]) is int and own["tool_calls"] == calls):
         return "one thread's audit counts other events or calls than its items make"
     urls = own["urls"]
-    if not (own["web_calls"] + len(own["suspect"]) + len(own["local_calls"]) <= own["tool_calls"]
+    if not (own["web_calls"] + len(own["suspect"]) + len(own["local_calls"]) == own["tool_calls"]
             and isinstance(urls, list) and all(isinstance(u, str) for u in urls) and urls == sorted(set(urls))
             and bool(urls) == (own["web_calls"] > 0)):
-        return "one thread's audit lists more calls than it read, or web addresses that do not match its web calls"
+        return ("one thread's audit sorts more or fewer calls than it read, or lists web addresses that do not "
+                "match its web calls")
     if t["script_tools"].get("exec_command", 0) > items.get("CommandExecution", 0):
         return "one thread's scripts call the shell more often than its commands completed"
     return None
@@ -569,11 +575,19 @@ def _keeps(folder: Path, sums: Path, proof: Path) -> bool:
 
 def _files(paths) -> list[Path]:
     """The paths at which there is something for prereg to hash. Anything there but a regular file (a
-    folder, a pipe that would block, a link to nothing) stops prereg."""
-    present = [p for p in paths if os.path.lexists(p)]
-    for p in present:
+    folder, a pipe that would block, a link to nothing) stops prereg, and so does a path it cannot look
+    at (in a folder it may not search), which could hold a file it would otherwise leave out."""
+    present = []
+    for p in paths:
+        try:
+            os.lstat(p)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as error:
+            raise SystemExit(f"prereg cannot read {p.relative_to(ROOT)} ({type(error).__name__})") from None
         if not os.path.isfile(p):
             raise SystemExit(f"{p.relative_to(ROOT)} is not a regular file, so prereg cannot hash it")
+        present.append(p)
     return present
 
 

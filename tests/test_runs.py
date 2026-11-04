@@ -131,6 +131,7 @@ def test_a_run_with_suspect_calls_is_pooled_only_once_the_operator_lists_it(area
 
 CALL = {"tool": "exec_command", "call": '{"command": "MOCK command"}', "why": "MOCK reason"}
 OTHER = {**CALL, "call": '{"command": "MOCK other command"}'}
+LOCAL = {"tool": "shell", "call": '{"command": "cat MOCK.md"}'}  # as `audit` lists a call in the work directory
 JOB = "MOCK-job"
 WORKDIR = "/MOCK/work/sol"
 # subfleet's record of the MOCK job: a failed first attempt and the collected second one.
@@ -263,12 +264,31 @@ def _with_reasoning(session):
 
 
 def _with_main_command(session):
-    """The main thread ran a command: one more item, event and call, and one more item for the check of
-    the transcript to compare."""
+    """The main thread ran a command in the work directory: one more item, event and call, which its
+    audit lists as a local call, and one more item for the check of the transcript to compare."""
     main = session["threads"][1]
     main["items"]["CommandExecution"] = 1
-    main["audit"].update(events=main["audit"]["events"] + 1, tool_calls=main["audit"]["tool_calls"] + 1)
+    main["audit"].update(events=main["audit"]["events"] + 1, tool_calls=main["audit"]["tool_calls"] + 1,
+                         local_calls=[LOCAL])
     session.update(_totals(session["threads"]), transcript_check=_compared(session["threads"], "MOCK-main"))
+
+
+def _unsorted(kind: str) -> dict:
+    """A MOCK session audit whose sub-agent read one call more than its audit sorts: a command its audit
+    does not list as a local call, or a suspect call or a web call taken out of its audit (the web
+    call's address with it). The totals add up over the threads, as an edit that hid the call would
+    make them."""
+    session = _session(helper=[CALL])
+    helper = session["threads"][2]
+    if kind == "local":
+        helper["items"]["CommandExecution"] = 1
+        helper["audit"].update(events=helper["audit"]["events"] + 1, tool_calls=helper["audit"]["tool_calls"] + 1)
+    elif kind == "suspect":
+        helper["audit"]["suspect"] = []
+    else:
+        helper["audit"].update(web_calls=0, urls=[])
+    session.update(_totals(session["threads"]))
+    return session
 
 
 def _attempts(*sessions) -> dict:
@@ -450,13 +470,13 @@ INCONSISTENT = {
                             "one thread's audit counts other events or calls than its items make"),
     "sol-web-calls-over": (_edited(lambda s: (s["threads"][2]["audit"].update(web_calls=2),
                                               s.update(web_calls=s["web_calls"] + 1))), ATTEMPTS, f"{JOB}/a2",
-                           "one thread's audit lists more calls than it read"),
+                           "one thread's audit sorts more or fewer calls than it read"),
     "sol-local-call-over": (_edited(lambda s: s["threads"][2]["audit"].update(local_calls=[CALL])), ATTEMPTS,
-                            f"{JOB}/a2", "one thread's audit lists more calls than it read"),
+                            f"{JOB}/a2", "one thread's audit sorts more or fewer calls than it read"),
     "sol-no-urls": (_edited(lambda s: s["threads"][2]["audit"].update(urls=[])), ATTEMPTS, f"{JOB}/a2",
-                    "or web addresses that do not match its web calls"),
+                    "or lists web addresses that do not match its web calls"),
     "sol-urls-unsorted": (_edited(lambda s: s["threads"][2]["audit"].update(urls=["MOCK b", "MOCK a"])), ATTEMPTS,
-                          f"{JOB}/a2", "or web addresses that do not match its web calls"),
+                          f"{JOB}/a2", "or lists web addresses that do not match its web calls"),
     "sol-sub-agent-events": (_edited(lambda s: s["threads"][1]["items"].pop("SubAgentActivity")), ATTEMPTS,
                              f"{JOB}/a2", "one thread records fewer sub-agent events than the threads that name it"),
     "sol-check-items-zero": (_check(items=0), ATTEMPTS, f"{JOB}/a2",
@@ -495,12 +515,18 @@ INCONSISTENT = {
     "sol-extra-field": ({**_session(), "MOCK": 1}, ATTEMPTS, f"{JOB}/a2", "it has other fields than the script writes"),
     "sol-suspect-over": (_edited(lambda s: (s["threads"][2]["audit"]["suspect"].append(CALL),
                                             s.update(suspect=s["suspect"] + 1))), ATTEMPTS, f"{JOB}/a2",
-                         "one thread's audit lists more calls than it read"),
+                         "one thread's audit sorts more or fewer calls than it read"),
     "sol-urls-twice": (_edited(lambda s: s["threads"][2]["audit"].update(urls=["https://www.example.org/MOCK"] * 2)),
-                       ATTEMPTS, f"{JOB}/a2", "or web addresses that do not match its web calls"),
+                       ATTEMPTS, f"{JOB}/a2", "or lists web addresses that do not match its web calls"),
     "sol-urls-without-web-calls": (_edited(lambda s: (s["threads"][2]["audit"].update(web_calls=0),
                                                       s.update(web_calls=s["web_calls"] - 1))), ATTEMPTS, f"{JOB}/a2",
-                                   "or web addresses that do not match its web calls"),
+                                   "or lists web addresses that do not match its web calls"),
+    # Once a thread's calls had to add up exactly, the case above failed on the sum too. Here the one
+    # search is a suspect call, so the calls add up and only the address gives the thread away.
+    "sol-urls-with-a-suspect-call": (_edited(lambda s: (s["threads"][2]["audit"].update(web_calls=0, suspect=[CALL]),
+                                                        s.update(web_calls=s["web_calls"] - 1,
+                                                                 suspect=s["suspect"] + 1))), ATTEMPTS, f"{JOB}/a2",
+                                     "or lists web addresses that do not match its web calls"),
     # Mutants that outlived the cases above: a file whose path climbs out through a folder under the kept
     # logs, a call with no tool or no call, and a script's call that is not text.
     "sol-file-up-from-a-folder": (_edited(lambda s: s["threads"][2].update(
@@ -512,6 +538,14 @@ INCONSISTENT = {
                             "one thread lists a call other than as the audits list one"),
     "sol-script-suspect-call-number": (_session(script=[{**CALL, "call": 1}]), ATTEMPTS, f"{JOB}/a2",
                                        "one thread lists a call other than as the audits list one"),
+    # Review 8: a call a thread's audit read but does not sort, with the totals made to add up again.
+    # Dropping a suspect call so would pool the run without the reader's leave.
+    "sol-suspect-dropped": (_unsorted("suspect"), ATTEMPTS, f"{JOB}/a2",
+                            "one thread's audit sorts more or fewer calls than it read"),
+    "sol-local-call-dropped": (_unsorted("local"), ATTEMPTS, f"{JOB}/a2",
+                               "one thread's audit sorts more or fewer calls than it read"),
+    "sol-web-call-dropped": (_unsorted("web"), ATTEMPTS, f"{JOB}/a2",
+                             "one thread's audit sorts more or fewer calls than it read"),
 }
 
 
@@ -601,6 +635,23 @@ def test_a_record_that_is_no_regular_file_of_json_excludes_the_run(area, graph, 
             "excluding sol-odd: the audit of its session logs says it passed, but its attempts.json is not a file of "
             "JSON this check can read") in capsys.readouterr().err
 
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches any folder")
+def test_a_record_in_a_folder_the_gate_cannot_search_is_unreadable_not_absent(tmp_path):
+    """Review 8: the gate cannot tell what sits in a folder it may not search, so it reads a record
+    there as unreadable, not as absent, as prereg does. Below a file, nothing can sit."""
+    folder = tmp_path / "MOCK-sessions"
+    folder.mkdir()
+    (folder / "attempts.json").write_text("{}")
+    folder.chmod(0o600)
+    try:
+        assert cli._json_file(folder / "attempts.json") is cli.UNREADABLE
+        assert cli._json_file(folder / "MOCK-missing.json") is cli.UNREADABLE
+    finally:
+        folder.chmod(0o700)
+    assert cli._json_file(folder / "attempts.json") == {}
+    assert cli._json_file(folder / "MOCK-missing.json") is cli.ABSENT
+    assert cli._json_file(folder / "attempts.json" / "MOCK-below-a-file.json") is cli.ABSENT
 
 @pytest.mark.parametrize("workdir", [None, "", "MOCK/work/sol", ["/MOCK/work/sol"]],
                          ids=["none", "empty", "relative", "a list"])
