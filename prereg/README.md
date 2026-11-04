@@ -2,8 +2,8 @@
 
 `i86 prereg` writes `SHA256SUMS`, the SHA-256 of the graph, the prompt, the response template, the
 context files, every run's `meta.json`, `response.md`, `response.json`, `audit.json` and
-`transcript.jsonl`, and the files at the top of `outputs/` (not the charts). It then stamps the
-manifest with OpenTimestamps.
+`transcript.jsonl`, a Codex run's `codex-sessions/audit.json` and `attempts.json`, and the files at
+the top of `outputs/` (not the charts). It then stamps the manifest with OpenTimestamps.
 Each dated folder keeps one manifest and its proof; `SHA256SUMS` and `SHA256SUMS.ots` at the top are
 the latest.
 
@@ -12,6 +12,7 @@ the latest.
 | `2026-10-26-collected/` | 07:35Z | hashes of the first eight runs, committed before their answers | 973210, 973213 |
 | `2026-10-26-pooled/` | 08:01Z | all eleven runs, their audits and the pooled outputs | 973213, 973237 |
 | `2026-10-26-revised/` | 14:40Z | the same files after the changes below | 973255 |
+| `2026-11-04-sessions/` | 00:31Z | the same files after the changes below, plus the Sol runs' session-log audits and attempts | pending |
 
 To check a manifest, run `shasum -a 256 -c prereg/<folder>/SHA256SUMS` from the repository root; it
 lists any file whose bytes have changed. `ots verify prereg/<folder>/SHA256SUMS.ots` checks the proof
@@ -40,3 +41,13 @@ After `2026-10-26-pooled/`:
   11.832241563615261. The first also appears in `outputs/nodes.csv`.
 - The round-7 audit changes (findings 2 to 9) leave every run's `audit.json` byte for byte the same.
 - Every other file in this manifest still matches.
+
+After `2026-10-26-revised/`:
+
+- `scripts/audit_codex_sessions.py` audited the four Sol runs' session logs, which hold their
+  sub-agents and the first attempts of sol-1 and sol-3 (see the README). This manifest adds each Sol
+  run's `codex-sessions/audit.json` and `attempts.json`.
+- That audit found one suspect call, in sol-3. Pooling with `--accept-suspect sol-3` changed one cell
+  of `outputs/summary.md`, sol-3's suspect calls, from 0 to 1, and the summary's note on suspect calls
+  now names the session logs.
+- Every other file in the previous manifest still matches.
