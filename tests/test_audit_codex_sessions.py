@@ -6,6 +6,7 @@ temporary directories; the tests never run subfleet or any other command. The po
 import importlib.util
 import json
 import math
+import os
 import re
 import shlex
 import shutil
@@ -306,32 +307,43 @@ def completed(item: dict) -> dict:
     return {"type": "event_msg", "payload": {"type": "item_completed", "item": item}}
 
 
-@pytest.mark.parametrize("record", [
-    {"type": ["event_msg"], "payload": {}},
-    {"type": "event_msg", "payload": {"type": {"MOCK": 1}}},
-    {"type": "response_item", "payload": {"type": "function_call", "name": ["spawn_agent"],
-                                          "namespace": "collaboration"}},
-    {"type": "response_item", "payload": {"type": "function_call", "name": "wait", "namespace": ["collaboration"]}},
-    completed({"type": {"MOCK": 1}, "id": "MOCK"}),
-    completed({**command("echo MOCK", "/MOCK/work"), "command": ["/bin/zsh", "-lc", 1]}),
-    completed({"type": "AgentMessage", "id": "MOCK", "content": 1}),
-    exec_call("text('\ud800')"),
-    {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "input": ["text(1)"]}},
-    {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "input": None}},
-    completed({**started(HELPER), "agent_thread_id": {"MOCK": 1}}),
+@pytest.mark.parametrize("record, error", [
+    ({"type": ["event_msg"], "payload": {}}, "TypeError"),
+    ({"type": "event_msg", "payload": {"type": {"MOCK": 1}}}, "TypeError"),
+    ({"type": "response_item", "payload": {"type": "function_call", "name": ["spawn_agent"],
+                                           "namespace": "collaboration"}}, "TypeError"),
+    ({"type": "response_item", "payload": {"type": "function_call", "name": "wait", "namespace": ["collaboration"]}},
+     "TypeError"),
+    (completed({"type": {"MOCK": 1}, "id": "MOCK"}), "TypeError"),
+    (completed({**command("echo MOCK", "/MOCK/work"), "command": ["/bin/zsh", "-lc", 1]}), "TypeError"),
+    (completed({"type": "AgentMessage", "id": "MOCK", "content": 1}), "TypeError"),
+    (exec_call("text('\ud800')"), "UnicodeEncodeError"),
+    ({"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "input": ["text(1)"]}},
+     "TypeError"),
+    ({"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "input": None}}, "TypeError"),
+    (completed({**started(HELPER), "agent_thread_id": {"MOCK": 1}}), "TypeError"),
+    (completed({**command("echo MOCK", "/MOCK/work"), "cwd": ["/MOCK/work"]}), "TypeError"),
+    (completed({**command("echo MOCK", "/MOCK/work"), "cwd": None}), "TypeError"),
+    ({"type": "response_item", "payload": {"type": "custom_tool_call_output", "output": {"text": "MOCK"}}},
+     "TypeError"),
+    ({"type": "response_item", "payload": {"type": "custom_tool_call_output",
+                                           "output": [served("https://MOCK.example")]}}, "TypeError"),
+    ({"type": "response_item", "payload": {"type": "function_call_output", "output": [
+        {"type": "input_text", "text": [served("https://MOCK.example")]}]}}, "TypeError"),
 ], ids=["record type a list", "event type an object", "function name a list", "namespace a list",
         "item type an object", "command word a number", "message content a number", "script a lone surrogate",
-        "script a list", "script null", "sub-agent id an object"])
-def test_a_record_with_a_field_of_another_type_is_flagged(area, record):
+        "script a list", "script null", "sub-agent id an object", "command cwd a list", "command cwd null",
+        "tool output an object", "tool output part a string", "tool output text a list"])
+def test_a_record_with_a_field_of_another_type_is_flagged(area, record, error):
     """A field of another JSON type than Codex writes (a list where it writes a string, say) fails the
-    run with a flag on its line; it does not stop the audit."""
+    run with a flag on its line that names the error; it does not stop the audit."""
     lanes, run, workdir = area
     parent = add_parent(lanes, workdir, spawned=())
     with parent.open("a") as fh:
         fh.write(json.dumps(record) + "\n")
     report = acs.audit_run(run, lanes)
-    assert any(flag.startswith("rollout-MOCK-parent.jsonl line 3: a record with a field this script cannot read (")
-               for flag in report["flags"])
+    flag = f"rollout-MOCK-parent.jsonl line 3: a record with a field this script cannot read ({error})"
+    assert flag in report["flags"]
     assert not report["passed"]
 
 
@@ -544,6 +556,11 @@ def test_a_script_the_grammar_cannot_parse_passes_only_as_one_v8_refused(area, r
                  id="a decimal past 4,300 digits"),
     pytest.param('{search_query: [{q: "http://127.0.0.1:8080/" + 0x' + f"{10**4301:x}n}}]}}", "127.0.0.1",
                  id="a hex BigInt past 4,300 digits"),
+    # Review 6: `true`, `false` and `null` as JavaScript writes them in a string, and a template's text.
+    ('{search_query: [{q: "http://" + `${true}` + ".localhost"}]}', "`true.localhost`"),
+    ('{search_query: [{q: "http://" + false + ".localhost"}]}', "`false.localhost`"),
+    ('{search_query: [{q: "http://" + null + ".localhost"}]}', "`null.localhost`"),
+    ('{search_query: [{q: "http://" + `a` + 1 + ".localhost"}]}', "`a1.localhost`"),
 ])
 def test_a_scripts_urls_are_read_as_a_web_calls_input(area, args, why):
     lanes, run, workdir = area
@@ -716,18 +733,75 @@ def test_the_log_and_the_transcript_must_record_the_same_calls(area, theirs, key
     assert any("record different calls" in flag for flag in report["flags"]) and not report["passed"]
 
 
-@pytest.mark.parametrize("line", ['{"type": "item.completed", "item": ', "[" * 100_000 + "]" * 100_000],
-                         ids=["cut", "nested too deeply"])
-def test_a_transcript_line_that_does_not_parse_is_left_out(area, line):
-    """The transcript check compares the lines that parse: a line cut short or nested deeper than
-    Python reads leaves the others to compare, and does not stop the audit."""
+@pytest.mark.parametrize("line", ['{"type": "item.completed", "item": ', "[" * 100_000 + "]" * 100_000, "[1]",
+                                  '"MOCK"', "\u00a0"],
+                         ids=["cut", "nested too deeply", "an array", "a string", "other whitespace"])
+def test_a_transcript_line_this_script_cannot_read_fails(area, line):
+    """A transcript line that does not parse or is not an object could hold a call, so the check counts
+    it, by its number, as a line only the transcript holds; the audit still reaches a verdict."""
     lanes, run, workdir = area
     add_parent(lanes, workdir, spawned=())
+    number = len((run / "transcript.jsonl").read_text().split("\n"))
     with (run / "transcript.jsonl").open("a") as fh:
         fh.write(line + "\n")
     report = acs.audit_run(run, lanes)
-    assert report["transcript_check"]["items"] == 1 and report["transcript_check"]["different"] == []
-    assert report["passed"]
+    check = report["transcript_check"]
+    assert check["items"] == 1 and check["only_in_transcript"] == [f"line {number}"] and check["different"] == []
+    assert not report["passed"]
+
+
+def test_a_blank_transcript_line_is_no_line(area):
+    """A line of JSON's whitespace alone is no line, as `audit` reads a transcript."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    with (run / "transcript.jsonl").open("a") as fh:
+        fh.write(" \t\r\n\n")
+    report = acs.audit_run(run, lanes)
+    assert report["transcript_check"]["only_in_transcript"] == [] and report["passed"]
+
+
+@pytest.mark.parametrize("thread, recorded", [("7", 7), ("None", None), ("True", True)])
+def test_a_transcript_thread_id_that_is_not_a_string_names_no_thread(area, thread, recorded):
+    """A transcript whose `thread.started` event gives a number, null or a boolean names no thread,
+    though Python writes it as the main thread's id."""
+    lanes, run, workdir = area
+    write_log(lanes, "rollout-MOCK-parent.jsonl", root_meta(workdir, thread), items=[search("MOCK main query")])
+    write_transcript(run, PARENT, [web("MOCK main query")])
+    lines = (run / "transcript.jsonl").read_text().split("\n")
+    lines[0] = json.dumps({"type": "thread.started", "thread_id": recorded})
+    (run / "transcript.jsonl").write_text("\n".join(lines))
+    assert acs.transcript_thread(run / "transcript.jsonl") is None
+    report = acs.audit_run(run, lanes)
+    assert report["main_thread"] is None and not report["passed"]
+    assert (f"the transcript records no thread whose id this script can read, not the collected main thread "
+            f"{thread}") in report["flags"]
+
+
+EXTRA = {"id": "MOCK-MOCK main query", "type": "command_execution", "command": "cat /MOCK/elsewhere",
+         "aggregated_output": "", "exit_code": 0, "status": "completed"}
+
+
+@pytest.mark.parametrize("theirs", [
+    [EXTRA, web("MOCK main query")],
+    [web("MOCK main query"), EXTRA],
+    [{**EXTRA, "type": ["web_search"]}, web("MOCK main query")],
+], ids=["a command first", "a command last", "an item of a type this script cannot read"])
+def test_a_transcript_item_that_repeats_an_id_fails(area, theirs):
+    """An item that repeats another's id still counts, so the transcript's extra call fails the check."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    write_transcript(run, PARENT, theirs)
+    report = acs.audit_run(run, lanes)
+    assert report["transcript_check"]["items"] == 2
+    assert report["transcript_check"]["different"] == ['"MOCK-MOCK main query"'] and not report["passed"]
+
+
+def test_a_log_item_that_repeats_an_id_fails(area):
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), items=[command("echo MOCK", workdir, item_id="MOCK-MOCK main query"),
+                                                  search("MOCK main query")])
+    report = acs.audit_run(run, lanes)
+    assert report["transcript_check"]["different"] == ['"MOCK-MOCK main query"'] and not report["passed"]
 
 
 @pytest.mark.parametrize("kind", [["web_search"], {"MOCK": 1}], ids=["a list", "an object"])
@@ -844,12 +918,12 @@ def test_two_logs_of_one_thread_must_hold_the_same_bytes(area):
 
 
 @pytest.mark.parametrize("case, flag", [
-    ("cut", "names the work directory but does not parse"),
-    ("other record", "names the work directory but is not a session's record"),
+    ("cut", "names the work directory, but its first line does not parse"),
+    ("other record", "names the work directory, but its first line is not a session's record"),
     ("no id", "a session in the work directory with no thread id"),
     ("sub-agent source as a string", "gives a source this script cannot read"),
     ("other source", "gives a source this script cannot read"),
-    ("nested too deeply", "names the work directory but does not parse"),
+    ("nested too deeply", "names the work directory, but its first line does not parse"),
 ])
 def test_a_log_in_the_work_directory_this_script_cannot_read_is_flagged(area, case, flag):
     """Review findings 6 (gap E) and 9: such a log is flagged, not skipped, and does not stop the audit."""
@@ -869,6 +943,145 @@ def test_a_log_in_the_work_directory_this_script_cannot_read_is_flagged(area, ca
     (lanes / "codex-9" / "sessions" / "2026" / "11" / "03" / "rollout-MOCK-odd.jsonl").write_text(first + "\n")
     report = acs.audit_run(run, lanes)
     assert any(flag in f for f in report["flags"]) and not report["passed"]
+
+
+def odd_log(lanes: Path, name: str, where: str, case: str) -> Path:
+    """A main thread's log in `where`, with a cell that calls a tool this script flags, written so that
+    its first line says nothing of where the thread started."""
+    meta = root_meta(where, "MOCK-extra")
+    if case == "work directory a list":
+        meta["cwd"] = [where]
+    elif case == "no work directory":
+        del meta["cwd"]
+    log = write_log(lanes, name, meta, records=[{"type": "turn_context", "payload": {"cwd": where}},
+                                                exec_call('text(await tools.read_file({path: "MOCK"}))')])
+    text = log.read_text()
+    other = json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}) + "\n"
+    written = {"blank first line": ("\n" + text).encode(), "another record first": (other + text).encode(),
+               "byte order mark": b"\xef\xbb\xbf" + b"\n" + text.encode(),
+               "UTF-16": text.encode("utf-16"), "UTF-16, little-endian": text.encode("utf-16-le"),
+               "UTF-32": text.encode("utf-32"), "UTF-32, little-endian": text.encode("utf-32-le")}.get(case)
+    if written is not None:
+        log.write_bytes(written)
+    return log
+
+
+@pytest.mark.parametrize("case", ["blank first line", "another record first", "byte order mark", "UTF-16",
+                                  "UTF-16, little-endian", "UTF-32", "UTF-32, little-endian",
+                                  "work directory a list", "no work directory"])
+def test_a_log_whose_first_line_says_nothing_of_where_it_started_is_flagged_if_it_names_the_work_directory(
+        area, case):
+    """Review 5: a log in the work directory whose first line is blank or another record, one this
+    script reads in another encoding, and a session's record with no work directory it can read, each
+    hold a call that a search of first lines alone never reads. Each is flagged when it names the work
+    directory anywhere; the same log in a sibling (`sol-10` beside `sol-1`) is not."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    odd_log(lanes, "rollout-MOCK-extra.jsonl", workdir, case)
+    odd_log(lanes, "rollout-MOCK-sibling.jsonl", workdir + "0", case)
+    report = acs.audit_run(run, lanes)
+    assert [flag.split(":")[0] for flag in report["flags"]] == ["rollout-MOCK-extra.jsonl"], report["flags"]
+    assert "names the work directory, but its first line" in report["flags"][0]
+    assert {t["thread_id"] for t in report["threads"]} == {PARENT} and not report["passed"]
+
+
+@pytest.mark.parametrize("case", ["UTF-16, big-endian", "UTF-32, big-endian"])
+def test_a_log_whose_lines_python_reads_in_another_encoding_is_audited(area, case):
+    """Python's JSON reader takes a line of UTF-16 or UTF-32 that starts with a zero byte as big-endian
+    text, so such a log's every line parses: its thread is found and its calls audited."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    log = odd_log(lanes, "rollout-MOCK-extra.jsonl", workdir, "")
+    log.write_bytes(log.read_text().encode({"UTF-16, big-endian": "utf-16-be", "UTF-32, big-endian": "utf-32-be"}[case]))
+    report = acs.audit_run(run, lanes)
+    assert {t["thread_id"] for t in report["threads"]} == {PARENT, "MOCK-extra"}
+    assert any("an exec script calls tools.read_file" in flag for flag in report["flags"]) and not report["passed"]
+
+
+@pytest.mark.parametrize("spelled, result", [
+    ("{}/", "found"), ("{}/.", "found"), ("/{}", "found"), ("{}/MOCK/..", "found"),
+    ("{}/MOCK", "flagged"), ("file://{}", "flagged"),
+    ("{}0", "neither"), ("{}-MOCK", "neither"), ("{}.MOCK", "neither"), ("{}_MOCK", "neither")])
+def test_a_session_in_another_spelling_of_the_work_directory_is_audited(area, spelled, result):
+    """A sub-agent whose `cwd` spells the work directory otherwise (a `/` at the end, a `.` part, `//`
+    at the start, a name and `..`) is audited. One in a path that names the work directory but is
+    another (a folder inside it, a file URL) is flagged, and one in a sibling is neither: the parent's
+    started sub-agent is missing."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir)
+    write_log(lanes, "rollout-MOCK-helper.jsonl", {**helper_meta(workdir), "cwd": spelled.format(workdir)},
+              items=[search("MOCK helper query")])
+    report = acs.audit_run(run, lanes)
+    if result == "found":
+        assert {t["thread_id"] for t in report["threads"]} == {PARENT, HELPER} and report["passed"]
+        return
+    assert {t["thread_id"] for t in report["threads"]} == {PARENT} and report["missing"] == [HELPER]
+    assert report["flags"] == ([] if result == "neither" else [
+        f"rollout-MOCK-helper.jsonl: a session in {spelled.format(workdir)}, a path that names the work directory "
+        "but is another"]) and not report["passed"]
+
+
+def test_a_session_in_the_work_directory_in_capitals_is_flagged(area):
+    """A disk that ignores case, as macOS's does by default, reads the work directory in capitals as the
+    same folder, so the audit flags a sub-agent recorded there."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir)
+    write_log(lanes, "rollout-MOCK-helper.jsonl", {**helper_meta(workdir), "cwd": workdir.upper()},
+              items=[search("MOCK helper query")])
+    report = acs.audit_run(run, lanes)
+    assert report["missing"] == [HELPER] and not report["passed"]
+    assert report["flags"] == [f"rollout-MOCK-helper.jsonl: a session in {workdir.upper()}, a path that names the "
+                               "work directory but is another"]
+
+
+@pytest.mark.parametrize("kind, why", [
+    ("a folder", "not a regular file"), ("a pipe", "not a regular file"), ("a link to nothing", "not a regular file"),
+    pytest.param("no permission to read it", "PermissionError",
+                 marks=pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file"))])
+def test_a_log_this_script_cannot_open_is_flagged(area, kind, why):
+    """A log that is no regular file is flagged without being opened: opening a pipe would wait for a
+    writer forever. So is a regular file the system will not let this script read."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    odd = lanes / "codex-9" / "sessions" / "2026" / "11" / "03" / "rollout-MOCK-odd.jsonl"
+    {"a folder": odd.mkdir, "a pipe": lambda: os.mkfifo(odd),
+     "a link to nothing": lambda: odd.symlink_to(odd.with_name("MOCK-gone")),
+     "no permission to read it": lambda: (odd.write_text("{}\n"), odd.chmod(0))}[kind]()
+    report = acs.audit_run(run, lanes)
+    assert report["flags"] == [f"rollout-MOCK-odd.jsonl: this script cannot open it ({why})"]
+    assert not report["passed"]
+
+
+def test_a_log_whose_whole_text_this_script_cannot_read_is_flagged(area, monkeypatch):
+    """A log whose first line says nothing of where its thread started is read whole for the work
+    directory's name; when that read fails (the log's permissions changed after its first line was
+    read, say), the log is flagged as one this script cannot open."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    log = odd_log(lanes, "rollout-MOCK-extra.jsonl", workdir, "blank first line")
+    read_bytes = Path.read_bytes
+
+    def refuse(path):
+        if path.name == log.name:
+            raise PermissionError("MOCK")
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+    report = acs.audit_run(run, lanes)
+    assert report["flags"] == ["rollout-MOCK-extra.jsonl: this script cannot open it (PermissionError)"]
+    assert not report["passed"]
+
+
+@pytest.mark.parametrize("workdir", [None, "", "MOCK/work/sol-1", ["/MOCK/work/sol-1"]],
+                         ids=["none", "empty", "relative", "a list"])
+def test_a_run_whose_work_directory_is_not_an_absolute_path_fails(area, workdir):
+    lanes, run, real = area
+    add_parent(lanes, real, spawned=())
+    meta = json.loads((run / "meta.json").read_text())
+    (run / "meta.json").write_text(json.dumps({**meta, "workdir": workdir}))
+    report = acs.audit_run(run, lanes)
+    assert report["threads"] == [] and not report["passed"]
+    assert report["flags"][0] == f"the run gives {json.dumps(workdir)} as its work directory, not an absolute path"
 
 
 @pytest.mark.parametrize("timestamp", [1762193430, ["2026-11-03T18:10:30Z"]], ids=["a number", "a list"])
@@ -1200,6 +1413,37 @@ def test_a_number_joins_a_string_as_javascript_writes_it(expr, folded):
     assert acs._fold(assignment.child_by_field_name("right"), src) == folded
 
 
+@pytest.mark.parametrize("expr, folded", [
+    ('"a" + true', "atrue"),
+    ('false + "a"', "falsea"),
+    ('"a" + null', "anull"),
+    ("`${true}${false}${null}`", "truefalsenull"),
+    ('"a" + true + 1', "atrue1"),
+    ("`a` + 1", "a1"),  # a template is a string, so `+` joins
+    ('(true) + "a"', "truea"),
+    ('true + 1 + "a"', None),  # `true + 1` adds, as `1 + 2` does
+    ('true + null + "a"', None),
+    ('"a" + undefined', None),  # a name, which a script may declare
+    ('"a" + -1', None),  # a unary operator
+    ("`${-1}`", None),
+    ('"\\uD83D" + "\\uDE00"', "\U0001f600"),  # the halves of one character, joined
+    ('"\\uD83D" + `\\uDE00`', "\U0001f600"),
+    ('`\\uD83D${"\\uDE00"}`', "\U0001f600"),
+    ("`\\uD83D\\uDE00`", "\U0001f600"),
+    ('"\\uDE00" + "\\uD83D"', "\ude00\ud83d"),  # in the other order, two halves
+    ("`a\r\nb\rc\nd`", "a\nb\nc\nd"),  # a template reads CR LF and CR as LF
+    ("`a\\\r\nb`", "ab"),  # and a backslash before them as no character at all
+    ("`a\u2028b`", "a\u2028b"),  # but keeps a line separator
+    ('"a\\\r\nb"', "ab"),
+])
+def test_a_literal_joins_a_string_as_javascript_joins_it(expr, folded):
+    src = f"x = {expr};".encode()
+    tree = acs._JS.parse(src)
+    assert not tree.root_node.has_error
+    assignment = tree.root_node.named_children[0].named_children[0]
+    assert acs._fold(assignment.child_by_field_name("right"), src) == folded
+
+
 @given(x=st.floats(min_value=0, allow_nan=False))
 @example(x=0.0)
 @example(x=100.0)
@@ -1232,6 +1476,15 @@ def test_an_index_that_can_build_a_denied_name_is_flagged(data):
         src = f"{held}const o = {{}}; text(o[{key}]);".encode()
         problems = acs.cell_problems(acs._JS.parse(src), src)
         assert any(problem.startswith("indexes with") for problem in problems), (src, problems)
+
+
+@pytest.mark.parametrize("key", ['v0 + "unction"', "`${v0}unction`"])
+def test_an_index_that_builds_a_denied_name_around_a_variable_is_flagged(key):
+    """A fixed case of the property above: `Function` from a piece a variable holds and a piece written
+    out, which is part of a denied name."""
+    src = f'const v0 = "F"; const o = {{}}; text(o[{key}]);'.encode()
+    problems = acs.cell_problems(acs._JS.parse(src), src)
+    assert any(problem.startswith("indexes with") for problem in problems), problems
 
 
 @settings(deadline=None)
@@ -1270,6 +1523,86 @@ def test_discovery_reads_the_work_directory_however_json_spells_it(path, note, d
                 log.write_text(broken + "\n")
                 threads, problems = acs.find_threads([log], workdir)
                 assert threads == {} and len(problems) == int(named)
+
+
+def _json_ways(char: str) -> list[str]:
+    """Each way JSON can write a character in a string: as itself (but a quote or a backslash), as a
+    short escape, or as `\\u` escapes in either case, two of them for a character past U+FFFF."""
+    if char in '"\\':
+        return {'"': ['\\"', "\\u0022"], "\\": ["\\\\", "\\u005c"]}[char]
+    units = char.encode("utf-16-be")
+    escaped = ["".join(f"\\u{int.from_bytes(units[i:i + 2]):04{case}}" for i in range(0, len(units), 2))
+               for case in "xX"]
+    return [char, *escaped, *(["\\/"] if char == "/" else [])]
+
+
+# What may stand before and after the work directory in a log's text, and what of it ends the name.
+BEFORE = ["", "/", " ", '"', ":", "\\", "MOCK", "0", "-", ".", "_", "~"]
+AFTER = ["", "/", "/MOCK", " MOCK", '"', "0", "-MOCK", ".MOCK", "_MOCK", "\\MOCK"]
+ENDS_BEFORE = {"", "/", " ", '"', ":", "\\"}
+ENDS_AFTER = {"", "/", "/MOCK", " MOCK", '"'}
+
+
+@settings(deadline=None)
+@given(path=st.lists(st.from_regex(r"[A-Za-z0-9._\-Ā😀]{1,8}", fullmatch=True), min_size=1, max_size=4),
+       before=st.sampled_from(BEFORE), after=st.sampled_from(AFTER), slash=st.booleans(),
+       encoding=st.sampled_from(["utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le",
+                                 "utf-32-be"]),
+       pad=st.integers(0, 3), capitals=st.booleans(), data=st.data())
+def test_a_log_names_the_work_directory_in_any_encoding_and_spelling(path, before, after, slash, encoding, pad,
+                                                                     capitals, data):
+    """Property: `_mentions` finds the work directory in a log however its JSON spells it, in either
+    case, as UTF-8, UTF-16 or UTF-32 text after any number of other bytes, exactly when what stands
+    next to it ends its name. Before it, that is a `/`, a space, a quote, a `:`, a backslash or
+    nothing, but not a letter, digit, `-`, `.`, `_` or `~`; after it, a `/`, a space, a quote or
+    nothing, but not a letter, digit, `-`, `.`, `_` or backslash. A `/` at the end of the work
+    directory names the same folder."""
+    workdir = "/" + "/".join(path)
+    text = before + workdir + after
+    spelled = "".join(data.draw(st.sampled_from(_json_ways(char))) for char in (text.upper() if capitals else text))
+    line = '{"type": "MOCK", "payload": {"note": "MOCK", "cwd": "' + spelled + '"}}\n'
+    named = before in ENDS_BEFORE and after in ENDS_AFTER
+    assert acs._mentions(b"\x00" * pad + line.encode(encoding), workdir + "/" * slash) is named
+
+
+def test_what_stands_next_to_the_work_directory_ends_its_name_or_not():
+    """The property above for each thing it puts before and after the work directory, in the work
+    directory's case and in capitals, with and without a `/` at its end, since a run of the property
+    may draw none of the few that tell one rule from another."""
+    wrong = [(before, after, case.__name__, slash) for before in BEFORE for after in AFTER
+             for case in (str, str.upper) for slash in ("", "/")
+             if acs._mentions(('{"cwd": ' + json.dumps(case(before + "/MOCK/work" + after)) + "}\n").encode(),
+                              "/MOCK/work" + slash) is not (before in ENDS_BEFORE and after in ENDS_AFTER)]
+    assert wrong == []
+
+
+@pytest.mark.parametrize("way", range(4))
+def test_a_log_names_the_work_directory_however_json_spells_its_characters(way):
+    """Each way JSON writes the work directory's characters, all of them one way: as themselves, as
+    `\\u` escapes in lower case or in capitals (two of them for a character past U+FFFF), and `/` as
+    `\\/` beside the rest in capitals."""
+    workdir = "/MOCK/Ā😀"
+    spelled = "".join(ways[min(way, len(ways) - 1)] for ways in map(_json_ways, workdir))
+    assert acs._mentions(('{"cwd": "' + spelled + '"}\n').encode(), workdir)
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"])
+@pytest.mark.parametrize("pad", [0, 1, 2, 3])
+def test_a_log_names_the_work_directory_in_each_encoding_after_any_bytes(encoding, pad):
+    """`_mentions` reads a log in each encoding from each byte a character can start at. Text in one
+    byte order, read in the other from one byte off (later for little-endian text, earlier for
+    big-endian), spells the same characters up to U+00FF, so a path with characters past U+00FF shows
+    that each reading counts."""
+    workdir = "/MOCK/Ā😀"
+    line = '{"type": "MOCK", "payload": {"cwd": "' + workdir + '"}}\n'
+    assert acs._mentions(b"\x00" * pad + line.encode(encoding), workdir)
+
+
+def test_a_byte_that_does_not_decode_is_no_letter():
+    """A byte that does not decode reads as U+FFFD, which is no letter, `.`, `_` or `-`, so it ends a
+    name: the work directory after `-` and such a byte is named, and after `-` alone it is not."""
+    assert acs._mentions(b'{"cwd": "-\xff/MOCK/work"}\n', "/MOCK/work")
+    assert not acs._mentions(b'{"cwd": "-/MOCK/work"}\n', "/MOCK/work")
 
 
 # What a JavaScript string may escape as the character itself: no escape with a meaning of its own

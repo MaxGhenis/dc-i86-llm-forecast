@@ -207,7 +207,8 @@ def _session_audit(run_dir: Path):
 
 
 def _transcript_thread(path: Path) -> str | None:
-    """The thread a `codex exec --json` transcript records (its first `thread.started` event)."""
+    """The thread a `codex exec --json` transcript records (its first `thread.started` event), or None
+    if it records none or one whose id is not a string."""
     if not path.is_file():
         return None
     for raw in path.read_text(errors="replace").split("\n"):
@@ -216,54 +217,69 @@ def _transcript_thread(path: Path) -> str | None:
         except (ValueError, RecursionError):
             continue
         if isinstance(line, dict) and line.get("type") == "thread.started":
-            return str(line.get("thread_id"))
+            tid = line.get("thread_id")
+            return tid if isinstance(tid, str) else None
     return None
 
 
+def _counts(value) -> bool:
+    """Whether a value is a table of counts: whole numbers of zero or more."""
+    return isinstance(value, dict) and all(type(v) is int and v >= 0 for v in value.values())
+
+
 def _session_problem(run_dir: Path, rec: dict) -> str | None:
-    """Why a session audit that says it passed does not hold up, or None. The gate reads the verdict
-    again rather than trust it: no flags, missing threads or orphans; each thread with an id of its
-    own, and it passed its own audit with no violation; each parent among the threads, every thread
+    """Why a session audit that says it passed does not hold up, or None. The gate reads the verdict again
+    rather than trust it: the run's own work directory, an absolute path; no flags, missing threads or
+    orphans; each thread with an id of its own, counts of zero or more, and it passed its own audit,
+    which reads one event or more and finds no violation; each parent among the threads, every thread
     descended from a main thread with no cycle, and each thread's `spawn_agent` calls as many as the
-    threads that name it as their parent; totals that add up; as its main thread, a thread `codex
-    exec` started, the one the transcript records; and a check of the transcript that found the same
-    calls in it and in the main thread's log. With attempts on record (`attempts.json`), they must be
-    the job's attempts a1, a2 and on, and meta.json's attempt must be the one subfleet accepted, with
-    the main thread as its session; each attempt that started must name its own session among the
-    threads, a main thread, and each main thread must be an attempt's session. With none, the run has
-    one main thread, from the job's first attempt."""
+    threads that name it as their parent; totals that add up; as its main thread, a thread `codex exec`
+    started, the one the transcript records; a check of the transcript that found the same calls in it
+    and in the main thread's log; and each thread marked as collected exactly when it descends from the
+    main thread, and with the attempt whose session it descends from. With attempts on record
+    (`attempts.json`), they must be the job's attempts a1, a2 and on, the job meta.json's and the
+    audit's, and meta.json's attempt must be the one subfleet accepted and the audit names, with the
+    main thread as its session; each attempt that started must name its own session among the threads,
+    a main thread, and each main thread must be an attempt's session. With none, the run has one main
+    thread, from the job's first attempt."""
+    meta = runners.read_meta(run_dir)
     threads = rec["threads"]
     parent = {t["thread_id"]: t.get("spawned_by") for t in threads}
     ids = set(parent)
+    workdir = meta.get("workdir")
+    if not (isinstance(workdir, str) and workdir.startswith("/") and rec.get("workdir") == workdir):
+        return "it does not audit the run's work directory, an absolute path"
     for key in ("flags", "missing", "orphans"):
         if rec.get(key) != []:
             return f"its {key!r} field is not an empty list"
     if len(ids) != len(threads):
         return "two of its threads share an id"
-    if not all(t["audit"].get("passed") is True and t["audit"].get("violations") == [] for t in threads):
-        return "one thread's own audit failed"
+    if not all(t["audit"].get("passed") is True and t["audit"].get("violations") == []
+               and type(t["audit"].get("events")) is int and t["audit"]["events"] > 0 for t in threads):
+        return "one thread's own audit failed: it found a violation or read no events"
+    if not all(_counts(t.get(key)) for t in threads for key in ("items", "script_tools", "functions")):
+        return "one thread's counts are not whole numbers of zero or more"
     if any(p is not None and p not in ids for p in parent.values()):
         return "one thread's parent is not among its threads"
+    root = {}
     for tid in parent:
-        seen = set()
-        while parent[tid] is not None:
-            if tid in seen:
+        seen, top = set(), tid
+        while parent[top] is not None:
+            if top in seen:
                 return "its threads' parents form a cycle"
-            seen.add(tid)
-            tid = parent[tid]
+            seen.add(top)
+            top = parent[top]
+        root[tid] = top
     children = collections.Counter(parent.values())
-    for t in threads:
-        calls = t["functions"].get("spawn_agent", 0) if isinstance(t.get("functions"), dict) else None
-        if calls != children[t.get("thread_id")]:
-            return "one thread's spawn_agent calls do not match the threads that name it as their parent"
+    if any(t["functions"].get("spawn_agent", 0) != children[t["thread_id"]] for t in threads):
+        return "one thread's spawn_agent calls do not match the threads that name it as their parent"
 
     def total(values) -> int | None:
-        return sum(values) if all(type(v) is int for v in values) else None
+        return sum(values) if all(type(v) is int and v >= 0 for v in values) else None
 
-    items = [t["items"] if isinstance(t.get("items"), dict) else {} for t in threads]
     totals = {"web_calls": total([t["audit"].get("web_calls") for t in threads]),
               "served_pages": total([t.get("served_pages") for t in threads]),
-              "commands": total([i.get("CommandExecution", 0) for i in items]),
+              "commands": total([t["items"].get("CommandExecution", 0) for t in threads]),
               "violations": 0, "suspect": sum(len(t["audit"]["suspect"]) + len(t["script_suspect"]) for t in threads)}
     for key, value in totals.items():
         if value is None or type(rec.get(key)) is not int or rec[key] != value:
@@ -276,47 +292,56 @@ def _session_problem(run_dir: Path, rec: dict) -> str | None:
     if main != _transcript_thread(run_dir / "transcript.jsonl"):
         return "its main thread is not the thread the transcript records"
     check = rec.get("transcript_check")
-    if not (isinstance(check, dict) and type(check.get("items")) is int
+    if not (isinstance(check, dict) and type(check.get("items")) is int and check["items"] >= 0
             and all(check.get(key) == [] for key in ("only_in_transcript", "only_in_log", "different"))):
         return "its check of the transcript is missing or found calls that differ from the main thread's log"
     roots = {tid for tid, p in parent.items() if p is None}
-    collected = runners.read_meta(run_dir).get("attempt_id")
+    collected = meta.get("attempt_id")
     kept = run_dir / SESSIONS / "attempts.json"
     if not kept.exists():
         if len(roots) != 1:
             return f"it has no attempts on record and {len(roots)} main threads"
         if collected is not None and not str(collected).endswith("/a1"):
             return f"it has no attempts on record, and the run collected {collected}, not its job's first attempt"
-        return None
-    try:
-        record = json.loads(kept.read_text())
-    except (ValueError, RecursionError):
-        return "its attempts.json does not parse"
-    listed = record.get("attempts") if isinstance(record, dict) else None
-    if not isinstance(listed, list) or not all(isinstance(a, dict) for a in listed):
-        return "its attempts.json lists no attempts"
-    if not all(isinstance(a.get("attempt_id"), str)
-               and (a.get("native_session_id") is None or isinstance(a["native_session_id"], str)) for a in listed):
-        return "its attempts.json gives an attempt an id or a session that is not a string"
-    job = runners.read_meta(run_dir).get("job_id")
-    if record.get("job_id") != job or sorted(a["attempt_id"] for a in listed) != sorted(
-            f"{job}/a{i}" for i in range(1, len(listed) + 1)):
-        return f"its attempts.json does not list the attempts of job {job} from a1 up"
-    if record.get("accepted_attempt_id") != collected or rec.get("collected_attempt") != collected:
-        return f"the run collected {collected}, not the attempt subfleet accepted and the audit names"
-    sessions = {a["attempt_id"]: a.get("native_session_id") for a in listed}
-    if sessions.get(collected) != main:
-        return "its main thread is not the collected attempt's session"
-    if any((a.get("native_session_id") or a.get("started_at")) and a.get("native_session_id") not in ids
-           for a in listed):
-        return "an attempt that started names no session among its threads"
-    named = [a["native_session_id"] for a in listed if a.get("native_session_id")]
-    if len(set(named)) != len(named):
-        return "two attempts name the same session"
-    if not set(named) <= roots:
-        return "an attempt's session is a sub-agent, not a main thread"
-    if not roots <= set(named):
-        return "a main thread among its threads is no attempt's session"
+        attempt_of = {}
+    else:
+        try:
+            record = json.loads(kept.read_text())
+        except (ValueError, RecursionError):
+            return "its attempts.json does not parse"
+        listed = record.get("attempts") if isinstance(record, dict) else None
+        if not isinstance(listed, list) or not all(isinstance(a, dict) for a in listed):
+            return "its attempts.json lists no attempts"
+        if not all(isinstance(a.get("attempt_id"), str)
+                   and (a.get("native_session_id") is None or isinstance(a["native_session_id"], str))
+                   for a in listed):
+            return "its attempts.json gives an attempt an id or a session that is not a string"
+        job = meta.get("job_id")
+        if record.get("job_id") != job or sorted(a["attempt_id"] for a in listed) != sorted(
+                f"{job}/a{i}" for i in range(1, len(listed) + 1)):
+            return f"its attempts.json does not list the attempts of job {job} from a1 up"
+        if rec.get("job_id") != job:
+            return f"it names job {str(rec.get('job_id'))[:200]}, not the run's job {job}"
+        if record.get("accepted_attempt_id") != collected or rec.get("collected_attempt") != collected:
+            return f"the run collected {collected}, not the attempt subfleet accepted and the audit names"
+        sessions = {a["attempt_id"]: a.get("native_session_id") for a in listed}
+        if sessions.get(collected) != main:
+            return "its main thread is not the collected attempt's session"
+        if any((a.get("native_session_id") or a.get("started_at")) and a.get("native_session_id") not in ids
+               for a in listed):
+            return "an attempt that started names no session among its threads"
+        named = [a["native_session_id"] for a in listed if a.get("native_session_id")]
+        if len(set(named)) != len(named):
+            return "two attempts name the same session"
+        if not set(named) <= roots:
+            return "an attempt's session is a sub-agent, not a main thread"
+        if not roots <= set(named):
+            return "a main thread among its threads is no attempt's session"
+        attempt_of = {a["native_session_id"]: a["attempt_id"] for a in listed if a.get("native_session_id")}
+    if any(t.get("collected") is not (root[t["thread_id"]] == main) for t in threads):
+        return "one thread is marked collected though it does not descend from the main thread, or the reverse"
+    if any(t.get("attempt") != attempt_of.get(root[t["thread_id"]]) for t in threads):
+        return "one thread names an attempt other than the one whose session it descends from"
     return None
 
 

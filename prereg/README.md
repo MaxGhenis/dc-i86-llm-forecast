@@ -73,4 +73,15 @@ After `2026-11-04-served/`:
   It fails a run whose transcript holds an item of a type it cannot read. It writes each number a
   cell writes out as JavaScript writes it in a string, however many digits it has. Re-auditing the
   four Sol runs leaves every `codex-sessions/audit.json` and `attempts.json` byte for byte the same.
+- The audit now also fails a run whose transcript holds a line it cannot read or gives a thread id that
+  is not a string, and its check of the transcript counts each item that repeats another's id. It flags
+  a tool output or a command's working directory of a type its checks cannot read. In the strings a
+  cell builds, it reads `true`, `false` and `null`, reads a template's line breaks as JavaScript does,
+  and joins the two halves of a character that two strings spell. It reads the first line of every
+  session log to find a run's threads. It flags a log it cannot open and a session in a folder inside
+  the work directory or at another path that names it. It also flags a log that names the work
+  directory without saying on its first line where its thread started. Re-auditing the four Sol runs
+  again leaves every `codex-sessions/audit.json` and `attempts.json` byte for byte the same.
+- `simulate` also checks each audit's work directory, job and counts, and that each thread's own audit
+  read one event or more. It checks which threads the audit marks as collected, and with which attempt.
 - Every file in this manifest still matches.

@@ -8,14 +8,19 @@ record them. So `i86 audit`, which reads the transcript, never sees their calls.
 fails (the model at capacity, say), subfleet runs the brief again in the same work directory; the
 transcript is the collected attempt's alone. For each Codex run this script:
 
-1. finds every thread that started in the run's work directory: each main thread (a session `codex
-   exec` started there) and every thread spawned from one, at any depth, in the lanes' logs and the
-   copies already kept (so a rerun after a lane prunes its logs gives the same audit). Each thread a
-   log says it started must have a log, each thread's `spawn_agent` calls must match the sub-agents it
-   started and the threads that name it as their parent, each thread must descend from a main thread
-   with no cycle, and two logs of one thread must hold the same bytes. A log's first line names the
-   work directory as JSON writes it or with escapes (`\\/`, `\\u002f`); one that names it but does
-   not parse, or gives a source or start time this script cannot read, is flagged;
+1. finds every thread that started in the run's work directory: each main thread (a session
+   `codex exec` started there) and every thread spawned from one, at any depth, in the lanes' logs and
+   the copies already kept (so a rerun after a lane prunes its logs gives the same audit). Each thread
+   a log says it started must have a log, each thread's `spawn_agent` calls must match the sub-agents
+   it started and the threads that name it as their parent, each thread must descend from a main thread
+   with no cycle, and two logs of one thread must hold the same bytes. A thread started there when its
+   log's first line is a session's record whose `cwd` is the work directory, however its JSON spells
+   it, once both paths are normalized. This script compares paths as text, so it misses a thread whose
+   log records another path to the folder, such as a symlink to it. A log this script cannot open is
+   flagged; so is one that names the work directory anywhere (as UTF-8, UTF-16 or UTF-32 text, with
+   JSON's escapes such as `\\/` and `\\u002f` decoded) though its first line says nothing of where its
+   thread started, a session in a path that names the work directory but is another, and a session
+   there that gives no thread id or a source or start time this script cannot read;
 2. reads the run's attempts from subfleet (`subfleet runs show JOB --json`) and keeps them in
    `runs/<label>/codex-sessions/attempts.json`, never replacing a different record. The record must
    list the job's attempts a1, a2 and on. Each main thread must be the session of one of them, each
@@ -66,6 +71,8 @@ import decimal
 import hashlib
 import json
 import math
+import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -166,6 +173,10 @@ KEY_PARTS = {"identifier", "number", "member_expression", "property_identifier",
 # A JavaScript string's escapes: `\u{...}`, `\uXXXX`, `\xXX`, a line continuation, or one character.
 ESCAPE = re.compile(r"\\(?:u\{([0-9A-Fa-f]{1,6})\}|u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2})|(\r\n|[\s\S]))")
 SIMPLE_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+# A JSON string's escapes, and the encodings a log could be written in, each with the bytes of its
+# smallest unit.
+JSON_ESCAPE = re.compile(r'\\(?:u([0-9A-Fa-f]{4})|(["\\/bfnrt]))')
+ENCODINGS = (("utf-8", 1), ("utf-16-le", 2), ("utf-16-be", 2), ("utf-32-le", 4), ("utf-32-be", 4))
 # A number as a module may write it (strict mode: no legacy octal like `017`, and `_` only between
 # digits): a whole number in base 16, 8, 2 or 10, which `n` makes a BigInt, or a decimal.
 WHOLE = re.compile(r"0[xX](?P<x>[0-9a-fA-F](?:_?[0-9a-fA-F])*)|0[oO](?P<o>[0-7](?:_?[0-7])*)"
@@ -192,20 +203,34 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _names(first: bytes, needle: bytes, workdir: str) -> bool:
-    """Whether a log's first line holds the work directory as JSON writes it (`needle`), or as a
-    JSON string that spells it with an escape (`\\/`, `\\u002f`). The directory holds no quote, so
-    such a string runs from one quote in the line to the next, however a line that does not parse
-    pairs its quotes."""
-    return needle in first or any((b"\\/" in piece or b"\\u" in piece) and _decodes_to(b'"' + piece + b'"', workdir)
-                                  for piece in first.split(b'"')[1:-1])
+def _normalized(path: str) -> str:
+    """A path as `os.path.normpath` writes it (no repeated `/`, no `.` part, no `..` part after a name
+    and no `/` at the end), with `//` at the start read as `/`."""
+    return posixpath.normpath(re.sub(r"\A/+", "/", path))
 
 
-def _decodes_to(token: bytes, text: str) -> bool:
-    try:
-        return json.loads(token) == text
-    except (ValueError, RecursionError):
-        return False
+def _names_directory(text: str, workdir: str) -> bool:
+    """Whether text holds the work directory as a path, in any case (a disk that ignores case reads
+    `/MOCK/SOL-1` as `/MOCK/sol-1`): with no letter, digit, `_`, `.` or `-` just before or after it, no
+    `~` before it and no backslash after it (which can start an escape that spells one), so
+    `/MOCK/sol-10` does not name `/MOCK/sol-1`, while a path inside the directory does."""
+    pattern = r"(?<![\w.~-])" + re.escape(workdir.rstrip("/")) + r"(?![\w.\\-])"
+    return re.search(pattern, text, re.IGNORECASE) is not None
+
+
+def _json_unescaped(text: str) -> str:
+    """Text with JSON's string escapes decoded, read left to right, so `\\\\u002f` is a backslash and
+    `u002f`."""
+    simple = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+    return _utf16(JSON_ESCAPE.sub(lambda m: chr(int(m[1], 16)) if m[1] else simple[m[2]], text))
+
+
+def _mentions(data: bytes, workdir: str) -> bool:
+    """Whether a log names the work directory anywhere (`_names_directory`) once JSON's escapes are
+    decoded, read as UTF-8, or as UTF-16 or UTF-32 of either byte order from any of its first bytes. A
+    byte that does not decode reads as U+FFFD, which is no letter."""
+    texts = (data[skip:].decode(codec, "replace") for codec, width in ENCODINGS for skip in range(width))
+    return any(_names_directory(_json_unescaped(text), workdir) for text in texts)
 
 
 def _record(raw: bytes | str):
@@ -237,36 +262,49 @@ def _nests_deeper_than(value, levels: int) -> bool:
 
 def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list[str]]:
     """Every session log among `paths` whose thread started in `workdir`, by thread id, and what the
-    search could not read. A JSON string spells the work directory either as `json.dumps` writes it
-    or with an escape, `\\/` or `\\u`, since the directory holds no quote, backslash or control
-    character. So a first line with neither cannot name it as its `cwd`, and only the others are
-    parsed (the lanes hold tens of thousands of logs). One whose first line names it but does not
-    parse (`_record`) as a `session_meta` record, a session there with no thread id or a source or start
-    time this script cannot read, and a thread whose logs differ are reported; a second log of a thread that
+    search could not read. A thread started there when its log's first line parses (`_record`) as a
+    `session_meta` record whose `cwd` is the work directory, the same path once `_normalized`. A log
+    this script cannot open is reported. So is one whose first line says nothing of where its thread
+    started (it does not parse, is another record or gives no `cwd` this script can read) when the
+    log names the work directory anywhere (`_mentions`), and a session in a path that names the work
+    directory but is another. A session there with no thread id or a source or start time this
+    script cannot read, and a thread whose logs differ, are reported too; a second log of a thread that
     matches the first byte for byte is the same log."""
-    needle = json.dumps(workdir, ensure_ascii=False).encode()
     found: dict[str, dict] = {}
     problems: list[str] = []
     for path in paths:
-        try:
-            with path.open("rb") as fh:
-                first = fh.readline()
-        except OSError:
-            continue
-        if needle not in first and b"\\/" not in first and b"\\u" not in first:
+        problem = None if os.path.isfile(path) else "not a regular file"  # a folder, or a pipe that would block
+        if problem is None:
+            try:
+                with path.open("rb") as fh:
+                    first = fh.readline()
+            except OSError as error:
+                problem = type(error).__name__
+        if problem is not None:
+            problems.append(f"{path.name}: this script cannot open it ({problem})")
             continue
         try:
             record = _record(first)
         except (ValueError, RecursionError):
-            if _names(first, needle, workdir):
-                problems.append(f"{path.name}: its first line names the work directory but does not parse")
-            continue
+            record = None
         meta = record.get("payload") if isinstance(record, dict) and record.get("type") == "session_meta" else None
-        if not isinstance(meta, dict):
-            if _names(first, needle, workdir):
-                problems.append(f"{path.name}: its first line names the work directory but is not a session's record")
+        cwd = meta.get("cwd") if isinstance(meta, dict) else None
+        if not isinstance(cwd, str):
+            problem = ("does not parse" if record is None
+                       else "is not a session's record" if not isinstance(meta, dict)
+                       else "gives no work directory this script can read")
+            try:
+                named = _mentions(path.read_bytes(), workdir)
+            except OSError as error:
+                problems.append(f"{path.name}: this script cannot open it ({type(error).__name__})")
+                continue
+            if named:
+                problems.append(f"{path.name}: it names the work directory, but its first line {problem}")
             continue
-        if meta.get("cwd") != workdir:
+        if _normalized(cwd) != _normalized(workdir):
+            if _names_directory(cwd, workdir):
+                problems.append(f"{path.name}: a session in {cwd[:200]}, a path that names the work directory "
+                                "but is another")
             continue
         tid = meta.get("id")
         if not isinstance(tid, str) or not tid:
@@ -383,7 +421,26 @@ def _unescape(raw: str) -> str:
             return chr(int(code, 16)) if int(code, 16) <= 0x10FFFF else ""
         char = match.group(4)
         return "" if char in ("\n", "\r", "\r\n", "\u2028", "\u2029") else SIMPLE_ESCAPES.get(char, char)
-    return ESCAPE.sub(one, raw).encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
+    return _utf16(ESCAPE.sub(one, raw))
+
+
+def _utf16(text: str) -> str:
+    """A string as JavaScript holds it, in UTF-16 code units: a high surrogate and the low one after it,
+    from two escapes or from two strings a `+` joins, are the one character they spell."""
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
+
+
+def _template_parts(node, src: bytes) -> list:
+    """A template's parts in order: the text between its substitutions as JavaScript reads it (each
+    CR LF or CR in the source as LF, and its escapes decoded), and the node of each substitution."""
+    parts, raw = [], ""
+    for part in node.named_children:
+        if part.type == "template_substitution":
+            parts += [_unescape(raw.replace("\r\n", "\n").replace("\r", "\n")), part]
+            raw = ""
+        else:
+            raw += _text(part, src)
+    return [*parts, _unescape(raw.replace("\r\n", "\n").replace("\r", "\n"))]
 
 
 def _parts(node) -> list:
@@ -393,13 +450,6 @@ def _parts(node) -> list:
 
 def _plus(node) -> bool:
     return node.type == "binary_expression" and getattr(node.child_by_field_name("operator"), "type", None) == "+"
-
-
-def _numeric(node) -> bool:
-    """Whether a node is a number written out, perhaps in parentheses."""
-    if node.type == "parenthesized_expression" and len(_parts(node)) == 1:
-        return _numeric(_parts(node)[0])
-    return node.type == "number"
 
 
 def _number(literal: str) -> str | None:
@@ -447,34 +497,46 @@ def _number_string(x: float) -> str:
 
 
 def _fold(node, src: bytes) -> str | None:
-    """The string a constant expression builds: a string, a number as JavaScript writes it in a string
-    (`_number`), a template whose substitutions fold, or a `+` of them with a string on at least one
-    side (a `+` of two numbers adds them). None for anything a script computes as it runs."""
+    """The string a constant expression builds: a string; a number, `true`, `false` or `null`, as
+    JavaScript writes it in a string (a number by `_number`); a template whose substitutions fold; or a
+    `+` of them with a string on at least one side. None for anything else, such as a variable
+    (`undefined` among them, which a script may declare), a unary operator (`-1`) or a `+` of two
+    numbers, which adds them: a script computes those as it runs."""
+    folded = _folded(node, src)
+    return None if folded is None else _utf16(folded[0])
+
+
+def _folded(node, src: bytes) -> tuple[str, bool] | None:
+    """What `_fold` reads a node as, and whether JavaScript holds it as a string rather than a number,
+    a boolean or null, which a `+` joins as text only to a string."""
     kind = node.type
     if kind == "string":
-        return _unescape("".join(_text(part, src) for part in node.named_children))
+        return _unescape("".join(_text(part, src) for part in node.named_children)), True
     if kind == "number":
-        return _number(_text(node, src))
+        value = _number(_text(node, src))
+        return None if value is None else (value, False)
+    if kind in ("true", "false", "null"):
+        return kind, False
     if kind == "template_string":
         parts = []
-        for part in node.named_children:
-            if part.type != "template_substitution":
-                parts.append(_unescape(_text(part, src)))
+        for part in _template_parts(node, src):
+            if isinstance(part, str):
+                parts.append(part)
                 continue
             inner = _parts(part)
-            value = _fold(inner[0], src) if len(inner) == 1 else None
+            value = _folded(inner[0], src) if len(inner) == 1 else None
             if value is None:
                 return None
-            parts.append(value)
-        return "".join(parts)
+            parts.append(value[0])
+        return "".join(parts), True
     if kind == "parenthesized_expression" and len(_parts(node)) == 1:
-        return _fold(_parts(node)[0], src)
+        return _folded(_parts(node)[0], src)
     if _plus(node):
-        left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
-        if _numeric(left) and _numeric(right):
+        left = _folded(node.child_by_field_name("left"), src)
+        right = _folded(node.child_by_field_name("right"), src) if left is not None else None
+        if right is None or not (left[1] or right[1]):
             return None
-        left, right = _fold(left, src), _fold(right, src)
-        return None if left is None or right is None else left + right
+        return left[0] + right[0], True
     return None
 
 
@@ -485,9 +547,9 @@ def _written(node, src: bytes) -> list[str]:
         return [_fold(node, src)]
     if kind == "template_string":
         parts = []
-        for part in node.named_children:
-            if part.type != "template_substitution":
-                parts.append(_unescape(_text(part, src)))
+        for part in _template_parts(node, src):
+            if isinstance(part, str):
+                parts.append(part)
             elif _parts(part):
                 parts += _written(_parts(part)[0], src)
         return parts
@@ -633,14 +695,7 @@ def _constants(tree, src: bytes) -> list[str]:
             if value is not None:
                 out.append(value)
         if node.type == "template_string":
-            piece = ""
-            for part in node.named_children:
-                if part.type == "template_substitution":
-                    out.append(_unescape(piece))
-                    piece = ""
-                else:
-                    piece += _text(part, src)
-            out.append(_unescape(piece))
+            out += [part for part in _template_parts(node, src) if isinstance(part, str)]
     return [text for text in dict.fromkeys(out) if text]
 
 
@@ -742,10 +797,14 @@ def check_page(url: str, workdir: str) -> tuple[str, str]:
 
 
 def output_text(output) -> str:
-    """A tool output's text: a string, or the text of each part of a list."""
-    if isinstance(output, list):
-        return "\n".join(str(part.get("text", "")) for part in output if isinstance(part, dict))
-    return output if isinstance(output, str) else ""
+    """A tool output's text: a string, or the text of each part of a list. An output of another shape
+    raises TypeError, so that its line gets a flag rather than leaving the pages it serves unread."""
+    if isinstance(output, str):
+        return output
+    if not isinstance(output, list) or not all(isinstance(part, dict) and isinstance(part.get("text", ""), str)
+                                               for part in output):
+        raise TypeError("a tool output this script cannot read")
+    return "\n".join(part.get("text", "") for part in output)
 
 
 def refused(output) -> bool:
@@ -860,7 +919,9 @@ def convert(path: Path, workdir: str) -> tuple[list[dict], dict]:
                 elif kind == "CommandExecution":
                     command = item.get("command")
                     cwd = local_path(item.get("cwd"))
-                    if cwd is not None and cwd.rstrip("/") != workdir.rstrip("/"):
+                    if cwd is None:  # a cwd missing, empty or of another type: where the command ran is unknown
+                        raise TypeError("a command without a working directory this script can read")
+                    if cwd.rstrip("/") != workdir.rstrip("/"):
                         found["flags"].append(f"line {n}: a command ran in {cwd}, outside the work directory")
                     lines.append({"type": "item.completed", "item": {
                         "id": item.get("id"), "type": "command_execution",
@@ -898,8 +959,9 @@ def convert(path: Path, workdir: str) -> tuple[list[dict], dict]:
 
 
 def _calls(lines: list[dict]) -> dict[str, list]:
-    """Each completed item's calls, as `audit` reads them, by item id. A shell command is compared as
-    the words it splits into: the transcript quotes the command the log keeps as a list."""
+    """Each completed item's calls, as `audit` reads them, listed under its item id in the order the
+    items complete, so that an item that repeats another's id still counts. A shell command is compared
+    as the words it splits into: the transcript quotes the command the log keeps as a list."""
     out: dict[str, list] = {}
     for line in lines:
         item = line.get("item")
@@ -915,28 +977,37 @@ def _calls(lines: list[dict]) -> dict[str, list]:
                 except ValueError:
                     pass
             calls.append([tool, json.dumps(inp, sort_keys=True, default=str)])
-        out[json.dumps(item.get("id"))] = calls
+        out.setdefault(json.dumps(item.get("id")), []).append(calls)
     return out
 
 
-def transcript_lines(path: Path) -> list[dict]:
-    """A transcript's events (the lines that parse as JSON objects)."""
+def transcript_lines(path: Path, unread: list[int] | None = None) -> list[dict]:
+    """A transcript's events: the lines that parse as JSON objects. Lines end at a newline alone, and a
+    line of JSON's whitespace alone is no line, as `audit` reads a transcript; `unread` collects the
+    number of each other line, which does not parse or is not an object."""
     lines = []
-    for raw in path.read_text(errors="replace").split("\n"):
+    for number, raw in enumerate(path.read_text(errors="replace").split("\n"), 1):
+        if not raw.strip(" \t\r\n"):
+            continue
         try:
             line = json.loads(raw)
         except (ValueError, RecursionError):
-            continue
+            line = None
         if isinstance(line, dict):
             lines.append(line)
+        elif unread is not None:
+            unread.append(number)
     return lines
 
 
 def check_transcript(transcript: Path, log_lines: list[dict]) -> dict:
-    """Whether the committed transcript records the same calls as the main thread's log, item by item."""
-    mine, theirs = _calls(log_lines), _calls(transcript_lines(transcript))
-    return {"items": len(theirs),
-            "only_in_transcript": sorted(k for k in theirs if k not in mine),
+    """Whether the committed transcript records the same calls as the main thread's log, item by item.
+    A transcript line this script cannot read could hold a call, so it counts as one only the
+    transcript holds."""
+    unread: list[int] = []
+    mine, theirs = _calls(log_lines), _calls(transcript_lines(transcript, unread))
+    return {"items": sum(map(len, theirs.values())),
+            "only_in_transcript": [*sorted(k for k in theirs if k not in mine), *(f"line {n}" for n in unread)],
             "only_in_log": sorted(k for k in mine if k not in theirs),
             "different": sorted(k for k in theirs if k in mine and theirs[k] != mine[k])}
 
@@ -951,18 +1022,23 @@ def audit_thread(path: Path, workdir: str) -> tuple[dict, dict, list[dict]]:
 
 
 def transcript_thread(path: Path) -> str | None:
-    """The thread a `codex exec --json` transcript records (its `thread.started` event)."""
+    """The thread a `codex exec --json` transcript records (its first `thread.started` event), or None
+    if it records none or one whose id is not a string."""
     if not path.is_file():
         return None
-    return next((str(line.get("thread_id")) for line in transcript_lines(path)
-                 if line.get("type") == "thread.started"), None)
+    tid = next((line.get("thread_id") for line in transcript_lines(path) if line.get("type") == "thread.started"), None)
+    return tid if isinstance(tid, str) else None
 
 
 def audit_run(run_dir: Path, lanes: Path) -> dict:
     meta = json.loads((run_dir / "meta.json").read_text())
-    workdir = meta.get("workdir", "")
+    workdir = meta.get("workdir")
     logs = [*sorted(lanes.glob("*/sessions/*/*/*/rollout-*.jsonl")), *sorted((run_dir / FOLDER).glob("rollout-*.jsonl"))]
-    threads, problems = find_threads(logs, workdir) if workdir else ({}, [])
+    if isinstance(workdir, str) and workdir.startswith("/"):
+        threads, problems = find_threads(logs, workdir)
+    else:
+        threads = {}
+        problems = [f"the run gives {json.dumps(workdir)[:200]} as its work directory, not an absolute path"]
     roots = sorted((t for t, v in threads.items() if v["spawned_by"] is None), key=lambda t: threads[t]["started"] or "")
     report = {"run": run_dir.name, "workdir": workdir, "threads": [], "missing": [], "flags": list(problems),
               "orphans": sorted(t for t, v in threads.items() if v["spawned_by"] and v["spawned_by"] not in threads)}
@@ -1020,7 +1096,8 @@ def audit_run(run_dir: Path, lanes: Path) -> dict:
     transcript = run_dir / "transcript.jsonl"
     recorded = transcript_thread(transcript)
     if main is not None and recorded != main:
-        report["flags"].append(f"the transcript records thread {recorded}, not the collected main thread {main}")
+        shown = f"thread {recorded[:200]}" if recorded is not None else "no thread whose id this script can read"
+        report["flags"].append(f"the transcript records {shown}, not the collected main thread {main}")
     report["main_thread"] = main if main is not None and recorded == main else None
 
     def root_of(tid: str) -> str:

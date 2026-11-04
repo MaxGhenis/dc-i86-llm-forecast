@@ -252,10 +252,11 @@ A Codex run's transcript holds only the collected attempt's main thread. Under C
 `codex exec --json` leaves out the sub-agents a forecaster spawns, which make tool calls of their own.
 When an attempt fails, subfleet runs the brief again in the same work directory and keeps the
 transcript of the attempt it collects. The lanes' session logs record every thread, and
-`scripts/audit_codex_sessions.py` audits them. It finds every thread that started in a run's work
-directory, however a log's JSON spells the directory, and audits each one's calls as `i86 audit`
-audits a transcript. It also checks the collected main thread's calls against the transcript's, item
-by item.
+`scripts/audit_codex_sessions.py` audits them. It finds every thread whose log records the run's work
+directory as the folder where it started, however the log's JSON spells the path. It compares paths as
+text, so it misses a thread whose log records another path to that folder, such as a symlink to it. It
+audits each thread's calls as `i86 audit` audits a transcript, and checks the collected main thread's
+calls against the transcript's, item by item.
 
 The script fails a run when:
 
@@ -263,8 +264,11 @@ The script fails a run when:
 - subfleet's record of the attempts names another job, skips an attempt, gives two attempts one
   session, or gives an attempt a sub-agent's thread as its session;
 - a thread descends from no main thread;
-- the transcript records any thread but the collected attempt's main thread, or its calls differ from
-  that thread's;
+- the script cannot open a session log, or finds a log that names the work directory without saying on
+  its first line where its thread started;
+- a session started in a folder inside the work directory, or at another path that names it;
+- the transcript records any thread but the collected attempt's main thread, holds a line the script
+  cannot read, or records calls that differ from that thread's;
 - a thread's `spawn_agent` calls do not match the sub-agents it started;
 - a thread's log holds a line the script cannot read: one that does not parse, gives a key twice,
   nests more than 64 levels or holds a field of a type its checks cannot read;
@@ -275,25 +279,26 @@ Every thread's suspect calls count toward the run's, including an earlier attemp
 
 On these lanes the model calls the web tool from JavaScript cells, and a log's items record only part
 of what a cell opens. So the script also reads each cell's code as a web call's input and audits every
-page the web tool says it served. It decodes the escapes in each string a cell writes out, writes
-each number as JavaScript writes it in a string, and joins what a `+` or a template puts together
-into one string before it checks them. It flags a cell that calls any
-tool but the web tool and the shell, reaches `tools` other than by name, or names a global the cells'
-runtime lacks. It also flags `eval`, `Function`, `constructor` and other words that can build code or
-reach a prototype, whether a cell writes one out or spells it from strings. A cell opens a page by
-giving `ref_id` a web address or the id of a result the web tool returned. The script flags a cell
-that writes `ref_id` anywhere but as a key in an object literal, or gives that key any value but a
-web address or id in quotes. A cell that does not parse as JavaScript passes only when
-its log shows the runtime refused to compile it. The script reads cells without running them, so a
-cell that builds a name or an address as it runs, by adding numbers or calling a function, could
-still hide a call.
+page the web tool says it served. It decodes the escapes in each string a cell writes out, writes each
+number, `true`, `false` and `null` as JavaScript writes it in a string, and joins what a `+` or a
+template puts together into one string, as JavaScript joins it, before it checks them. It flags a cell
+that calls any tool but the web tool and the shell, reaches `tools` other than by name, or names a
+global the cells' runtime lacks. It also flags `eval`, `Function`, `constructor` and other words that
+can build code or reach a prototype, whether a cell writes one out or spells it from strings. A cell
+opens a page by giving `ref_id` a web address or the id of a result the web tool returned. The script
+flags a cell that writes `ref_id` anywhere but as a key in an object literal, or gives that key any
+value but a web address or id in quotes. A cell that does not parse as JavaScript passes only when its
+log shows the runtime refused to compile it. The script reads cells without running them, so a cell
+that builds a name or an address as it runs, from a variable such as `undefined`, an array, a
+function's result, or an operator other than a `+` with a string on one side, could still hide a call.
 
 The script writes `runs/<label>/codex-sessions/audit.json`, with each log's SHA-256, and
 `attempts.json`, subfleet's record of the job's attempts. The logs themselves hold the lanes' account
 identifiers and local paths, and `.gitignore` keeps them out of this repository. `simulate` pools a
-Codex run only when this audit passed. It checks that verdict against the threads, their parents, the
-check of the transcript and the attempts that the two files record. It counts the run's suspect calls
-along with the transcript's, and reads the committed files without running either audit again.
+Codex run only when this audit passed. It checks that verdict against the run's work directory and job,
+and against the threads, their parents, counts and own audits, the check of the transcript and the
+attempts that the two files record. It counts the run's suspect calls along with the transcript's, and
+reads the committed files without running either audit again.
 `prereg` hashes each run's transcript, `audit.json` and `attempts.json`, so a file that changes after
 a stamp no longer matches the stamped list.
 
@@ -322,9 +327,9 @@ reader pooled sol-3 into the committed outputs with `simulate --accept-suspect s
   decisive-ballot formula against its closed form and of the weighted conditionals against plain
   filtering; audit cases, including every bypass found in review, the shell model against bash and zsh
   on generated programs, and the exact subset against bash, zsh, sh, dash and Claude Code's shell;
-  the session-log audit on MOCK logs; and the staging and pooling rules. `test_review_r3_*.py` to
-  `test_review_r6_*.py` are the independent reviews' probes, kept as regression tests. Test responses
-  are labelled MOCK.
+  the session-log audit on MOCK logs, and the strings and numbers it reads from cells against node's;
+  and the staging and pooling rules. `test_review_r3_*.py` to `test_review_r6_*.py` are the
+  independent reviews' probes, kept as regression tests. Test responses are labelled MOCK.
 
 ## What the numbers are
 
