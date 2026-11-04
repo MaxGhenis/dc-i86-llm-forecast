@@ -577,6 +577,14 @@ def _files(paths) -> list[Path]:
     return present
 
 
+def _sha256(p: Path) -> str:
+    """A file's SHA-256 for prereg's manifest. A file prereg cannot read stops it, by name."""
+    try:
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+    except OSError as error:
+        raise SystemExit(f"prereg cannot read {p.relative_to(ROOT)} ({type(error).__name__})") from None
+
+
 def cmd_prereg(args) -> int:
     files = [ROOT / "graph" / "graph.yaml", PROMPT_PATH, TEMPLATE_PATH, *sorted((ROOT / "context").iterdir())]
     for d in run_dirs():
@@ -586,7 +594,7 @@ def cmd_prereg(args) -> int:
         # logs stay out of this public repository; the audit records each one's SHA-256.
         files += _files((d / SESSIONS / "audit.json", d / SESSIONS / "attempts.json"))
     files += sorted(p for p in OUTPUTS.glob("*") if p.is_file())
-    lines = [f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(ROOT)}" for p in files]
+    lines = [f"{_sha256(p)}  {p.relative_to(ROOT)}" for p in files]
     PREREG.mkdir(exist_ok=True)
     sums, proof = PREREG / "SHA256SUMS", PREREG / "SHA256SUMS.ots"
     # The previous proof stamps the previous manifest. `ots stamp` will not overwrite it, and left in

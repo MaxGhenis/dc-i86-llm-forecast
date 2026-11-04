@@ -265,15 +265,17 @@ The script fails a run when:
   session, or gives an attempt a sub-agent's thread as its session;
 - a thread descends from no main thread;
 - the script cannot open a session log, or finds a log that names the work directory but whose first
-  line gives no absolute path for where its thread started;
+  line gives no absolute path for where its thread started (a path with a NUL, or a character UTF-8
+  cannot encode, counts as none);
 - a session started in a folder inside the work directory, or at another path that names it;
 - the transcript records any thread but the collected attempt's main thread, or records calls that
-  differ from that thread's;
+  differ from that thread's. The script reads calls and pairs ids as `i86 audit` does, so a message's
+  line can hold a call, and two ids that are numbers match only when they are equal;
 - the transcript holds any line but the thread's one start, events of its turns that hold no call, and
   items that each complete with the calls they started with;
 - a thread's `spawn_agent` calls do not match the sub-agents it started;
 - a thread ran a command outside the work directory, or in a folder the script cannot place: a relative
-  path, or one with a `..` part;
+  path, a file URL that names another host, or a path with a `..` part;
 - a thread's log holds a line the script cannot read: one that does not parse, gives a key twice,
   nests more than 64 levels or holds a field of a type its checks cannot read;
 - two logs of one thread differ; or
@@ -297,18 +299,20 @@ that builds a name or an address as it runs, from a variable such as `undefined`
 function's result, or an operator other than a `+` with a string on one side, could still hide a call.
 
 The script writes `runs/<label>/codex-sessions/audit.json`, with each log's SHA-256, and
-`attempts.json`, subfleet's record of the job's attempts. The logs themselves hold the lanes' account
-identifiers and local paths, and `.gitignore` keeps them out of this repository. The script keeps a
-copy of each log in the run's folder and never replaces one. It stops when a kept copy differs from
-the lane's or is not a regular file, or when it cannot read one. `simulate` pools a Codex run only when
-this audit passed. It checks that verdict against the run's work directory and job, and against what
-the two files record: the threads, their parents, fields, counts and own audits, the check of the
-transcript, and the attempts. Each thread's counts of events and calls must match its items, and its
-web addresses must match its web calls. `simulate` excludes a run when it cannot read either file as
-JSON. It counts the run's suspect calls along with the transcript's, and reads the committed files
-without running either audit again.
-`prereg` hashes each run's transcript, `audit.json` and `attempts.json`, so a file that changes after
-a stamp no longer matches the stamped list.
+`attempts.json`, subfleet's record of the job's attempts. The logs themselves hold the lanes'
+account identifiers and local paths, and `.gitignore` keeps them out of this repository. The script
+keeps a copy of each log in the run's folder and never replaces one. It stops when a kept copy
+differs from the lane's or is not a regular file, or when it cannot read one. It also stops when a
+link or anything but a folder sits where it keeps the copies. Where it writes `audit.json`, a link,
+anything but a regular file, or a file it cannot write stops it. `simulate` pools a Codex run only
+when this audit passed. It checks that verdict against the run's work directory and job, and against
+what the two files record: the threads, their parents, fields, counts and own audits, the check of
+the transcript, and the attempts. Each thread's counts of events and calls must match its items, and
+its web addresses must match its web calls. `simulate` excludes a run when it cannot read either
+file as JSON. It counts the run's suspect calls along with the transcript's, and reads the committed
+files without running either audit again. `prereg` hashes each run's transcript, `audit.json` and
+`attempts.json`, so a file that changes after a stamp no longer matches the stamped list. It stops,
+by name, at a run's file that is not a regular file and at any file it cannot read.
 
 The four GPT-6.1 Sol runs left 24 threads: 18 sub-agents and six main threads, since sol-1 and sol-3
 each made a second attempt after the first stopped with "Selected model is at capacity". Together

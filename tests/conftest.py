@@ -1,3 +1,5 @@
+import os
+import signal
 import sys
 from pathlib import Path
 
@@ -7,6 +9,34 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from i86 import audit, runners  # noqa: E402
 from i86 import graph as graph_mod  # noqa: E402
+
+
+class WaitedOnAPipe(BaseException):
+    """The code under test opened a pipe that no one else opens. A BaseException, so that code that
+    catches Exception or OSError cannot take it for an error of its own."""
+
+
+@pytest.fixture(autouse=True)
+def a_pipe_cannot_hang_a_test(monkeypatch):
+    """A test that makes a pipe (`os.mkfifo`) fails within 30 seconds, instead of waiting forever, if
+    the code under test opens it: no one opens the pipe's other end, so the open never returns. Making
+    the pipe sets an alarm, whose handler stops the wait."""
+    make, before = os.mkfifo, []
+
+    def stop(signum, frame):
+        raise WaitedOnAPipe("the code under test opened a pipe that no one else opens")
+
+    def mkfifo(path, *args, **kwargs):
+        make(path, *args, **kwargs)
+        if not before:
+            before.append(signal.signal(signal.SIGALRM, stop))
+        signal.alarm(30)
+
+    monkeypatch.setattr(os, "mkfifo", mkfifo)
+    yield
+    if before:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, before[0])
 
 
 @pytest.fixture(scope="session")

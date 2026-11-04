@@ -93,4 +93,11 @@ After `2026-11-04-served/`:
   It checks each thread's fields, and its counts of events and calls against its items, and excludes a
   run whose audit or attempts file it cannot read as JSON. `prereg` stops at a run's file that is not a
   regular file.
+- The audit's check of the transcript now compares a call in a message's line, and compares ids that
+  are numbers exactly, as `i86 audit` pairs them. The audit flags a log whose first line gives, as the
+  folder where its thread started, a path with a NUL or a character UTF-8 cannot encode, and a command
+  run in a folder that a file URL places on another host. A link in place of `codex-sessions/` stops
+  it. So does a link, anything but a regular file, or a file it cannot write in place of
+  `audit.json`. `prereg` stops at a file it cannot read. Re-auditing the four Sol runs leaves every
+  `codex-sessions/audit.json` and `attempts.json` byte for byte the same.
 - Every file in this manifest still matches.

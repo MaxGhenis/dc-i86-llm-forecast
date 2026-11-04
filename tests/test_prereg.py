@@ -4,6 +4,7 @@ in a temporary root."""
 
 import argparse
 import os
+import re
 
 import pytest
 
@@ -81,6 +82,22 @@ def test_a_run_file_that_is_not_a_regular_file_stops_prereg(tmp_path, monkeypatc
     {"a folder": path.mkdir, "a pipe": lambda: os.mkfifo(path),
      "a link to nothing": lambda: path.symlink_to(path.with_name("MOCK-gone"))}[kind]()
     with pytest.raises(SystemExit, match=f"runs/sol-1/{name} is not a regular file"):
+        cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+@pytest.mark.parametrize("name", ["codex-sessions/attempts.json", "codex-sessions/audit.json", "transcript.jsonl"])
+def test_a_run_file_prereg_cannot_read_stops_it(tmp_path, monkeypatch, name):
+    """Review 7: a regular file the system will not let prereg read stops it, by name, before it writes
+    a manifest, instead of an error from reading it."""
+    prereg = area(tmp_path, monkeypatch)
+    path = tmp_path / "runs" / "sol-1" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "runs" / "sol-1" / "meta.json").write_text("MOCK meta\n")
+    path.write_text("MOCK\n")
+    path.chmod(0)
+    with pytest.raises(SystemExit, match=rf"prereg cannot read runs/sol-1/{re.escape(name)} \(PermissionError\)"):
         cli.cmd_prereg(argparse.Namespace(no_stamp=True))
     assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
 
