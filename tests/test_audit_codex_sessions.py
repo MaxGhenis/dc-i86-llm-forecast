@@ -1067,6 +1067,7 @@ def test_a_constant_string_folds_to_what_the_script_builds(pieces):
     ('"a" + (1 + 2)', None),
     ('"a" + 1_0', "a10"),
     ('"a" + 0x' + "f" * 300, "aInfinity"),  # past the largest double
+    ('"a" + 9007199254740993n + 9007199254740993', "a90071992547409939007199254740992"),  # a BigInt keeps each digit
     ('"a" + 017', None),  # a legacy octal, which a module refuses
 ])
 def test_a_number_joins_a_string_as_javascript_writes_it(expr, folded):
