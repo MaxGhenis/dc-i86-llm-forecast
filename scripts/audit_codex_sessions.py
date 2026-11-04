@@ -12,15 +12,16 @@ transcript is the collected attempt's alone. For each Codex run this script:
    exec` started there) and every thread spawned from one, at any depth, in the lanes' logs and the
    copies already kept (so a rerun after a lane prunes its logs gives the same audit). Each thread a
    log says it started must have a log, each thread's `spawn_agent` calls must match the sub-agents it
-   started and the threads that name it as their parent, and two logs of one thread must hold the
-   same bytes. A log whose first line names the work directory but does not parse, or gives a source
-   this script cannot read, is flagged;
+   started and the threads that name it as their parent, each thread must descend from a main thread
+   with no cycle, and two logs of one thread must hold the same bytes. A log's first line names the
+   work directory as JSON writes it or with escapes (`\\/`, `\\u002f`); one that names it but does
+   not parse, or gives a source this script cannot read, is flagged;
 2. reads the run's attempts from subfleet (`subfleet runs show JOB --json`) and keeps them in
-   `runs/<label>/codex-sessions/attempts.json`, never replacing a different record. Each main thread
-   must be the session of one of the job's attempts, each attempt that started must name a session
-   with a log, and the collected attempt's main thread must be the thread the committed transcript
-   records. Without attempts on record, a run may have one main thread only, and must have collected
-   its job's first attempt;
+   `runs/<label>/codex-sessions/attempts.json`, never replacing a different record. The record must
+   list the job's attempts a1, a2 and on. Each main thread must be the session of one of them, each
+   attempt that started must name a session of its own with a log, a main thread, and the collected
+   attempt's main thread must be the thread the committed transcript records. Without attempts on
+   record, a run may have one main thread only, and must have collected its job's first attempt;
 3. copies the logs into `runs/<label>/codex-sessions/`, never replacing a different file. `.gitignore`
    keeps them out of this public repository; `audit.json` records each one's SHA-256;
 4. turns each log's completed items into the `codex exec --json` items `i86 audit` reads (web searches,
@@ -28,10 +29,12 @@ transcript is the collected attempt's alone. For each Codex run this script:
    transcript. The collected main thread's items must match its transcript's, item by item;
 5. reads what the items miss. An item records only part of what a `tools.web__run` call opens, nothing
    of what a click opens, and nothing for a call whose cell never finished. So it checks every `exec`
-   script's text as a web call's input (each URL in it; each page it opens by `ref_id`, which must be
-   one string written out; any scheme but http(s)), and audits each page the web tool's replies say it
-   served as the item of a call that opened it. A script that calls the shell is suspect: only a
-   command's item says what ran, and the shell rules read each string the script passes it;
+   script's text, and each string the script writes out or builds from constants with its escapes
+   decoded, as a web call's input (each URL; each page it opens by `ref_id`, which must be one string
+   written out, the only place the script writes `ref_id`; any scheme but http(s)), and audits each
+   page the web tool's replies say it served as the item of a call that opened it. A script that
+   calls the shell is suspect: only a command's item says what ran, and the shell rules read each
+   string the script passes it;
 6. flags any tool or record it does not read: a script that calls a tool other than `tools.web__run`
    and `tools.exec_command` (code mode's `tools` object also holds the lane account's connector tools,
    such as GitHub's and ChatGPT Space's) or reaches `tools` other than as `tools.<name>`; a script
@@ -115,6 +118,7 @@ LINK = re.compile("cite\\d+†[^-]*")
 # How Codex reports a script V8 refused to compile: it failed with a SyntaxError and printed nothing.
 REFUSED = re.compile(r"Script failed\nWall time [0-9.]+ seconds\nOutput:\n")
 FIRST_ATTEMPT = re.compile(r"/a1\Z")  # subfleet's attempt ids run <job>/a1, <job>/a2, ...
+JSON_STRING = re.compile(rb'"(?:[^"\\]|\\.)*"')  # a string in a line of JSON, its escapes as written
 # What a 0.159 session log holds, besides the calls this script reads. Anything else is flagged.
 RECORDS = {"session_meta", "event_msg", "response_item", "turn_context", "world_state", "token_usage_record",
            "inter_agent_communication_metadata"}
@@ -149,6 +153,8 @@ DENIED = frozenset("""constructor prototype __proto__ __defineGetter__ __defineS
 # reach the global object, each of which the text checks flag written out.
 SPELLED = DENIED | {"tools", "eval", "Function", "globalThis", "Reflect", "Proxy"}
 # What an index (`x[key]`) may hold besides a constant: names, numbers and the operators between them.
+# What a constant string can be written as: a string, a template, a `+` of them, or one in parentheses.
+CONSTANT_KINDS = ("string", "template_string", "binary_expression", "parenthesized_expression")
 KEY_PARTS = {"identifier", "number", "member_expression", "property_identifier", "parenthesized_expression",
              "unary_expression", "binary_expression", "update_expression"}
 # A JavaScript string's escapes: `\u{...}`, `\uXXXX`, `\xXX`, a line continuation, or one character.
@@ -174,13 +180,29 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _names(first: bytes, needle: bytes, workdir: str) -> bool:
+    """Whether a log's first line holds the work directory as JSON writes it (`needle`), or as one
+    of its JSON strings that spells it with an escape (`\\/`, `\\u002f`)."""
+    return needle in first or any((b"\\/" in token or b"\\u" in token) and _decodes_to(token, workdir)
+                                  for token in JSON_STRING.findall(first))
+
+
+def _decodes_to(token: bytes, text: str) -> bool:
+    try:
+        return json.loads(token) == text
+    except (ValueError, RecursionError):
+        return False
+
+
 def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list[str]]:
     """Every session log among `paths` whose thread started in `workdir`, by thread id, and what the
-    search could not read. A log whose first line lacks the work directory as JSON writes it cannot
-    name it as its `cwd`, so only the others are parsed (the lanes hold tens of thousands of logs).
-    One whose first line names it but does not parse as a `session_meta` record, a session there
-    with no thread id or a source this script cannot read, and a thread whose logs differ are
-    reported; a second log of a thread that matches the first byte for byte is the same log."""
+    search could not read. A JSON string spells the work directory either as `json.dumps` writes it
+    or with an escape, `\\/` or `\\u`, since the directory holds no quote, backslash or control
+    character. So a first line with neither cannot name it as its `cwd`, and only the others are
+    parsed (the lanes hold tens of thousands of logs). One whose first line names it but does not
+    parse as a `session_meta` record, a session there with no thread id or a source this script
+    cannot read, and a thread whose logs differ are reported; a second log of a thread that matches
+    the first byte for byte is the same log."""
     needle = json.dumps(workdir, ensure_ascii=False).encode()
     found: dict[str, dict] = {}
     problems: list[str] = []
@@ -190,16 +212,18 @@ def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list
                 first = fh.readline()
         except OSError:
             continue
-        if needle not in first:
+        if needle not in first and b"\\/" not in first and b"\\u" not in first:
             continue
         try:
             record = json.loads(first)
-        except (ValueError, UnicodeDecodeError):
-            problems.append(f"{path.name}: its first line names the work directory but does not parse")
+        except (ValueError, RecursionError):
+            if _names(first, needle, workdir):
+                problems.append(f"{path.name}: its first line names the work directory but does not parse")
             continue
         meta = record.get("payload") if isinstance(record, dict) and record.get("type") == "session_meta" else None
         if not isinstance(meta, dict):
-            problems.append(f"{path.name}: its first line names the work directory but is not a session's record")
+            if _names(first, needle, workdir):
+                problems.append(f"{path.name}: its first line names the work directory but is not a session's record")
             continue
         if meta.get("cwd") != workdir:
             continue
@@ -259,6 +283,9 @@ def attempts(run_dir: Path, meta: dict) -> dict | None:
                  "attempts": [{k: a.get(k) for k in ATTEMPT_FIELDS} for a in info["attempts"] if isinstance(a, dict)]}
     if kept.exists():
         old = json.loads(kept.read_text())
+        if not (isinstance(old, dict) and isinstance(old.get("attempts"), list)
+                and all(isinstance(a, dict) for a in old["attempts"])):
+            raise SystemExit(f"{kept} is not a record of attempts; the kept copy is final")
         if fresh is not None and fresh != old:
             raise SystemExit(f"{kept} differs from subfleet's record of {job}; the kept copy is final")
         return old
@@ -314,6 +341,11 @@ def _unescape(raw: str) -> str:
     return ESCAPE.sub(one, raw).encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
 
 
+def _parts(node) -> list:
+    """A node's named children but its comments, which the grammar places among them."""
+    return [part for part in node.named_children if part.type != "comment"]
+
+
 def _plus(node) -> bool:
     return node.type == "binary_expression" and getattr(node.child_by_field_name("operator"), "type", None) == "+"
 
@@ -332,14 +364,14 @@ def _fold(node, src: bytes) -> str | None:
             if part.type != "template_substitution":
                 parts.append(_unescape(_text(part, src)))
                 continue
-            inner = part.named_children
+            inner = _parts(part)
             value = _fold(inner[0], src) if len(inner) == 1 else None
             if value is None:
                 return None
             parts.append(value)
         return "".join(parts)
-    if kind == "parenthesized_expression" and len(node.named_children) == 1:
-        return _fold(node.named_children[0], src)
+    if kind == "parenthesized_expression" and len(_parts(node)) == 1:
+        return _fold(_parts(node)[0], src)
     if _plus(node):
         left, right = _fold(node.child_by_field_name("left"), src), _fold(node.child_by_field_name("right"), src)
         return None if left is None or right is None else left + right
@@ -356,11 +388,11 @@ def _written(node, src: bytes) -> list[str]:
         for part in node.named_children:
             if part.type != "template_substitution":
                 parts.append(_unescape(_text(part, src)))
-            elif part.named_children:
-                parts += _written(part.named_children[0], src)
+            elif _parts(part):
+                parts += _written(_parts(part)[0], src)
         return parts
-    if kind == "parenthesized_expression" and node.named_children:
-        return _written(node.named_children[0], src)
+    if kind == "parenthesized_expression" and _parts(node):
+        return _written(_parts(node)[0], src)
     if _plus(node):
         return _written(node.child_by_field_name("left"), src) + _written(node.child_by_field_name("right"), src)
     return []
@@ -373,7 +405,7 @@ def _spells(value: str) -> bool:
 
 def _arithmetic(node) -> bool:
     """Whether an index holds only names, numbers and the operators between them."""
-    return node.type in KEY_PARTS and all(_arithmetic(part) for part in node.named_children)
+    return node.type in KEY_PARTS and all(_arithmetic(part) for part in _parts(node))
 
 
 def _readable_key(node, src: bytes) -> bool:
@@ -453,7 +485,7 @@ def cell_problems(tree, src: bytes) -> list[str]:
             problems.append(f"names {_text(node, src)}")
         elif kind in ("subscript_expression", "computed_property_name"):
             key = node.child_by_field_name("index") if kind == "subscript_expression" else (
-                node.named_children[0] if node.named_children else None)
+                (_parts(node) or [None])[0])
             value = _fold(key, src) if key is not None else None
             if value is not None and _spells(value):
                 problems.append(f"indexes with {value[:80]!r}")
@@ -486,40 +518,99 @@ def _shell_strings(tree, src: bytes) -> list[str]:
     return out
 
 
+def _web_page(text: str) -> bool:
+    """Whether a page a script opens is a web address or a page the web tool returned."""
+    return bool(re.match(r"(?i)https?://", text) or TURN_REF.fullmatch(text))
+
+
+def _constants(tree, src: bytes) -> list[str]:
+    """Each string a script writes out or builds from constants (`_fold`), and each piece of a
+    template written out between its substitutions, with its escapes decoded."""
+    out = []
+    for node in _walk(tree.root_node):
+        if node.type in CONSTANT_KINDS:
+            value = _fold(node, src)
+            if value is not None:
+                out.append(value)
+        if node.type == "template_string":
+            piece = ""
+            for part in node.named_children:
+                if part.type == "template_substitution":
+                    out.append(_unescape(piece))
+                    piece = ""
+                else:
+                    piece += _text(part, src)
+            out.append(_unescape(piece))
+    return [text for text in dict.fromkeys(out) if text]
+
+
+def _inside_constant(node, src: bytes) -> bool:
+    """Whether a constant sits inside a larger constant that folds (parentheses, a `+`, a template)."""
+    parent = node.parent
+    if parent is not None and parent.type == "template_substitution":
+        parent = parent.parent
+    return parent is not None and parent.type in CONSTANT_KINDS and _fold(parent, src) is not None
+
+
+def _keyed(node) -> bool:
+    """Whether a node is an object's key: a pair's, or a computed key's content. (An index that folds
+    to `ref_id` reads or sets a member, which `_ref_id_problem` flags before it reaches the index.)"""
+    parent = node.parent
+    return parent is not None and (parent.type == "computed_property_name" or (
+        parent.type == "pair" and parent.child_by_field_name("key") == node))
+
+
 def _ref_id_problem(tree, src: bytes) -> str | None:
-    """Why a script's `ref_id` is not one string written out (a variable, a member, a sum, a template
-    with a substitution), or None."""
+    """Why a page a script opens by `ref_id` may be other than a page on the web, or None. A script
+    must give each `ref_id` as an object's key with one string written out as its value (not a
+    variable, a member, a sum or a template with a substitution), whose text, its escapes decoded,
+    is a web address or a page the web tool returned. It may write `ref_id` nowhere else: not as a
+    member it reads or sets, a class's field, or a string from which it could build such an object
+    as it runs."""
     for node in _walk(tree.root_node):
         kind = node.type
         if kind == "pair":
             key, value = node.child_by_field_name("key"), node.child_by_field_name("value")
+            computed = _parts(key) if key.type == "computed_property_name" else []
             name = (_text(key, src) if key.type == "property_identifier" else
                     _fold(key, src) if key.type == "string" else
-                    _fold(key.named_children[0], src) if key.type == "computed_property_name" and key.named_children
-                    else None)
-            if name == "ref_id" and not (value is not None and (value.type == "string" or (
-                    value.type == "template_string"
-                    and not any(part.type == "template_substitution" for part in value.named_children)))):
-                return f"opens ref_id {_text(value, src)[:80]!r}, not one string written out" if value is not None \
-                    else "opens a ref_id with no value"
+                    _fold(computed[0], src) if len(computed) == 1 else None)
+            if name != "ref_id":
+                continue
+            if value is None:
+                return "opens a ref_id with no value"
+            if not (value.type == "string" or (value.type == "template_string" and not any(
+                    part.type == "template_substitution" for part in value.named_children))):
+                return f"opens ref_id {_text(value, src)[:80]!r}, not one string written out"
+            opened = _fold(value, src)
+            if not _web_page(opened):
+                return f"opens {opened[:80]!r}, neither a web address nor a page the web tool returned"
         elif kind == "shorthand_property_identifier" and _text(node, src) == "ref_id":
             return "opens a ref_id it holds in a variable"
         elif kind == "member_expression" and _text(node.child_by_field_name("property"), src) == "ref_id":
             return "reads or sets a ref_id member"
         elif kind == "subscript_expression" and _fold(node.child_by_field_name("index"), src) == "ref_id":
             return "reads or sets a ref_id member"
+        elif (kind == "property_identifier" and _text(node, src) == "ref_id"
+              and node.parent.type not in ("pair", "member_expression")):
+            return f"names ref_id in a {node.parent.type}, not as an object's key"
+        elif (kind in CONSTANT_KINDS and not _inside_constant(node, src) and not _keyed(node)
+              and _fold(node, src) == "ref_id"):
+            return "writes the string ref_id other than as an object's key"
     return None
 
 
 def check_script(code: str, workdir: str, tree=None) -> tuple[str, str]:
     """The audit's verdict on an `exec` script's text read as a web call's input (`tree`: its syntax
-    tree, if it parses): every URL in it, as `audit` reads a web call's (`_web_hosts`), must name
-    another machine, and none may open this repository; each page it opens by `ref_id` must be one
-    string written out, a web address or a page the web tool returned; and it may name no URL but
-    http(s). What a script opens on the web is in its `web__run` arguments, which the item for the call
-    records only in part. A script that calls the shell is suspect: only a command's completed item
-    says what ran, and a cell that stops first leaves none; the shell rules also read each string the
-    script passes to `tools.exec_command`. `audit` gives a web call "web" or "suspect"."""
+    tree, if it parses). Every URL in its text, and in each string it writes out or builds from
+    constants with escapes decoded (`_constants`), must name another machine, as `audit` reads a web
+    call's URLs (`_web_hosts`), and none may open this repository; each page it opens by `ref_id`
+    must pass `_ref_id_problem`, and so must each `ref_id: "..."` in its text or its strings (JSON it
+    could parse); and it may name no URL but http(s). What a script opens on the web is in its
+    `web__run` arguments, which the item for the call records only in part. A script that calls the
+    shell is suspect: only a command's completed item says what ran, and a cell that stops first
+    leaves none; the shell rules also read each string the script passes to `tools.exec_command`.
+    `audit` gives a web call "web" or "suspect"."""
     roots = audit.protected_roots()
     if "exec_command" in {match.group(1) for match in TOOLS_NAMED.finditer(code)}:
         for command in _shell_strings(tree, code.encode()) if tree is not None else []:
@@ -527,16 +618,18 @@ def check_script(code: str, workdir: str, tree=None) -> tuple[str, str]:
             if verdict in ("violation", "suspect"):
                 return "suspect", f"calls tools.exec_command with {command[:80]!r} ({verdict}: {why})"
         return "suspect", "calls tools.exec_command; only a command's completed item says what ran"
-    verdict, why = audit.check_call("web_search", {"script": code}, Path(workdir), roots)
+    strings = _constants(tree, code.encode()) if tree is not None else []
+    verdict, why = audit.check_call("web_search", {"script": code, "strings": strings}, Path(workdir), roots)
     if verdict != "web":
         return verdict, why
-    for ref in REF_ID.finditer(code):
-        if not (re.match(r"(?i)https?://", ref.group(3)) or TURN_REF.fullmatch(ref.group(3))):
-            return "suspect", f"opens {ref.group(3)[:80]!r}, neither a web address nor a page the web tool returned"
+    for text in (code, *strings):
+        for ref in REF_ID.finditer(text):
+            if not _web_page(ref.group(3)):
+                return "suspect", f"opens {ref.group(3)[:80]!r}, neither a web address nor a page the web tool returned"
     problem = _ref_id_problem(tree, code.encode()) if tree is not None else None
     if problem:
         return "suspect", problem
-    if OTHER_SCHEME.search(code):
+    if any(OTHER_SCHEME.search(text) for text in (code, *strings)):
         return "suspect", "names a URL other than http(s)"
     return "web", ""
 
@@ -768,18 +861,38 @@ def audit_run(run_dir: Path, lanes: Path) -> dict:
     attempt_of: dict[str, str] = {}
     main = None
     if record is not None:
+        job = meta.get("job_id")
         report["job_id"] = record.get("job_id")
         report["collected_attempt"] = collected
         if record.get("accepted_attempt_id") != collected:
             report["flags"].append(f"subfleet accepted {record.get('accepted_attempt_id')}, but the run collected {collected}")
+        # subfleet numbers a job's attempts from a1 up, so a record that skips one leaves out an attempt
+        # whose threads nothing names.
+        listed = [a.get("attempt_id") for a in record["attempts"]]
+        if record.get("job_id") != job or sorted(map(str, listed)) != sorted(f"{job}/a{i}"
+                                                                            for i in range(1, len(listed) + 1)):
+            report["flags"].append(f"subfleet's record of job {record.get('job_id')} lists attempts {listed}, not "
+                                   f"{job}/a1 to {job}/a{len(listed)}")
         for attempt in record["attempts"]:
-            if not attempt.get("native_session_id") and attempt.get("started_at"):
+            sid = attempt.get("native_session_id")
+            if sid is not None and not isinstance(sid, str):
+                report["flags"].append(f"subfleet's record gives attempt {attempt.get('attempt_id')} a session this "
+                                       f"script cannot read: {json.dumps(sid)[:200]}")
+            elif not sid and attempt.get("started_at"):
                 report["flags"].append(f"subfleet records no session for attempt {attempt.get('attempt_id')}, "
                                        "which started")
-        attempt_of = {a["native_session_id"]: a["attempt_id"] for a in record["attempts"] if a.get("native_session_id")}
+        named = [(a["native_session_id"], a.get("attempt_id")) for a in record["attempts"]
+                 if isinstance(a.get("native_session_id"), str) and a["native_session_id"]]
+        for sid, count in sorted(collections.Counter(sid for sid, _ in named).items()):
+            if count > 1:
+                report["flags"].append(f"subfleet's record names session {sid} for {count} attempts")
+        attempt_of = dict(named)
         for root in roots:
             if root not in attempt_of:
                 report["flags"].append(f"main thread {root} in the work directory is no attempt's session")
+        for sid, aid in attempt_of.items():
+            if sid in threads and threads[sid]["spawned_by"] is not None:
+                report["flags"].append(f"attempt {aid}'s session {sid} is a sub-agent, not a thread codex exec started")
         report["missing"] += [sid for sid in attempt_of if sid not in threads]
         main = next((sid for sid, aid in attempt_of.items() if aid == collected), None)
         if main is None:
@@ -837,6 +950,11 @@ def audit_run(run_dir: Path, lanes: Path) -> dict:
             report["flags"].append(f"thread {tid} made {calls} spawn_agent calls and started {len(begun)} sub-agents")
         if sorted(t for t in begun if t in threads) != children:
             report["flags"].append(f"thread {tid} started {sorted(begun)}, but {children} name it as their parent")
+    # Each thread descends from a main thread: parents that loop back reach none.
+    for tid in sorted(threads):
+        top = root_of(tid)
+        if top in threads and threads[top]["spawned_by"] is not None:
+            report["flags"].append(f"thread {tid} descends from no main thread: its parents form a cycle")
     report["missing"] = sorted(set(report["missing"]) | (started - set(threads)))
     report["web_calls"] = sum(t["audit"]["web_calls"] for t in report["threads"])
     report["served_pages"] = sum(t["served_pages"] for t in report["threads"])

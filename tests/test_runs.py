@@ -181,7 +181,8 @@ def _session(passed=True, main=(), helper=(), earlier=(), script=(), threads=Non
         if not passed:
             threads[2]["audit"].update(passed=False, violations=[CALL])
     return {"passed": passed, "main_thread": "MOCK-main", "collected_attempt": f"{JOB}/a2", "flags": [],
-            "missing": [], "orphans": [], "threads": threads, **_totals(threads)}
+            "missing": [], "orphans": [], "threads": threads, **_totals(threads),
+            "transcript_check": {"items": 1, "only_in_transcript": [], "only_in_log": [], "different": []}}
 
 
 def _edited(change) -> dict:
@@ -199,6 +200,33 @@ def _drop_all_but_main(session):
 def _add_stray_root(session):
     session["threads"].append(_thread("MOCK-stray", None))
     session.update(_totals(session["threads"]))
+
+
+def _drop_earlier(session):
+    session["threads"] = [t for t in session["threads"] if t["thread_id"] != "MOCK-earlier"]
+    session.update(_totals(session["threads"]))
+
+
+def _attempts(*sessions) -> dict:
+    """subfleet's record of the MOCK job with one started attempt per session, a1 first."""
+    return {**ATTEMPTS, "attempts": [{"attempt_id": f"{JOB}/a{i}", "native_session_id": sid, "started_at": "MOCK"}
+                                     for i, sid in enumerate(sessions, 1)]}
+
+
+def _check(**change) -> dict:
+    """A passing MOCK session audit whose check of the transcript has these fields changed."""
+    session = _session()
+    session["transcript_check"].update(change)
+    return session
+
+
+# Threads whose ids or parents the gate cannot read as a graph (review findings 4 and 8).
+DUPLICATED = [_thread("MOCK-earlier", None), _thread("MOCK-main", None, spawns=2), _thread("MOCK-helper", "MOCK-main"),
+              _thread("MOCK-helper", "MOCK-main")]
+LOOP = [*_session()["threads"], _thread("MOCK-loop-a", "MOCK-loop-b", spawns=1),
+        _thread("MOCK-loop-b", "MOCK-loop-a", spawns=1)]
+UNDER_ROOT = [_thread("MOCK-root", None, spawns=1), _thread("MOCK-main", "MOCK-root")]
+UNDER_EARLIER = [_thread("MOCK-earlier", None, spawns=1), _thread("MOCK-main", "MOCK-earlier")]
 
 
 # A record that says it passed but does not hold up, and the reason the gate gives (review finding 5):
@@ -249,6 +277,44 @@ INCONSISTENT = {
         f"{JOB}/a2", "an attempt that started names no session among its threads"),
     "sol-stray-root": (_edited(_add_stray_root), ATTEMPTS, f"{JOB}/a2",
                        "a main thread among its threads is no attempt's session"),
+    # Review finding 4: a graph of threads that is no tree from the main thread.
+    "sol-thread-twice": (_session(threads=DUPLICATED), ATTEMPTS, f"{JOB}/a2", "two of its threads share an id"),
+    "sol-loop": (_session(threads=LOOP), ATTEMPTS, f"{JOB}/a2", "its threads' parents form a cycle"),
+    "sol-own-parent": (_session(threads=[*_session()["threads"], _thread("MOCK-self", "MOCK-self", spawns=1)]),
+                       ATTEMPTS, f"{JOB}/a2", "its threads' parents form a cycle"),
+    "sol-no-record-main-under-root": (_session(threads=UNDER_ROOT), None, f"{JOB}/a1", "its main thread is a sub-agent"),
+    "sol-main-under-earlier": (_session(threads=UNDER_EARLIER), ATTEMPTS, f"{JOB}/a2",
+                               "its main thread is a sub-agent"),
+    # Review finding 5: a check of the transcript that is missing or found a difference.
+    "sol-no-transcript-check": ({k: v for k, v in _session().items() if k != "transcript_check"}, ATTEMPTS,
+                                f"{JOB}/a2", "its check of the transcript is missing or found calls that differ"),
+    "sol-only-in-transcript": (_check(only_in_transcript=['"MOCK"']), ATTEMPTS, f"{JOB}/a2",
+                               "its check of the transcript is missing or found calls that differ"),
+    "sol-only-in-log": (_check(only_in_log=['"MOCK"']), ATTEMPTS, f"{JOB}/a2",
+                        "its check of the transcript is missing or found calls that differ"),
+    "sol-different": (_check(different=['"MOCK"']), ATTEMPTS, f"{JOB}/a2",
+                      "its check of the transcript is missing or found calls that differ"),
+    "sol-check-items-text": (_check(items="1"), ATTEMPTS, f"{JOB}/a2",
+                             "its check of the transcript is missing or found calls that differ"),
+    # Review finding 3: attempts that are not the job's a1, a2 and on, or that share or misplace a session.
+    "sol-only-a2": (_edited(_drop_earlier), {**ATTEMPTS, "attempts": ATTEMPTS["attempts"][1:]}, f"{JOB}/a2",
+                    f"does not list the attempts of job {JOB} from a1 up"),
+    "sol-other-job": (_session(), {**ATTEMPTS, "job_id": "MOCK-other-job"}, f"{JOB}/a2",
+                      f"does not list the attempts of job {JOB} from a1 up"),
+    "sol-a1-twice": (_session(), {**ATTEMPTS, "attempts": [ATTEMPTS["attempts"][0], {
+        **ATTEMPTS["attempts"][1], "attempt_id": f"{JOB}/a1"}]}, f"{JOB}/a2",
+        f"does not list the attempts of job {JOB} from a1 up"),
+    "sol-one-session-twice": (_edited(_drop_earlier), _attempts("MOCK-main", "MOCK-main"), f"{JOB}/a2",
+                              "two attempts name the same session"),
+    "sol-sub-agent-session": (_edited(_drop_earlier), _attempts("MOCK-helper", "MOCK-main"), f"{JOB}/a2",
+                              "an attempt's session is a sub-agent, not a main thread"),
+    # Review finding 8: ids that are not strings exclude the run instead of stopping the pooling.
+    "sol-attempt-id-list": (_session(), {**ATTEMPTS, "attempts": [{**ATTEMPTS["attempts"][0], "attempt_id": []},
+                                                                  ATTEMPTS["attempts"][1]]}, f"{JOB}/a2",
+                            "gives an attempt an id or a session that is not a string"),
+    "sol-session-list": (_session(), {**ATTEMPTS, "attempts": [{**ATTEMPTS["attempts"][0], "native_session_id": []},
+                                                               ATTEMPTS["attempts"][1]]}, f"{JOB}/a2",
+                         "gives an attempt an id or a session that is not a string"),
 }
 
 
@@ -275,6 +341,13 @@ def test_a_codex_run_is_pooled_only_with_a_passing_audit_of_its_session_logs(are
                                                          for t in _session()["threads"]]},
         "sol-call-not-object": _session(helper=["MOCK call"]),
         "sol-audit-not-object": {**_session(), "threads": [{**t, "audit": ["MOCK"]} for t in _session()["threads"]]},
+        # Review finding 8: a thread's id or its parent's that is not a string.
+        "sol-thread-id-list": {**_session(), "threads": [*_session()["threads"][:2], {**_session()["threads"][2],
+                                                                                       "thread_id": []}]},
+        "sol-thread-id-missing": {**_session(), "threads": [*_session()["threads"][:2], {
+            k: v for k, v in _session()["threads"][2].items() if k != "thread_id"}]},
+        "sol-parent-list": {**_session(), "threads": [*_session()["threads"][:2], {**_session()["threads"][2],
+                                                                                    "spawned_by": []}]},
     }
     for label, session in unreadable.items():
         _codex_run(graph, label, session)
@@ -373,6 +446,36 @@ def test_the_gate_admits_and_counts_as_its_rule_says(graph, threads, main, trans
         assert len(cli._codex_suspects([CALL] * transcript, {"run": "sol-1", **session})) == expected
         if pooled:
             assert _simulated_counts(graph, mp, accepted) == {"sol-1": expected}
+
+
+@settings(max_examples=150, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(parents=st.lists(st.none() | st.integers(0, 5), min_size=1, max_size=6), main=st.integers(0, 5),
+       twice=st.booleans())
+def test_the_gate_admits_a_thread_graph_only_as_one_tree_from_its_main_thread(graph, parents, main, twice):
+    """Property (against the rule restated, review finding 4): with no attempts on record, the gate
+    pools a run whose session audit passed exactly when its threads have ids of their own and each
+    descends with no cycle from the one thread with no parent, the thread its transcript records."""
+    up = [None if p is None else p % len(parents) for p in parents]
+    main %= len(parents)
+    rows = [_thread(f"MOCK-{i}", None if p is None else f"MOCK-{p}", spawns=up.count(i)) for i, p in enumerate(up)]
+    if twice:
+        rows.append(dict(rows[-1]))
+    session = {**_session(threads=rows), "main_thread": f"MOCK-{main}"}
+
+    def descends(i: int) -> bool:
+        seen = set()
+        while up[i] is not None:
+            if i in seen:
+                return False
+            seen.add(i)
+            i = up[i]
+        return True
+
+    admitted = not twice and all(map(descends, range(len(up)))) and [i for i, p in enumerate(up) if p is None] == [main]
+    with tempfile.TemporaryDirectory() as tmp, pytest.MonkeyPatch.context() as mp:
+        mp.setattr(runners, "RUNS", Path(tmp) / "runs")
+        _codex_run(graph, "sol-1", session, attempts=None, collected=f"{JOB}/a1", thread=f"MOCK-{main}")
+        assert set(cli.accepted_runs(graph, "sha")) == ({"sol-1"} if admitted else set())
 
 
 def test_a_run_is_served_by_codex_when_its_lane_or_model_says_so():

@@ -195,7 +195,9 @@ def _session_audit(run_dir: Path):
         return "unreadable"
     ok = (isinstance(rec, dict) and rec.get("run") == run_dir.name and isinstance(rec.get("passed"), bool)
           and isinstance(rec.get("threads"), list)
-          and all(isinstance(t, dict) and isinstance(t.get("audit"), dict)
+          and all(isinstance(t, dict) and isinstance(t.get("thread_id"), str) and t["thread_id"]
+                  and (t.get("spawned_by") is None or isinstance(t["spawned_by"], str))
+                  and isinstance(t.get("audit"), dict)
                   and all(isinstance(calls, list) and all(isinstance(call, dict) for call in calls)
                           for calls in (t["audit"].get("suspect"), t.get("script_suspect")))
                   for t in rec["threads"]))
@@ -220,23 +222,36 @@ def _transcript_thread(path: Path) -> str | None:
 
 def _session_problem(run_dir: Path, rec: dict) -> str | None:
     """Why a session audit that says it passed does not hold up, or None. The gate reads the verdict
-    again rather than trust it: no flags, missing threads or orphans; each thread passed its own audit
-    with no violation; each parent among the threads, and each thread's `spawn_agent` calls as many as
-    the threads that name it as their parent; totals that add up; and as its main thread, the thread
-    the transcript records. With attempts on record (`attempts.json`), meta.json's attempt must be the
-    one subfleet accepted, with the main thread as its session; each attempt that started must name a
-    session among the threads, and each main thread must be an attempt's session. With none, the run
-    has one main thread, from the job's first attempt."""
+    again rather than trust it: no flags, missing threads or orphans; each thread with an id of its
+    own, and it passed its own audit with no violation; each parent among the threads, every thread
+    descended from a main thread with no cycle, and each thread's `spawn_agent` calls as many as the
+    threads that name it as their parent; totals that add up; as its main thread, a thread `codex
+    exec` started, the one the transcript records; and a check of the transcript that found the same
+    calls in it and in the main thread's log. With attempts on record (`attempts.json`), they must be
+    the job's attempts a1, a2 and on, and meta.json's attempt must be the one subfleet accepted, with
+    the main thread as its session; each attempt that started must name its own session among the
+    threads, a main thread, and each main thread must be an attempt's session. With none, the run has
+    one main thread, from the job's first attempt."""
     threads = rec["threads"]
-    ids = {t.get("thread_id") for t in threads}
+    parent = {t["thread_id"]: t.get("spawned_by") for t in threads}
+    ids = set(parent)
     for key in ("flags", "missing", "orphans"):
         if rec.get(key) != []:
             return f"its {key!r} field is not an empty list"
+    if len(ids) != len(threads):
+        return "two of its threads share an id"
     if not all(t["audit"].get("passed") is True and t["audit"].get("violations") == [] for t in threads):
         return "one thread's own audit failed"
-    if any(t.get("spawned_by") is not None and t["spawned_by"] not in ids for t in threads):
+    if any(p is not None and p not in ids for p in parent.values()):
         return "one thread's parent is not among its threads"
-    children = collections.Counter(t.get("spawned_by") for t in threads)
+    for tid in parent:
+        seen = set()
+        while parent[tid] is not None:
+            if tid in seen:
+                return "its threads' parents form a cycle"
+            seen.add(tid)
+            tid = parent[tid]
+    children = collections.Counter(parent.values())
     for t in threads:
         calls = t["functions"].get("spawn_agent", 0) if isinstance(t.get("functions"), dict) else None
         if calls != children[t.get("thread_id")]:
@@ -256,9 +271,15 @@ def _session_problem(run_dir: Path, rec: dict) -> str | None:
     main = rec.get("main_thread")
     if not isinstance(main, str) or main not in ids:
         return "it names no main thread among its threads"
+    if parent[main] is not None:
+        return "its main thread is a sub-agent"
     if main != _transcript_thread(run_dir / "transcript.jsonl"):
         return "its main thread is not the thread the transcript records"
-    roots = {t.get("thread_id") for t in threads if t.get("spawned_by") is None}
+    check = rec.get("transcript_check")
+    if not (isinstance(check, dict) and type(check.get("items")) is int
+            and all(check.get(key) == [] for key in ("only_in_transcript", "only_in_log", "different"))):
+        return "its check of the transcript is missing or found calls that differ from the main thread's log"
+    roots = {tid for tid, p in parent.items() if p is None}
     collected = runners.read_meta(run_dir).get("attempt_id")
     kept = run_dir / SESSIONS / "attempts.json"
     if not kept.exists():
@@ -274,15 +295,27 @@ def _session_problem(run_dir: Path, rec: dict) -> str | None:
     listed = record.get("attempts") if isinstance(record, dict) else None
     if not isinstance(listed, list) or not all(isinstance(a, dict) for a in listed):
         return "its attempts.json lists no attempts"
+    if not all(isinstance(a.get("attempt_id"), str)
+               and (a.get("native_session_id") is None or isinstance(a["native_session_id"], str)) for a in listed):
+        return "its attempts.json gives an attempt an id or a session that is not a string"
+    job = runners.read_meta(run_dir).get("job_id")
+    if record.get("job_id") != job or sorted(a["attempt_id"] for a in listed) != sorted(
+            f"{job}/a{i}" for i in range(1, len(listed) + 1)):
+        return f"its attempts.json does not list the attempts of job {job} from a1 up"
     if record.get("accepted_attempt_id") != collected or rec.get("collected_attempt") != collected:
         return f"the run collected {collected}, not the attempt subfleet accepted and the audit names"
-    sessions = {a.get("attempt_id"): a.get("native_session_id") for a in listed}
+    sessions = {a["attempt_id"]: a.get("native_session_id") for a in listed}
     if sessions.get(collected) != main:
         return "its main thread is not the collected attempt's session"
     if any((a.get("native_session_id") or a.get("started_at")) and a.get("native_session_id") not in ids
            for a in listed):
         return "an attempt that started names no session among its threads"
-    if not roots <= set(sessions.values()):
+    named = [a["native_session_id"] for a in listed if a.get("native_session_id")]
+    if len(set(named)) != len(named):
+        return "two attempts name the same session"
+    if not set(named) <= roots:
+        return "an attempt's session is a sub-agent, not a main thread"
+    if not roots <= set(named):
         return "a main thread among its threads is no attempt's session"
     return None
 
