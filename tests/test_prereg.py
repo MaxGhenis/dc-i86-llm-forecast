@@ -3,6 +3,7 @@ instead of leaving it beside a manifest it does not prove, once a dated folder k
 in a temporary root."""
 
 import argparse
+import os
 
 import pytest
 
@@ -66,6 +67,22 @@ def test_a_codex_runs_session_audit_and_attempts_are_hashed_and_its_logs_are_not
         assert f"  {rel}\n" in manifest
     assert "rollout-MOCK.jsonl" not in manifest and "MOCK-notes.txt" not in manifest
     assert "opus-1/codex-sessions" not in manifest
+
+
+@pytest.mark.parametrize("name", ["codex-sessions/attempts.json", "codex-sessions/audit.json", "transcript.jsonl"])
+@pytest.mark.parametrize("kind", ["a folder", "a pipe", "a link to nothing"])
+def test_a_run_file_that_is_not_a_regular_file_stops_prereg(tmp_path, monkeypatch, name, kind):
+    """Review 6: prereg hashes each run's files; a folder, a link to nothing or a pipe (whose read
+    would wait for a writer forever) where one should be stops it, by name, before it writes a manifest."""
+    prereg = area(tmp_path, monkeypatch)
+    path = tmp_path / "runs" / "sol-1" / name
+    path.parent.mkdir(parents=True)
+    (tmp_path / "runs" / "sol-1" / "meta.json").write_text("MOCK meta\n")
+    {"a folder": path.mkdir, "a pipe": lambda: os.mkfifo(path),
+     "a link to nothing": lambda: path.symlink_to(path.with_name("MOCK-gone"))}[kind]()
+    with pytest.raises(SystemExit, match=f"runs/sol-1/{name} is not a regular file"):
+        cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
 
 
 def test_hashing_without_a_stamp_drops_the_old_proof(tmp_path, monkeypatch):

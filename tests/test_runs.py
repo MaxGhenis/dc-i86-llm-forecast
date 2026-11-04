@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -150,19 +151,30 @@ def _codex_run(graph, label, session, suspect=(), attempts=ATTEMPTS, collected=f
     runners.write_meta(run, meta)
     (run / "transcript.jsonl").write_text(json.dumps({"type": "thread.started", "thread_id": thread}) + "\n")
     if session is not None:
+        record = {"run": label, **_marked(session, attempts)}
+        if attempts is None:  # the script names the job and the collected attempt only from their record
+            record = {k: v for k, v in record.items() if k not in ("job_id", "collected_attempt")}
         (run / "codex-sessions").mkdir()
-        (run / "codex-sessions" / "audit.json").write_text(json.dumps({"run": label, **_marked(session, attempts)}))
+        (run / "codex-sessions" / "audit.json").write_text(json.dumps(record))
         if attempts is not None:
             text = attempts if isinstance(attempts, str) else json.dumps(attempts)
             (run / "codex-sessions" / "attempts.json").write_text(text)
 
 
 def _thread(tid, parent, suspect=(), script_suspect=(), spawns=0):
-    """One thread's entry in a MOCK session audit: one web call, two pages served, its suspect calls."""
-    return {"thread_id": tid, "spawned_by": parent, "items": {"Extension:web.search": 1}, "script_tools": {},
-            "functions": {"spawn_agent": spawns} if spawns else {}, "served_pages": 2,
-            "script_suspect": list(script_suspect),
-            "audit": {"events": 2, "passed": True, "violations": [], "suspect": list(suspect), "web_calls": 1}}
+    """One thread's entry in a MOCK session audit, as the script writes one: a web search for each call
+    its own audit read (one web call, the rest suspect), a message, a start event and a `spawn_agent`
+    call for each sub-agent, two pages served, and its scripts' suspect calls."""
+    searches = 1 + len(suspect)
+    return {"thread_id": tid, "spawned_by": parent, "agent_path": None if parent is None else "/root/MOCK",
+            "started": "2026-11-03T18:10:00Z", "file": f"codex-sessions/rollout-{tid}.jsonl", "sha256": "0" * 64,
+            "items": {"Extension:web.search": searches, "AgentMessage": 1,
+                      **({"SubAgentActivity": spawns} if spawns else {})},
+            "script_tools": {"web__run": 1}, "functions": {"spawn_agent": spawns} if spawns else {},
+            "served_pages": 2, "script_suspect": list(script_suspect),
+            "audit": {"events": searches + 1, "tool_calls": searches, "web_calls": 1,
+                      "urls": ["https://www.example.org/MOCK"], "violations": [], "suspect": list(suspect),
+                      "local_calls": [], "passed": True}}
 
 
 def _marked(session: dict, attempts) -> dict:
@@ -198,7 +210,16 @@ def _totals(threads) -> dict:
             "suspect": sum(len(t["audit"]["suspect"]) + len(t["script_suspect"]) for t in threads)}
 
 
-def _session(passed=True, main=(), helper=(), earlier=(), script=(), threads=None):
+def _compared(threads, main) -> dict:
+    """The check of the transcript a passing audit writes: each of the main thread's web searches and
+    commands compared, and none that differs."""
+    items = next((t["items"] for t in threads if t.get("thread_id") == main), {})
+    searches = sum(n for kind, n in items.items() if kind.startswith("Extension:web."))
+    return {"items": searches + items.get("CommandExecution", 0), "only_in_transcript": [], "only_in_log": [],
+            "different": []}
+
+
+def _session(passed=True, main=(), helper=(), earlier=(), script=(), threads=None, main_thread="MOCK-main"):
     """A MOCK session-log audit as the script writes one: an earlier attempt's main thread, the
     collected main thread and its sub-agent, with their suspect calls (`script`: the collected main
     thread's from its scripts' text), and totals that add up. A failed one has a sub-agent's violation."""
@@ -207,10 +228,9 @@ def _session(passed=True, main=(), helper=(), earlier=(), script=(), threads=Non
                    _thread("MOCK-helper", "MOCK-main", helper)]
         if not passed:
             threads[2]["audit"].update(passed=False, violations=[CALL])
-    return {"workdir": WORKDIR, "passed": passed, "main_thread": "MOCK-main", "job_id": JOB,
+    return {"workdir": WORKDIR, "passed": passed, "main_thread": main_thread, "job_id": JOB,
             "collected_attempt": f"{JOB}/a2", "flags": [], "missing": [], "orphans": [], "threads": threads,
-            **_totals(threads),
-            "transcript_check": {"items": 1, "only_in_transcript": [], "only_in_log": [], "different": []}}
+            **_totals(threads), "transcript_check": _compared(threads, main_thread)}
 
 
 def _edited(change) -> dict:
@@ -233,6 +253,22 @@ def _add_stray_root(session):
 def _drop_earlier(session):
     session["threads"] = [t for t in session["threads"] if t["thread_id"] != "MOCK-earlier"]
     session.update(_totals(session["threads"]))
+
+
+def _with_reasoning(session):
+    """The sub-agent reasoned twice: two more items, each a line of the stream its audit read."""
+    helper = session["threads"][2]
+    helper["items"]["Reasoning"] = 2
+    helper["audit"]["events"] += 2
+
+
+def _with_main_command(session):
+    """The main thread ran a command: one more item, event and call, and one more item for the check of
+    the transcript to compare."""
+    main = session["threads"][1]
+    main["items"]["CommandExecution"] = 1
+    main["audit"].update(events=main["audit"]["events"] + 1, tool_calls=main["audit"]["tool_calls"] + 1)
+    session.update(_totals(session["threads"]), transcript_check=_compared(session["threads"], "MOCK-main"))
 
 
 def _attempts(*sessions) -> dict:
@@ -287,7 +323,7 @@ INCONSISTENT = {
     "sol-no-record": (_session(), None, f"{JOB}/a2", "it has no attempts on record and 2 main threads"),
     "sol-no-record-later-attempt": (_edited(lambda s: s["threads"].pop(0) and s.update(_totals(s["threads"]))),
                                     None, f"{JOB}/a2", "not its job's first attempt"),
-    "sol-record-unparsable": (_session(), "{MOCK", f"{JOB}/a2", "its attempts.json does not parse"),
+    "sol-record-unparsable": (_session(), "{MOCK", f"{JOB}/a2", "its attempts.json is not a file of JSON this check"),
     "sol-record-no-list": (_session(), {**ATTEMPTS, "attempts": "MOCK"}, f"{JOB}/a2", "lists no attempts"),
     "sol-collected-other": ({**_session(), "collected_attempt": f"{JOB}/a1"}, ATTEMPTS, f"{JOB}/a2",
                             "not the attempt subfleet accepted and the audit names"),
@@ -391,6 +427,91 @@ INCONSISTENT = {
     "sol-no-record-attempt-named": (_session(threads=[{**_thread("MOCK-main", None, spawns=1), "attempt": f"{JOB}/a1"},
                                                       _thread("MOCK-helper", "MOCK-main")]), None, f"{JOB}/a1",
                                     "one thread names an attempt other than the one whose session"),
+    # The eighth round: fields of a thread that contradict each other or the script's rules.
+    "sol-script-tool-unknown": (_edited(lambda s: s["threads"][2]["script_tools"].update(read_file=1)), ATTEMPTS,
+                                f"{JOB}/a2", "one thread records an item, a script's tool or a function for which"),
+    "sol-function-unknown": (_edited(lambda s: s["threads"][2]["functions"].update(MOCK_function=1)), ATTEMPTS,
+                             f"{JOB}/a2", "one thread records an item, a script's tool or a function for which"),
+    "sol-item-unknown": (_edited(lambda s: s["threads"][2]["items"].update(MOCKItem=1)), ATTEMPTS, f"{JOB}/a2",
+                         "one thread records an item, a script's tool or a function for which"),
+    "sol-extension-unknown": (_edited(lambda s: s["threads"][2]["items"].update({"Extension:MOCK": 1})), ATTEMPTS,
+                              f"{JOB}/a2", "one thread records an item, a script's tool or a function for which"),
+    "sol-exec-without-command": (_edited(lambda s: s["threads"][2]["script_tools"].update(exec_command=1)), ATTEMPTS,
+                                 f"{JOB}/a2", "one thread's scripts call the shell more often than its commands"),
+    "sol-search-added": (_edited(lambda s: s["threads"][2]["items"].update({"Extension:web.search": 2})), ATTEMPTS,
+                         f"{JOB}/a2", "one thread's audit counts other events or calls than its items make"),
+    "sol-message-added": (_edited(lambda s: s["threads"][2]["items"].update(AgentMessage=2)), ATTEMPTS, f"{JOB}/a2",
+                          "one thread's audit counts other events or calls than its items make"),
+    "sol-events-added": (_edited(lambda s: s["threads"][2]["audit"].update(events=3)), ATTEMPTS, f"{JOB}/a2",
+                         "one thread's audit counts other events or calls than its items make"),
+    "sol-tool-calls": (_edited(lambda s: s["threads"][2]["audit"].update(tool_calls=2)), ATTEMPTS, f"{JOB}/a2",
+                       "one thread's audit counts other events or calls than its items make"),
+    "sol-tool-calls-bool": (_edited(lambda s: s["threads"][2]["audit"].update(tool_calls=True)), ATTEMPTS, f"{JOB}/a2",
+                            "one thread's audit counts other events or calls than its items make"),
+    "sol-web-calls-over": (_edited(lambda s: (s["threads"][2]["audit"].update(web_calls=2),
+                                              s.update(web_calls=s["web_calls"] + 1))), ATTEMPTS, f"{JOB}/a2",
+                           "one thread's audit lists more calls than it read"),
+    "sol-local-call-over": (_edited(lambda s: s["threads"][2]["audit"].update(local_calls=[CALL])), ATTEMPTS,
+                            f"{JOB}/a2", "one thread's audit lists more calls than it read"),
+    "sol-no-urls": (_edited(lambda s: s["threads"][2]["audit"].update(urls=[])), ATTEMPTS, f"{JOB}/a2",
+                    "or web addresses that do not match its web calls"),
+    "sol-urls-unsorted": (_edited(lambda s: s["threads"][2]["audit"].update(urls=["MOCK b", "MOCK a"])), ATTEMPTS,
+                          f"{JOB}/a2", "or web addresses that do not match its web calls"),
+    "sol-sub-agent-events": (_edited(lambda s: s["threads"][1]["items"].pop("SubAgentActivity")), ATTEMPTS,
+                             f"{JOB}/a2", "one thread records fewer sub-agent events than the threads that name it"),
+    "sol-check-items-zero": (_check(items=0), ATTEMPTS, f"{JOB}/a2",
+                             "its check of the transcript compared another number of items than"),
+    "sol-check-items-two": (_check(items=2), ATTEMPTS, f"{JOB}/a2",
+                            "its check of the transcript compared another number of items than"),
+    "sol-check-extra-field": (_check(MOCK=[]), ATTEMPTS, f"{JOB}/a2",
+                              "its check of the transcript has other fields than the script writes"),
+    "sol-thread-extra-field": (_edited(lambda s: s["threads"][2].update(MOCK=1)), ATTEMPTS, f"{JOB}/a2",
+                               "one thread's entry or its audit has other fields than the script writes"),
+    "sol-thread-no-file": (_edited(lambda s: s["threads"][2].pop("file")), ATTEMPTS, f"{JOB}/a2",
+                           "one thread's entry or its audit has other fields than the script writes"),
+    "sol-audit-extra-field": (_edited(lambda s: s["threads"][2]["audit"].update(MOCK=1)), ATTEMPTS, f"{JOB}/a2",
+                              "one thread's entry or its audit has other fields than the script writes"),
+    "sol-audit-no-urls": (_edited(lambda s: s["threads"][2]["audit"].pop("urls")), ATTEMPTS, f"{JOB}/a2",
+                          "one thread's entry or its audit has other fields than the script writes"),
+    "sol-file-elsewhere": (_edited(lambda s: s["threads"][2].update(file="/MOCK/rollout-MOCK.jsonl")), ATTEMPTS,
+                           f"{JOB}/a2", "one thread gives an agent path, a start time, a file or a SHA-256"),
+    "sol-file-up": (_edited(lambda s: s["threads"][2].update(file="codex-sessions/../rollout-MOCK.jsonl")), ATTEMPTS,
+                    f"{JOB}/a2", "one thread gives an agent path, a start time, a file or a SHA-256"),
+    "sol-sha-short": (_edited(lambda s: s["threads"][2].update(sha256="0" * 63)), ATTEMPTS, f"{JOB}/a2",
+                      "one thread gives an agent path, a start time, a file or a SHA-256"),
+    "sol-agent-path-list": (_edited(lambda s: s["threads"][2].update(agent_path=["MOCK"])), ATTEMPTS, f"{JOB}/a2",
+                            "one thread gives an agent path, a start time, a file or a SHA-256"),
+    "sol-started-number": (_edited(lambda s: s["threads"][2].update(started=1)), ATTEMPTS, f"{JOB}/a2",
+                           "one thread gives an agent path, a start time, a file or a SHA-256"),
+    "sol-suspect-extra-field": (_session(earlier=[{**CALL, "MOCK": "MOCK"}]), ATTEMPTS, f"{JOB}/a2",
+                                "one thread lists a call other than as the audits list one"),
+    "sol-suspect-call-number": (_session(earlier=[{**CALL, "call": 1}]), ATTEMPTS, f"{JOB}/a2",
+                                "one thread lists a call other than as the audits list one"),
+    "sol-script-suspect-no-why": (_session(script=[{"tool": "exec script", "call": "MOCK"}]), ATTEMPTS, f"{JOB}/a2",
+                                  "one thread lists a call other than as the audits list one"),
+    "sol-local-call-number": (_edited(lambda s: s["threads"][2]["audit"].update(local_calls=[{"tool": "shell",
+                                                                                              "call": 1}])),
+                              ATTEMPTS, f"{JOB}/a2", "one thread lists a call other than as the audits list one"),
+    "sol-extra-field": ({**_session(), "MOCK": 1}, ATTEMPTS, f"{JOB}/a2", "it has other fields than the script writes"),
+    "sol-suspect-over": (_edited(lambda s: (s["threads"][2]["audit"]["suspect"].append(CALL),
+                                            s.update(suspect=s["suspect"] + 1))), ATTEMPTS, f"{JOB}/a2",
+                         "one thread's audit lists more calls than it read"),
+    "sol-urls-twice": (_edited(lambda s: s["threads"][2]["audit"].update(urls=["https://www.example.org/MOCK"] * 2)),
+                       ATTEMPTS, f"{JOB}/a2", "or web addresses that do not match its web calls"),
+    "sol-urls-without-web-calls": (_edited(lambda s: (s["threads"][2]["audit"].update(web_calls=0),
+                                                      s.update(web_calls=s["web_calls"] - 1))), ATTEMPTS, f"{JOB}/a2",
+                                   "or web addresses that do not match its web calls"),
+    # Mutants that outlived the cases above: a file whose path climbs out through a folder under the kept
+    # logs, a call with no tool or no call, and a script's call that is not text.
+    "sol-file-up-from-a-folder": (_edited(lambda s: s["threads"][2].update(
+        file="codex-sessions/rollout-MOCK/../../rollout-MOCK.jsonl")), ATTEMPTS, f"{JOB}/a2",
+        "one thread gives an agent path, a start time, a file or a SHA-256"),
+    "sol-suspect-no-tool": (_session(earlier=[{"call": CALL["call"], "why": CALL["why"]}]), ATTEMPTS, f"{JOB}/a2",
+                            "one thread lists a call other than as the audits list one"),
+    "sol-suspect-no-call": (_session(earlier=[{"tool": CALL["tool"], "why": CALL["why"]}]), ATTEMPTS, f"{JOB}/a2",
+                            "one thread lists a call other than as the audits list one"),
+    "sol-script-suspect-call-number": (_session(script=[{**CALL, "call": 1}]), ATTEMPTS, f"{JOB}/a2",
+                                       "one thread lists a call other than as the audits list one"),
 }
 
 
@@ -399,6 +520,8 @@ def test_a_codex_run_is_pooled_only_with_a_passing_audit_of_its_session_logs(are
     gates it too."""
     _accepted_run(graph, "opus")  # no Codex lane, so no session logs to audit
     _codex_run(graph, "sol-ok", _session())
+    _codex_run(graph, "sol-reasoning", _edited(_with_reasoning))
+    _codex_run(graph, "sol-main-command", _edited(_with_main_command))
     _codex_run(graph, "sol-never-started", _session(), attempts={**ATTEMPTS, "attempts": [
         *ATTEMPTS["attempts"], {"attempt_id": f"{JOB}/a3", "native_session_id": None, "started_at": None}]})
     _codex_run(graph, "sol-none", None)
@@ -432,7 +555,8 @@ def test_a_codex_run_is_pooled_only_with_a_passing_audit_of_its_session_logs(are
     _codex_run(graph, "sol-not-json-run", None)
     (runners.RUNS / "sol-not-json-run" / "codex-sessions").mkdir()
     (runners.RUNS / "sol-not-json-run" / "codex-sessions" / "audit.json").write_text("{MOCK")
-    assert set(cli.accepted_runs(graph, "sha")) == {"opus", "sol-ok", "sol-never-started"}
+    assert set(cli.accepted_runs(graph, "sha")) == {"opus", "sol-ok", "sol-reasoning", "sol-main-command",
+                                                    "sol-never-started"}
     err = capsys.readouterr().err
     for label in ["sol-none", "sol-not-json-run", *unreadable]:
         assert f"excluding {label}: no readable audit of its session logs" in err
@@ -450,7 +574,32 @@ def test_a_codex_run_is_pooled_only_with_a_passing_audit_of_its_session_logs(are
     accept = {"sol-odd", "sol-main", "sol-hidden", "sol-earlier", "sol-script", "sol-none", "sol-failed",
               *unreadable, *INCONSISTENT}
     assert set(cli.accepted_runs(graph, "sha", accept_suspect=accept)) == {
-        "opus", "sol-ok", "sol-never-started", "sol-odd", "sol-main", "sol-hidden", "sol-earlier", "sol-script"}
+        "opus", "sol-ok", "sol-reasoning", "sol-main-command", "sol-never-started", "sol-odd", "sol-main", "sol-hidden",
+        "sol-earlier", "sol-script"}
+
+
+@pytest.mark.parametrize("name", ["audit.json", "attempts.json"])
+@pytest.mark.parametrize("kind", ["a folder", "a pipe", "a link to nothing", "empty", "cut", "not UTF-8",
+                                  "nested too deeply", pytest.param("no permission to read it", marks=pytest.mark.skipif(
+                                      os.geteuid() == 0, reason="root reads any file"))])
+def test_a_record_that_is_no_regular_file_of_json_excludes_the_run(area, graph, capsys, name, kind):
+    """Review 6: the gate reads a run's records without stopping `simulate`. A folder, a pipe (whose read
+    would wait for a writer forever), a link to nothing, an empty or cut file, bytes that are not UTF-8,
+    JSON nested past 64 levels and a file the system will not let it read each exclude the run, with
+    the reason."""
+    _codex_run(graph, "sol-odd", _session())
+    _codex_run(graph, "sol-ok", _session())
+    path = runners.RUNS / "sol-odd" / "codex-sessions" / name
+    path.unlink()
+    {"a folder": path.mkdir, "a pipe": lambda: os.mkfifo(path),
+     "a link to nothing": lambda: path.symlink_to(path.with_name("MOCK-gone")), "empty": lambda: path.write_text(""),
+     "cut": lambda: path.write_text('{"attempts":'), "not UTF-8": lambda: path.write_bytes(b'{"MOCK": "\xff"}'),
+     "nested too deeply": lambda: path.write_text("[" * 65 + "]" * 65),
+     "no permission to read it": lambda: (path.write_text("{}"), path.chmod(0))}[kind]()
+    assert set(cli.accepted_runs(graph, "sha")) == {"sol-ok"}
+    assert ("excluding sol-odd: no readable audit of its session logs" if name == "audit.json" else
+            "excluding sol-odd: the audit of its session logs says it passed, but its attempts.json is not a file of "
+            "JSON this check can read") in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("workdir", [None, "", "MOCK/work/sol", ["/MOCK/work/sol"]],
@@ -468,12 +617,38 @@ def test_a_run_whose_work_directory_is_not_an_absolute_path_is_excluded(area, gr
 def test_a_transcript_thread_id_that_is_not_a_string_names_no_thread(area, graph, capsys):
     """A transcript whose `thread.started` event gives a number names no thread, though Python writes
     that number as the main thread's id."""
-    session = {**_session(threads=[_thread("7", None, spawns=1), _thread("MOCK-helper", "7")]), "main_thread": "7"}
+    session = _session(threads=[_thread("7", None, spawns=1), _thread("MOCK-helper", "7")], main_thread="7")
     _codex_run(graph, "sol-number", session, attempts=None, collected=f"{JOB}/a1", thread=7)
     _codex_run(graph, "sol-text", session, attempts=None, collected=f"{JOB}/a1", thread="7")
     assert set(cli.accepted_runs(graph, "sha")) == {"sol-text"}
     assert ("excluding sol-number: the audit of its session logs says it passed, but its main thread is not the "
             "thread the transcript records") in capsys.readouterr().err
+
+
+def test_a_record_that_names_a_job_with_no_attempts_on_record_is_excluded(area, graph, capsys):
+    """The script names the job and the collected attempt only from their record, so a record that
+    names them with no attempts.json beside it is not one the script wrote."""
+    session = _session(threads=[_thread("MOCK-main", None, spawns=1), _thread("MOCK-helper", "MOCK-main")])
+    _codex_run(graph, "sol-plain", session, attempts=None, collected=f"{JOB}/a1")
+    _codex_run(graph, "sol-named", session, attempts=None, collected=f"{JOB}/a1")
+    path = runners.RUNS / "sol-named" / "codex-sessions" / "audit.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "job_id": JOB, "collected_attempt": f"{JOB}/a1"}))
+    assert set(cli.accepted_runs(graph, "sha")) == {"sol-plain"}
+    assert ("excluding sol-named: the audit of its session logs says it passed, but it has other fields than the "
+            "script writes") in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("levels, accepted", [(64, True), (65, False)])
+def test_a_transcript_names_its_thread_only_on_a_line_nested_at_most_64_levels(area, graph, capsys, levels, accepted):
+    """As the script reads a transcript, a line nested more than 64 levels is no event, so a transcript
+    whose one `thread.started` line nests deeper names no thread."""
+    session = _session(threads=[_thread("MOCK-main", None, spawns=1), _thread("MOCK-helper", "MOCK-main")])
+    _codex_run(graph, "sol-deep", session, attempts=None, collected=f"{JOB}/a1")
+    nested = "[" * (levels - 1) + "]" * (levels - 1)
+    (runners.RUNS / "sol-deep" / "transcript.jsonl").write_text(
+        '{"type": "thread.started", "thread_id": "MOCK-main", "MOCK": ' + nested + "}\n")
+    assert set(cli.accepted_runs(graph, "sha")) == ({"sol-deep"} if accepted else set())
+    assert ("its main thread is not the thread the transcript records" in capsys.readouterr().err) is not accepted
 
 
 def test_a_codex_runs_suspect_calls_count_each_thread_once():
@@ -532,7 +707,7 @@ def test_the_gate_admits_and_counts_as_its_rule_says(graph, threads, main, trans
                     spawns=len(threads) - 1 if i == main else 0) for i, (items, scripts) in enumerate(threads)]
     if not passed:
         rows[main]["audit"].update(passed=False, violations=[CALL])
-    session = {**_session(passed, threads=rows), "main_thread": f"MOCK-{main}"}
+    session = _session(passed, threads=rows, main_thread=f"MOCK-{main}")
     expected = (max(transcript, threads[main][0]) + threads[main][1]
                 + sum(items + scripts for i, (items, scripts) in enumerate(threads) if i != main))
     pooled = passed and (expected == 0 or accept)
@@ -559,7 +734,7 @@ def test_the_gate_admits_a_thread_graph_only_as_one_tree_from_its_main_thread(gr
     rows = [_thread(f"MOCK-{i}", None if p is None else f"MOCK-{p}", spawns=up.count(i)) for i, p in enumerate(up)]
     if twice:
         rows.append(dict(rows[-1]))
-    session = {**_session(threads=rows), "main_thread": f"MOCK-{main}"}
+    session = _session(threads=rows, main_thread=f"MOCK-{main}")
 
     def descends(i: int) -> bool:
         seen = set()

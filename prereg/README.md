@@ -82,6 +82,15 @@ After `2026-11-04-served/`:
   the work directory or at another path that names it. It also flags a log that names the work
   directory without saying on its first line where its thread started. Re-auditing the four Sol runs
   again leaves every `codex-sessions/audit.json` and `attempts.json` byte for byte the same.
+- The audit now also fails a run whose transcript holds any line but the thread's one start, events of
+  its turns that hold no call, and items that each complete with the calls they started with. It flags
+  a log that names the work directory but whose first line gives no absolute path for where its
+  thread started, an agent path it cannot read, and a command run in a relative folder or one with a
+  `..` part. A kept copy that is not a regular file, or that it cannot read, stops it. Re-auditing the
+  four Sol runs leaves every `codex-sessions/audit.json` and `attempts.json` byte for byte the same.
 - `simulate` also checks each audit's work directory, job and counts, and that each thread's own audit
   read one event or more. It checks which threads the audit marks as collected, and with which attempt.
+  It checks each thread's fields, and its counts of events and calls against its items, and excludes a
+  run whose audit or attempts file it cannot read as JSON. `prereg` stops at a run's file that is not a
+  regular file.
 - Every file in this manifest still matches.

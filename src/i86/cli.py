@@ -20,6 +20,7 @@ import argparse
 import collections
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -179,6 +180,53 @@ def _audit_record(result) -> bool:
 
 
 SESSIONS = "codex-sessions"
+# What a passing audit of a Codex run's session logs records, as `scripts/audit_codex_sessions.py`
+# writes it, and the most levels its JSON nests (it writes six or so). A test checks these against the
+# script's own tables.
+DEPTH = 64
+SCRIPT_TOOLS = frozenset({"web__run", "exec_command"})  # what a script may call
+FUNCTIONS = frozenset({"spawn_agent", "send_message", "followup_task", "wait_agent", "interrupt_agent",
+                       "list_agents", "wait"})  # what a thread may call, each in its own namespace
+# The items the script turns into one line each of the stream it audits (and each web search, an
+# `Extension:web.` item), and those it reads and passes over.
+LINE_ITEMS = frozenset({"CommandExecution", "AgentMessage", "Reasoning"})
+QUIET_ITEMS = frozenset({"UserMessage", "SubAgentActivity"})
+RECORD_KEYS = frozenset({"run", "workdir", "threads", "missing", "flags", "orphans", "main_thread",
+                         "transcript_check", "web_calls", "served_pages", "commands", "violations", "suspect",
+                         "passed"})
+THREAD_KEYS = frozenset({"thread_id", "spawned_by", "agent_path", "attempt", "collected", "started", "file",
+                         "sha256", "items", "script_tools", "functions", "served_pages", "audit", "script_suspect"})
+AUDIT_KEYS = frozenset({"events", "tool_calls", "web_calls", "urls", "violations", "suspect", "local_calls",
+                        "passed"})
+CHECK_KEYS = frozenset({"items", "only_in_transcript", "only_in_log", "different"})
+ABSENT, UNREADABLE = object(), object()
+
+
+def _nests_deeper_than(value, levels: int) -> bool:
+    """Whether a JSON value nests objects and arrays more than `levels` deep, found without recursion."""
+    stack = [(value, 0)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, (dict, list)):
+            if depth == levels:
+                return True
+            stack.extend((child, depth + 1) for child in (node.values() if isinstance(node, dict) else node))
+    return False
+
+
+def _json_file(path: Path):
+    """The JSON value a file holds; ABSENT if nothing is at `path`; UNREADABLE if what is there is not a
+    regular file (a folder, or a pipe that would block), cannot be read or decoded, does not parse, or
+    nests more than DEPTH levels."""
+    if not os.path.lexists(path):
+        return ABSENT
+    if not os.path.isfile(path):
+        return UNREADABLE
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, ValueError, RecursionError):
+        return UNREADABLE
+    return UNREADABLE if _nests_deeper_than(value, DEPTH) else value
 
 
 def _session_audit(run_dir: Path):
@@ -186,13 +234,9 @@ def _session_audit(run_dir: Path):
     (`scripts/audit_codex_sessions.py`): the record; None if the run has none; "unreadable" if it is
     not such a record or is another run's; or, for a record that says it passed but does not hold up
     (`_session_problem`), why not."""
-    path = run_dir / SESSIONS / "audit.json"
-    if not path.exists():
+    rec = _json_file(run_dir / SESSIONS / "audit.json")
+    if rec is ABSENT:
         return None
-    try:
-        rec = json.loads(path.read_text())
-    except (ValueError, RecursionError):
-        return "unreadable"
     ok = (isinstance(rec, dict) and rec.get("run") == run_dir.name and isinstance(rec.get("passed"), bool)
           and isinstance(rec.get("threads"), list)
           and all(isinstance(t, dict) and isinstance(t.get("thread_id"), str) and t["thread_id"]
@@ -209,14 +253,18 @@ def _session_audit(run_dir: Path):
 def _transcript_thread(path: Path) -> str | None:
     """The thread a `codex exec --json` transcript records (its first `thread.started` event), or None
     if it records none or one whose id is not a string."""
-    if not path.is_file():
+    if not path.is_file():  # not a folder, or a pipe that would block
         return None
-    for raw in path.read_text(errors="replace").split("\n"):
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return None
+    for raw in text.split("\n"):
         try:
             line = json.loads(raw)
         except (ValueError, RecursionError):
             continue
-        if isinstance(line, dict) and line.get("type") == "thread.started":
+        if isinstance(line, dict) and not _nests_deeper_than(line, DEPTH) and line.get("type") == "thread.started":
             tid = line.get("thread_id")
             return tid if isinstance(tid, str) else None
     return None
@@ -227,21 +275,72 @@ def _counts(value) -> bool:
     return isinstance(value, dict) and all(type(v) is int and v >= 0 for v in value.values())
 
 
+def _calls_listed(records, fields: frozenset) -> bool:
+    """Whether a value lists calls as the audits write them: objects with a tool and a call and no field
+    outside `fields`, each a string."""
+    return isinstance(records, list) and all(
+        isinstance(r, dict) and {"tool", "call"} <= set(r) <= fields and all(isinstance(v, str) for v in r.values())
+        for r in records)
+
+
+def _searches(items: dict) -> int:
+    """A thread's web searches: its items of an `Extension:web.` kind."""
+    return sum(n for kind, n in items.items() if kind.startswith("Extension:web."))
+
+
+def _thread_problem(t: dict) -> str | None:
+    """Why one thread's entry in a session audit that passed does not hold up, or None. It must have the
+    fields the script writes, of their types: a file that names a log straight under the run's
+    `codex-sessions`, as the script names each kept log, a SHA-256, and calls in the form the audits
+    write them. Its own audit must count the events and calls its items make: the script turns each web
+    search, command, message and reasoning item into one line of the stream it audits, and `audit` reads
+    one call from each search and command. `audit` lists each call it does not
+    read as a web call, or counts it as neither, and gives each web call one address or more. And the
+    thread's scripts may call the shell no more often than its commands completed."""
+    items, own = t["items"], t["audit"]
+    if set(t) != THREAD_KEYS or set(own) != AUDIT_KEYS:
+        return "one thread's entry or its audit has other fields than the script writes"
+    if not (all(t[key] is None or isinstance(t[key], str) for key in ("agent_path", "started"))
+            and isinstance(t["file"], str) and re.fullmatch(r"codex-sessions/rollout-[^/]*\.jsonl", t["file"])
+            and isinstance(t["sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", t["sha256"])):
+        return "one thread gives an agent path, a start time, a file or a SHA-256 the script does not write"
+    if not (_calls_listed(own["suspect"], frozenset({"tool", "call", "why"}))
+            and _calls_listed(own["local_calls"], frozenset({"tool", "call", "why"}))
+            and _calls_listed(t["script_suspect"], frozenset({"tool", "call", "why"}))
+            and all(set(r) == {"tool", "call", "why"} for r in t["script_suspect"])):
+        return "one thread lists a call other than as the audits list one"
+    calls = _searches(items) + items.get("CommandExecution", 0)
+    if own["events"] != calls + items.get("AgentMessage", 0) + items.get("Reasoning", 0) or not (
+            type(own["tool_calls"]) is int and own["tool_calls"] == calls):
+        return "one thread's audit counts other events or calls than its items make"
+    urls = own["urls"]
+    if not (own["web_calls"] + len(own["suspect"]) + len(own["local_calls"]) <= own["tool_calls"]
+            and isinstance(urls, list) and all(isinstance(u, str) for u in urls) and urls == sorted(set(urls))
+            and bool(urls) == (own["web_calls"] > 0)):
+        return "one thread's audit lists more calls than it read, or web addresses that do not match its web calls"
+    if t["script_tools"].get("exec_command", 0) > items.get("CommandExecution", 0):
+        return "one thread's scripts call the shell more often than its commands completed"
+    return None
+
+
 def _session_problem(run_dir: Path, rec: dict) -> str | None:
     """Why a session audit that says it passed does not hold up, or None. The gate reads the verdict again
     rather than trust it: the run's own work directory, an absolute path; no flags, missing threads or
     orphans; each thread with an id of its own, counts of zero or more, and it passed its own audit,
-    which reads one event or more and finds no violation; each parent among the threads, every thread
-    descended from a main thread with no cycle, and each thread's `spawn_agent` calls as many as the
-    threads that name it as their parent; totals that add up; as its main thread, a thread `codex exec`
-    started, the one the transcript records; a check of the transcript that found the same calls in it
-    and in the main thread's log; and each thread marked as collected exactly when it descends from the
-    main thread, and with the attempt whose session it descends from. With attempts on record
-    (`attempts.json`), they must be the job's attempts a1, a2 and on, the job meta.json's and the
-    audit's, and meta.json's attempt must be the one subfleet accepted and the audit names, with the
-    main thread as its session; each attempt that started must name its own session among the threads,
-    a main thread, and each main thread must be an attempt's session. With none, the run has one main
-    thread, from the job's first attempt."""
+    which reads one event or more and finds no violation; no item, script tool or function the script
+    fails a run for; each parent among the threads, every thread descended from a main thread with no
+    cycle, each thread's `spawn_agent` calls as many as the threads that name it as their parent, and
+    as many sub-agent events or more; totals that add up; each thread's fields and counts as
+    `_thread_problem` reads them; as its main thread, a thread `codex exec` started, the one the
+    transcript records; a check of the transcript that compared each of the main thread's searches and
+    commands and found the same calls in it and in the main thread's log; and each thread marked as
+    collected exactly when it descends from the main thread, and with the attempt whose session it
+    descends from. With attempts on record (`attempts.json`), they must be the job's attempts a1, a2 and
+    on, the job meta.json's and the audit's, and meta.json's attempt must be the one subfleet accepted
+    and the audit names, with the main thread as its session; each attempt that started must name its
+    own session among the threads, a main thread, and each main thread must be an attempt's session.
+    With none, the run has one main thread, from the job's first attempt. Last, the record must have the
+    fields the script writes, and no others."""
     meta = runners.read_meta(run_dir)
     threads = rec["threads"]
     parent = {t["thread_id"]: t.get("spawned_by") for t in threads}
@@ -259,6 +358,10 @@ def _session_problem(run_dir: Path, rec: dict) -> str | None:
         return "one thread's own audit failed: it found a violation or read no events"
     if not all(_counts(t.get(key)) for t in threads for key in ("items", "script_tools", "functions")):
         return "one thread's counts are not whole numbers of zero or more"
+    if not all(set(t["script_tools"]) <= SCRIPT_TOOLS and set(t["functions"]) <= FUNCTIONS
+               and all(kind in LINE_ITEMS or kind in QUIET_ITEMS or kind.startswith("Extension:web.")
+                       for kind in t["items"]) for t in threads):
+        return "one thread records an item, a script's tool or a function for which the script fails a run"
     if any(p is not None and p not in ids for p in parent.values()):
         return "one thread's parent is not among its threads"
     root = {}
@@ -273,6 +376,8 @@ def _session_problem(run_dir: Path, rec: dict) -> str | None:
     children = collections.Counter(parent.values())
     if any(t["functions"].get("spawn_agent", 0) != children[t["thread_id"]] for t in threads):
         return "one thread's spawn_agent calls do not match the threads that name it as their parent"
+    if any(t["items"].get("SubAgentActivity", 0) < children[t["thread_id"]] for t in threads):
+        return "one thread records fewer sub-agent events than the threads that name it as their parent"
 
     def total(values) -> int | None:
         return sum(values) if all(type(v) is int and v >= 0 for v in values) else None
@@ -284,6 +389,10 @@ def _session_problem(run_dir: Path, rec: dict) -> str | None:
     for key, value in totals.items():
         if value is None or type(rec.get(key)) is not int or rec[key] != value:
             return f"its {key} do not add up over its threads"
+    for t in threads:
+        problem = _thread_problem(t)
+        if problem:
+            return problem
     main = rec.get("main_thread")
     if not isinstance(main, str) or main not in ids:
         return "it names no main thread among its threads"
@@ -295,20 +404,23 @@ def _session_problem(run_dir: Path, rec: dict) -> str | None:
     if not (isinstance(check, dict) and type(check.get("items")) is int and check["items"] >= 0
             and all(check.get(key) == [] for key in ("only_in_transcript", "only_in_log", "different"))):
         return "its check of the transcript is missing or found calls that differ from the main thread's log"
+    if set(check) != CHECK_KEYS:
+        return "its check of the transcript has other fields than the script writes"
+    main_items = next(t["items"] for t in threads if t["thread_id"] == main)
+    if check["items"] != _searches(main_items) + main_items.get("CommandExecution", 0):
+        return "its check of the transcript compared another number of items than the main thread's log holds"
     roots = {tid for tid, p in parent.items() if p is None}
     collected = meta.get("attempt_id")
-    kept = run_dir / SESSIONS / "attempts.json"
-    if not kept.exists():
+    record = _json_file(run_dir / SESSIONS / "attempts.json")
+    if record is ABSENT:
         if len(roots) != 1:
             return f"it has no attempts on record and {len(roots)} main threads"
         if collected is not None and not str(collected).endswith("/a1"):
             return f"it has no attempts on record, and the run collected {collected}, not its job's first attempt"
         attempt_of = {}
     else:
-        try:
-            record = json.loads(kept.read_text())
-        except (ValueError, RecursionError):
-            return "its attempts.json does not parse"
+        if record is UNREADABLE:
+            return "its attempts.json is not a file of JSON this check can read"
         listed = record.get("attempts") if isinstance(record, dict) else None
         if not isinstance(listed, list) or not all(isinstance(a, dict) for a in listed):
             return "its attempts.json lists no attempts"
@@ -342,6 +454,8 @@ def _session_problem(run_dir: Path, rec: dict) -> str | None:
         return "one thread is marked collected though it does not descend from the main thread, or the reverse"
     if any(t.get("attempt") != attempt_of.get(root[t["thread_id"]]) for t in threads):
         return "one thread names an attempt other than the one whose session it descends from"
+    if set(rec) != RECORD_KEYS | (set() if record is ABSENT else {"job_id", "collected_attempt"}):
+        return "it has other fields than the script writes"
     return None
 
 
@@ -453,14 +567,24 @@ def _keeps(folder: Path, sums: Path, proof: Path) -> bool:
                for p in (sums, proof))
 
 
+def _files(paths) -> list[Path]:
+    """The paths at which there is something for prereg to hash. Anything there but a regular file (a
+    folder, a pipe that would block, a link to nothing) stops prereg."""
+    present = [p for p in paths if os.path.lexists(p)]
+    for p in present:
+        if not os.path.isfile(p):
+            raise SystemExit(f"{p.relative_to(ROOT)} is not a regular file, so prereg cannot hash it")
+    return present
+
+
 def cmd_prereg(args) -> int:
     files = [ROOT / "graph" / "graph.yaml", PROMPT_PATH, TEMPLATE_PATH, *sorted((ROOT / "context").iterdir())]
     for d in run_dirs():
-        files += [p for p in (d / "meta.json", d / "response.md", d / "response.json", d / "audit.json",
-                              d / "transcript.jsonl") if p.exists()]
+        files += _files((d / "meta.json", d / "response.md", d / "response.json", d / "audit.json",
+                         d / "transcript.jsonl"))
         # A Codex run's audit of its session logs (scripts/audit_codex_sessions.py) and its attempts. The
         # logs stay out of this public repository; the audit records each one's SHA-256.
-        files += [p for p in (d / SESSIONS / "audit.json", d / SESSIONS / "attempts.json") if p.exists()]
+        files += _files((d / SESSIONS / "audit.json", d / SESSIONS / "attempts.json"))
     files += sorted(p for p in OUTPUTS.glob("*") if p.is_file())
     lines = [f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(ROOT)}" for p in files]
     PREREG.mkdir(exist_ok=True)

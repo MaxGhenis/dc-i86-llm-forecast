@@ -18,20 +18,25 @@ transcript is the collected attempt's alone. For each Codex run this script:
    it, once both paths are normalized. This script compares paths as text, so it misses a thread whose
    log records another path to the folder, such as a symlink to it. A log this script cannot open is
    flagged; so is one that names the work directory anywhere (as UTF-8, UTF-16 or UTF-32 text, with
-   JSON's escapes such as `\\/` and `\\u002f` decoded) though its first line says nothing of where its
-   thread started, a session in a path that names the work directory but is another, and a session
-   there that gives no thread id or a source or start time this script cannot read;
+   JSON's escapes such as `\\/` and `\\u002f` decoded) though its first line gives no absolute path for
+   where its thread started, a session in a path that names the work directory but is another, and a
+   session there that gives no thread id or a source, start time or agent path this script cannot read;
 2. reads the run's attempts from subfleet (`subfleet runs show JOB --json`) and keeps them in
-   `runs/<label>/codex-sessions/attempts.json`, never replacing a different record. The record must
+   `runs/<label>/codex-sessions/attempts.json`, never replacing a different record; a kept file that is
+   not a regular file of JSON holding a list of attempts stops the script. The record must
    list the job's attempts a1, a2 and on. Each main thread must be the session of one of them, each
    attempt that started must name a session of its own with a log, a main thread, and the collected
    attempt's main thread must be the thread the committed transcript records. Without attempts on
    record, a run may have one main thread only, and must have collected its job's first attempt;
-3. copies the logs into `runs/<label>/codex-sessions/`, never replacing a different file. `.gitignore`
-   keeps them out of this public repository; `audit.json` records each one's SHA-256;
+3. copies the logs into `runs/<label>/codex-sessions/`, never replacing a different file. A kept copy
+   that is not a regular file, or that this script cannot read, stops it, and so does a
+   `codex-sessions` that is not a folder. `.gitignore` keeps the logs out of this public repository;
+   `audit.json` records each one's SHA-256;
 4. turns each log's completed items into the `codex exec --json` items `i86 audit` reads (web searches,
    shell commands, messages) and audits them with `audit.audit_transcript`, as `i86 audit` audits a
-   transcript. The collected main thread's items must match its transcript's, item by item;
+   transcript. The collected main thread's items must match its transcript's, item by item, and the
+   transcript may hold no other line but the thread's one start, events of its turns that hold no
+   call, and items that each complete with the calls they started with;
 5. reads what the items miss. An item records only part of what a `tools.web__run` call opens, nothing
    of what a click opens, and nothing for a call whose cell never finished. So it checks every `exec`
    script's text, and each string the script writes out or builds from constants with its escapes
@@ -51,7 +56,8 @@ transcript is the collected attempt's alone. For each Codex run this script:
    and code mode's `wait`; a log line that does not parse, nests more than `DEPTH` levels or gives a key
    twice; a record, event or item of a kind it does not convert, or with a field its checks cannot read
    (a list where Codex writes a string, say); a cite marker in a tool's reply it cannot read; a shell
-   command a script calls with no completed item to audit; or a command run outside the work directory;
+   command a script calls with no completed item to audit; or a command run outside the work directory
+   or in a folder this script cannot place (a relative path, or one with a `..` part);
 7. writes `runs/<label>/codex-sessions/audit.json`.
 
 The checks in 5 and 6 read each script without running it, so a script written to hide a call can
@@ -132,6 +138,8 @@ LINK = re.compile("cite\\d+†[^-]*")
 # How Codex reports a script V8 refused to compile: it failed with a SyntaxError and printed nothing.
 REFUSED = re.compile(r"Script failed\nWall time [0-9.]+ seconds\nOutput:\n")
 FIRST_ATTEMPT = re.compile(r"/a1\Z")  # subfleet's attempt ids run <job>/a1, <job>/a2, ...
+# The `codex exec --json` events that hold no item: a thread's start, and its turns' events.
+TURN_EVENTS = {"thread.started", "turn.started", "turn.completed", "turn.failed", "error"}
 # What a 0.159 session log holds, besides the calls this script reads. Anything else is flagged.
 RECORDS = {"session_meta", "event_msg", "response_item", "turn_context", "world_state", "token_usage_record",
            "inter_agent_communication_metadata"}
@@ -265,11 +273,11 @@ def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list
     search could not read. A thread started there when its log's first line parses (`_record`) as a
     `session_meta` record whose `cwd` is the work directory, the same path once `_normalized`. A log
     this script cannot open is reported. So is one whose first line says nothing of where its thread
-    started (it does not parse, is another record or gives no `cwd` this script can read) when the
-    log names the work directory anywhere (`_mentions`), and a session in a path that names the work
-    directory but is another. A session there with no thread id or a source or start time this
-    script cannot read, and a thread whose logs differ, are reported too; a second log of a thread that
-    matches the first byte for byte is the same log."""
+    started (it does not parse, is another record or gives no `cwd` this script can read, an absolute
+    path) when the log names the work directory anywhere (`_mentions`), and a session in a path that
+    names the work directory but is another. A session there with no thread id or a source, start time
+    or agent path this script cannot read, and a thread whose logs differ, are reported too; a second
+    log of a thread that matches the first byte for byte is the same log."""
     found: dict[str, dict] = {}
     problems: list[str] = []
     for path in paths:
@@ -289,10 +297,10 @@ def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list
             record = None
         meta = record.get("payload") if isinstance(record, dict) and record.get("type") == "session_meta" else None
         cwd = meta.get("cwd") if isinstance(meta, dict) else None
-        if not isinstance(cwd, str):
+        if not (isinstance(cwd, str) and cwd.startswith("/")):  # "", ".", a relative path: no folder
             problem = ("does not parse" if record is None
                        else "is not a session's record" if not isinstance(meta, dict)
-                       else "gives no work directory this script can read")
+                       else "gives no work directory this script can read, an absolute path")
             try:
                 named = _mentions(path.read_bytes(), workdir)
             except OSError as error:
@@ -322,16 +330,28 @@ def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list
         if started is not None and not isinstance(started, str):
             problems.append(f"{path.name}: thread {tid} gives a start time this script cannot read")
             started = None
+        agent_path = (thread_spawn(meta) or {}).get("agent_path")
+        if agent_path is not None and not isinstance(agent_path, str):
+            problems.append(f"{path.name}: thread {tid} gives an agent path this script cannot read")
+            agent_path = None
         found[tid] = {"path": path, "spawned_by": parent, "source": meta.get("source"),
-                      "started": started, "agent_path": (thread_spawn(meta) or {}).get("agent_path")}
+                      "started": started, "agent_path": agent_path}
     return found, problems
 
 
 def keep(src: Path, dest_dir: Path) -> Path:
-    """Copy a log into the run's folder, append-only: an existing copy must match byte for byte."""
+    """Copy a log into the run's folder, append-only: an existing copy must be a regular file that
+    matches byte for byte. One that is not, or that cannot be read, stops the script."""
     dest = dest_dir / src.name
-    if dest.exists():
-        if sha256(dest) != sha256(src):
+    if os.path.lexists(dest):
+        if not os.path.isfile(dest):  # a folder, a pipe that would block, or a link to nothing
+            raise SystemExit(f"{dest} is not a regular file; the kept copy is final")
+        try:
+            differs = sha256(dest) != sha256(src)
+        except OSError as error:
+            raise SystemExit(f"this script cannot read {dest} or {src} ({type(error).__name__}); the kept copy "
+                             "is final") from None
+        if differs:
             raise SystemExit(f"{dest} differs from {src}; the kept copy is final")
         return dest
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -355,8 +375,9 @@ def subfleet_record(job_id: str) -> dict | None:
 
 def attempts(run_dir: Path, meta: dict) -> dict | None:
     """The run's subfleet attempts: the copy kept in `attempts.json`, or subfleet's record, kept there.
-    A kept copy is final: a different record from subfleet stops the audit. None for a run with no
-    job, or none on record."""
+    A kept copy is final: one that is not a regular file of JSON holding a record of attempts (nested
+    at most `DEPTH` levels), or a different record from subfleet, stops the audit. None for a run with
+    no job, or none on record."""
     kept = run_dir / FOLDER / "attempts.json"
     job = meta.get("job_id")
     info = subfleet_record(job) if job else None
@@ -364,9 +385,14 @@ def attempts(run_dir: Path, meta: dict) -> dict | None:
     if isinstance(info, dict) and isinstance(info.get("attempts"), list):
         fresh = {"job_id": job, "accepted_attempt_id": (info.get("job") or {}).get("accepted_attempt_id"),
                  "attempts": [{k: a.get(k) for k in ATTEMPT_FIELDS} for a in info["attempts"] if isinstance(a, dict)]}
-    if kept.exists():
-        old = json.loads(kept.read_text())
-        if not (isinstance(old, dict) and isinstance(old.get("attempts"), list)
+    if os.path.lexists(kept):
+        old = None
+        if os.path.isfile(kept):  # not a folder, or a pipe that would block
+            try:
+                old = json.loads(kept.read_text())
+            except (OSError, ValueError, RecursionError):
+                old = None
+        if not (isinstance(old, dict) and not _nests_deeper_than(old, DEPTH) and isinstance(old.get("attempts"), list)
                 and all(isinstance(a, dict) for a in old["attempts"])):
             raise SystemExit(f"{kept} is not a record of attempts; the kept copy is final")
         if fresh is not None and fresh != old:
@@ -377,6 +403,13 @@ def attempts(run_dir: Path, meta: dict) -> dict | None:
     kept.parent.mkdir(parents=True, exist_ok=True)
     kept.write_text(json.dumps(fresh, indent=1) + "\n")
     return fresh
+
+
+def _plain(path: str) -> str | None:
+    """An absolute path without its `.` parts, repeated `/` and `/` at the end; None for a relative
+    path or one with a `..` part, which leads wherever a link before it leads."""
+    parts = [part for part in path.split("/") if part not in ("", ".")]
+    return "/" + "/".join(parts) if path.startswith("/") and ".." not in parts else None
 
 
 def local_path(cwd) -> str | None:
@@ -921,8 +954,12 @@ def convert(path: Path, workdir: str) -> tuple[list[dict], dict]:
                     cwd = local_path(item.get("cwd"))
                     if cwd is None:  # a cwd missing, empty or of another type: where the command ran is unknown
                         raise TypeError("a command without a working directory this script can read")
-                    if cwd.rstrip("/") != workdir.rstrip("/"):
-                        found["flags"].append(f"line {n}: a command ran in {cwd}, outside the work directory")
+                    place = _plain(cwd)
+                    if place is None:
+                        found["flags"].append(f"line {n}: a command ran in {cwd[:200]}, a path this script cannot "
+                                              "place: relative, or with a `..` part")
+                    elif place != _plain(workdir):
+                        found["flags"].append(f"line {n}: a command ran in {cwd[:200]}, outside the work directory")
                     lines.append({"type": "item.completed", "item": {
                         "id": item.get("id"), "type": "command_execution",
                         "command": shlex.join(command) if isinstance(command, list) else command,
@@ -981,10 +1018,10 @@ def _calls(lines: list[dict]) -> dict[str, list]:
     return out
 
 
-def transcript_lines(path: Path, unread: list[int] | None = None) -> list[dict]:
-    """A transcript's events: the lines that parse as JSON objects. Lines end at a newline alone, and a
-    line of JSON's whitespace alone is no line, as `audit` reads a transcript; `unread` collects the
-    number of each other line, which does not parse or is not an object."""
+def transcript_lines(path: Path, unread: list[int] | None = None) -> list[tuple[int, dict]]:
+    """A transcript's events, each with its line's number: the lines that parse as JSON objects nested
+    at most `DEPTH` levels. Lines end at a newline alone, and a line of JSON's whitespace alone is no
+    line, as `audit` reads a transcript; `unread` collects the number of each other line."""
     lines = []
     for number, raw in enumerate(path.read_text(errors="replace").split("\n"), 1):
         if not raw.strip(" \t\r\n"):
@@ -993,21 +1030,57 @@ def transcript_lines(path: Path, unread: list[int] | None = None) -> list[dict]:
             line = json.loads(raw)
         except (ValueError, RecursionError):
             line = None
-        if isinstance(line, dict):
-            lines.append(line)
+        if isinstance(line, dict) and not _nests_deeper_than(line, DEPTH):
+            lines.append((number, line))
         elif unread is not None:
             unread.append(number)
     return lines
 
 
+def _id_and_calls(line: dict) -> tuple:
+    """A transcript item's id as `audit` keys it (None if it has none) and its calls as `audit` reads
+    them, so that a started item pairs with its completion as `audit_transcript` pairs them."""
+    item = line["item"]
+    return audit._id_key(item.get("id")) if "id" in item else None, list(audit._tool_calls(line))
+
+
 def check_transcript(transcript: Path, log_lines: list[dict]) -> dict:
-    """Whether the committed transcript records the same calls as the main thread's log, item by item.
-    A transcript line this script cannot read could hold a call, so it counts as one only the
-    transcript holds."""
+    """Whether the committed transcript records the same calls as the main thread's log, item by item,
+    and no other line from which `audit` reads a call. Each completed item is compared by its id. An
+    item started or updated must complete with the calls it started with, paired as `audit` pairs
+    them: `audit` audits one that never completes as it started. Every other line must be the thread's
+    one start or a turn's event, from which `audit` reads no call. A line that breaks these rules (an
+    item that is not an object, an event of another type or of none, a tool call in a message) or that
+    this script cannot read could hold a call, so it counts, by its number, as one only the transcript
+    holds."""
     unread: list[int] = []
-    mine, theirs = _calls(log_lines), _calls(transcript_lines(transcript, unread))
+    completed: list[dict] = []
+    begun: list[tuple] = []  # items started or updated and not yet completed: (id, calls, line number)
+    starts = 0
+    for number, line in transcript_lines(transcript, unread):
+        event, item = line.get("type"), line.get("item")
+        if event == "item.completed" and isinstance(item, dict):
+            completed.append(line)
+            key, calls = _id_and_calls(line)
+            same = [i for i, (k, earlier, _) in enumerate(begun) if k == key and audit._covers(calls, earlier)]
+            if same:
+                begun.pop(same[0])
+        elif event in ("item.started", "item.updated") and isinstance(item, dict):
+            key, calls = _id_and_calls({**line, "type": "item.completed"})
+            same = [i for i, (k, earlier, _) in enumerate(begun) if k == key and audit._covers(calls, earlier)]
+            if event == "item.updated" and same:
+                begun[same[0]] = (key, calls, number)  # an update stands for the start it covers
+            else:
+                begun.append((key, calls, number))
+        elif (isinstance(event, str) and event in TURN_EVENTS and not list(audit._tool_calls(line))
+              and not (event == "thread.started" and starts)):
+            starts += event == "thread.started"
+        else:
+            unread.append(number)
+    unread += [number for _, _, number in begun]
+    mine, theirs = _calls(log_lines), _calls(completed)
     return {"items": sum(map(len, theirs.values())),
-            "only_in_transcript": [*sorted(k for k in theirs if k not in mine), *(f"line {n}" for n in unread)],
+            "only_in_transcript": [*sorted(k for k in theirs if k not in mine), *(f"line {n}" for n in sorted(unread))],
             "only_in_log": sorted(k for k in mine if k not in theirs),
             "different": sorted(k for k in theirs if k in mine and theirs[k] != mine[k])}
 
@@ -1024,14 +1097,20 @@ def audit_thread(path: Path, workdir: str) -> tuple[dict, dict, list[dict]]:
 def transcript_thread(path: Path) -> str | None:
     """The thread a `codex exec --json` transcript records (its first `thread.started` event), or None
     if it records none or one whose id is not a string."""
-    if not path.is_file():
+    if not path.is_file():  # not a folder, or a pipe that would block
         return None
-    tid = next((line.get("thread_id") for line in transcript_lines(path) if line.get("type") == "thread.started"), None)
+    try:
+        lines = transcript_lines(path)
+    except OSError:
+        return None
+    tid = next((line.get("thread_id") for _, line in lines if line.get("type") == "thread.started"), None)
     return tid if isinstance(tid, str) else None
 
 
 def audit_run(run_dir: Path, lanes: Path) -> dict:
     meta = json.loads((run_dir / "meta.json").read_text())
+    if os.path.lexists(run_dir / FOLDER) and not os.path.isdir(run_dir / FOLDER):
+        raise SystemExit(f"{run_dir / FOLDER} is not a folder; the kept copies are final")
     workdir = meta.get("workdir")
     logs = [*sorted(lanes.glob("*/sessions/*/*/*/rollout-*.jsonl")), *sorted((run_dir / FOLDER).glob("rollout-*.jsonl"))]
     if isinstance(workdir, str) and workdir.startswith("/"):
@@ -1169,6 +1248,13 @@ def codex_runs() -> list[Path]:
     return out
 
 
+def say(text: str) -> None:
+    """Print a line in stdout's encoding, writing a character it cannot encode as its escape: a log's
+    JSON can spell a lone surrogate (`\\ud800`), which no encoding writes."""
+    encoding = sys.stdout.encoding or "utf-8"
+    print(text.encode(encoding, "backslashreplace").decode(encoding))
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("labels", nargs="*", help="runs to audit (default: every collected Codex run)")
@@ -1180,15 +1266,15 @@ def main(argv: list[str] | None = None) -> int:
         r = audit_run(d, args.lanes)
         helpers = sum(1 for t in r["threads"] if t["spawned_by"])
         earlier = sum(1 for t in r["threads"] if not t["collected"])
-        print(f"{r['run']}: {'ok' if r['passed'] else 'FAILED'}; {len(r['threads'])} threads ({helpers} sub-agents, "
-              f"{earlier} from earlier attempts), {r['web_calls']} web calls, {r['served_pages']} pages served, "
-              f"{r['commands']} commands, {r['violations']} violations, {r['suspect']} suspect, "
-              f"{len(r['missing'])} missing, {len(r['flags'])} flags")
+        say(f"{r['run']}: {'ok' if r['passed'] else 'FAILED'}; {len(r['threads'])} threads ({helpers} sub-agents, "
+            f"{earlier} from earlier attempts), {r['web_calls']} web calls, {r['served_pages']} pages served, "
+            f"{r['commands']} commands, {r['violations']} violations, {r['suspect']} suspect, "
+            f"{len(r['missing'])} missing, {len(r['flags'])} flags")
         for t in r["threads"]:
             for rec in t["audit"]["violations"] + t["audit"]["suspect"] + t["script_suspect"]:
-                print(f"    {t['thread_id'][:13]} {rec.get('why', '')}: {rec['call'][:160]}")
+                say(f"    {t['thread_id'][:13]} {rec.get('why', '')}: {rec['call'][:160]}")
         for flag in r["flags"]:
-            print(f"    {flag}")
+            say(f"    {flag}")
         worst = max(worst, 0 if r["passed"] else 1)
     return worst
 
