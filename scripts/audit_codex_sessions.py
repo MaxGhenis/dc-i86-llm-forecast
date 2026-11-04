@@ -15,7 +15,7 @@ transcript is the collected attempt's alone. For each Codex run this script:
    started and the threads that name it as their parent, each thread must descend from a main thread
    with no cycle, and two logs of one thread must hold the same bytes. A log's first line names the
    work directory as JSON writes it or with escapes (`\\/`, `\\u002f`); one that names it but does
-   not parse, or gives a source this script cannot read, is flagged;
+   not parse, or gives a source or start time this script cannot read, is flagged;
 2. reads the run's attempts from subfleet (`subfleet runs show JOB --json`) and keeps them in
    `runs/<label>/codex-sessions/attempts.json`, never replacing a different record. The record must
    list the job's attempts a1, a2 and on. Each main thread must be the session of one of them, each
@@ -35,17 +35,18 @@ transcript is the collected attempt's alone. For each Codex run this script:
    page the web tool's replies say it served as the item of a call that opened it. A script that
    calls the shell is suspect: only a command's item says what ran, and the shell rules read each
    string the script passes it;
-6. flags any tool or record it does not read: a script that calls a tool other than `tools.web__run`
-   and `tools.exec_command` (code mode's `tools` object also holds the lane account's connector tools,
-   such as GitHub's and ChatGPT Space's) or reaches `tools` other than as `tools.<name>`; a script
-   whose text holds a word that can spell or build code as it runs, or reach the global object, a
-   prototype or a runtime the isolate lacks; one that, parsed as JavaScript, names a global code mode
-   does not provide, uses `this`, defines an accessor, builds such a word from strings, or indexes an
-   object with a key it cannot read; a script that does not parse, unless its one output reads as
-   Codex reports a script V8 refused to compile; a function other than the sub-agent ones and code mode's
-   `wait`; a record, event or item of a kind it does not convert; a cite marker in a tool's reply it
-   cannot read; a shell command a script calls with no completed item to audit; or a command run
-   outside the work directory;
+6. flags any tool or record it does not read: a script that calls a tool other than `tools.web__run` and
+   `tools.exec_command` (code mode's `tools` object also holds the lane account's connector tools, such
+   as GitHub's and ChatGPT Space's) or reaches `tools` other than as `tools.<name>`; a script whose text
+   holds a word that can spell or build code as it runs, or reach the global object, a prototype or a
+   runtime the isolate lacks; one that, parsed as JavaScript, names a global code mode does not provide,
+   uses `this`, defines an accessor, builds such a word from strings, or indexes an object with a key it
+   cannot read; a script that does not parse (unless its one output reads as Codex reports a script V8
+   refused to compile) or nests deeper than this script reads; a function other than the sub-agent ones
+   and code mode's `wait`; a log line that does not parse, nests more than `DEPTH` levels or gives a key
+   twice; a record, event or item of a kind it does not convert, or with a field its checks cannot read
+   (a list where Codex writes a string, say); a cite marker in a tool's reply it cannot read; a shell
+   command a script calls with no completed item to audit; or a command run outside the work directory;
 7. writes `runs/<label>/codex-sessions/audit.json`.
 
 The checks in 5 and 6 read each script without running it, so a script written to hide a call can
@@ -61,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import decimal
 import hashlib
 import json
 import math
@@ -84,6 +86,10 @@ from i86 import audit, runners  # noqa: E402
 RUNS = ROOT / "runs"
 LANES = Path.home() / ".subfleet" / "lanes"
 FOLDER = "codex-sessions"
+# How many levels of objects and arrays a log line may nest. The Sol runs' logs nest at most 9; a line
+# that nests nearly as deep as Python's parser reads (about 10,000 here) can parse and then stop a
+# later step that writes its items out as JSON.
+DEPTH = 64
 # What an `exec` script may call: the web, and the shell. Codex 0.159's spec for `exec`: "All nested
 # tools are available on the global `tools` object". That object also held the lane account's
 # connector tools (GitHub, ChatGPT Space and more), as the scripts that listed `ALL_TOOLS` show.
@@ -204,13 +210,29 @@ def _decodes_to(token: bytes, text: str) -> bool:
 
 def _record(raw: bytes | str):
     """A line of a session log as JSON. A line that gives a key twice in one object reads here as the
-    last value and could read elsewhere as the first, so it does not parse (ValueError)."""
+    last value and could read elsewhere as the first, and one that nests more than `DEPTH` levels
+    could stop a later step, so neither parses (ValueError)."""
     def unique(pairs):
         keys = [key for key, _ in pairs]
         if len(set(keys)) < len(keys):
             raise ValueError("a key appears twice in one object")
         return dict(pairs)
-    return json.loads(raw, object_pairs_hook=unique)
+    record = json.loads(raw, object_pairs_hook=unique)
+    if _nests_deeper_than(record, DEPTH):
+        raise ValueError(f"nests more than {DEPTH} levels")
+    return record
+
+
+def _nests_deeper_than(value, levels: int) -> bool:
+    """Whether a JSON value nests objects and arrays more than `levels` deep, found without recursion."""
+    stack = [(value, 0)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, (dict, list)):
+            if depth == levels:
+                return True
+            stack.extend((child, depth + 1) for child in (node.values() if isinstance(node, dict) else node))
+    return False
 
 
 def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list[str]]:
@@ -219,8 +241,8 @@ def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list
     or with an escape, `\\/` or `\\u`, since the directory holds no quote, backslash or control
     character. So a first line with neither cannot name it as its `cwd`, and only the others are
     parsed (the lanes hold tens of thousands of logs). One whose first line names it but does not
-    parse (`_record`) as a `session_meta` record, a session there with no thread id or a source this
-    script cannot read, and a thread whose logs differ are reported; a second log of a thread that
+    parse (`_record`) as a `session_meta` record, a session there with no thread id or a source or start
+    time this script cannot read, and a thread whose logs differ are reported; a second log of a thread that
     matches the first byte for byte is the same log."""
     needle = json.dumps(workdir, ensure_ascii=False).encode()
     found: dict[str, dict] = {}
@@ -258,8 +280,12 @@ def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list
         if parent is None and meta.get("source") != "exec":
             problems.append(f"{path.name}: thread {tid} gives a source this script cannot read: "
                             f"{json.dumps(meta.get('source'))[:200]}")
+        started = meta.get("timestamp")
+        if started is not None and not isinstance(started, str):
+            problems.append(f"{path.name}: thread {tid} gives a start time this script cannot read")
+            started = None
         found[tid] = {"path": path, "spawned_by": parent, "source": meta.get("source"),
-                      "started": meta.get("timestamp"), "agent_path": (thread_spawn(meta) or {}).get("agent_path")}
+                      "started": started, "agent_path": (thread_spawn(meta) or {}).get("agent_path")}
     return found, problems
 
 
@@ -378,15 +404,20 @@ def _numeric(node) -> bool:
 
 def _number(literal: str) -> str | None:
     """The string JavaScript makes of a number written out (`${0x7f}` builds "127", `${1e21}` "1e+21"
-    and `${127n}` "127"), or None for one a module refuses to compile (`017`, `1__0`, `1.5n`)."""
+    and `${127n}` "127"), or None for one a module refuses to compile (`017`, `1__0`, `1.5n`). Python
+    turns at most 4,300 decimal digits into an int or back, and JavaScript any number, so a decimal
+    stays text and a BigInt in another base takes its digits from `decimal`."""
     whole = WHOLE.fullmatch(literal.removesuffix("n"))
     if whole is None:
         return _number_string(float(literal.replace("_", ""))) if DECIMAL.fullmatch(literal) else None
     base, digits = next((base, digits) for base, digits in zip((16, 8, 2, 10), whole.group("x", "o", "b", "d"))
                         if digits is not None)
-    value = int(digits.replace("_", ""), base)
+    digits = digits.replace("_", "")
+    if base == 10:
+        return digits if literal.endswith("n") else _number_string(float(digits))
+    value = int(digits, base)
     if literal.endswith("n"):
-        return str(value)
+        return str(decimal.Decimal(value))
     try:
         return _number_string(float(value))
     except OverflowError:  # past the largest double, which JavaScript rounds to Infinity
@@ -743,107 +774,118 @@ def convert(path: Path, workdir: str) -> tuple[list[dict], dict]:
             except (ValueError, RecursionError):
                 found["flags"].append(f"line {n} does not parse")
                 continue
-            if not isinstance(rec, dict):
-                found["flags"].append(f"line {n} is not a record")
-                continue
-            kind_of_record = rec.get("type")
-            payload = rec.get("payload") or {}
-            sub = payload.get("type") if isinstance(payload, dict) else None
-            if kind_of_record not in RECORDS:
-                found["flags"].append(f"line {n}: a {kind_of_record!r} record, which this script does not read")
-            elif kind_of_record == "event_msg" and sub not in EVENTS:
-                found["flags"].append(f"line {n}: a {sub!r} event, which this script does not read")
-            elif kind_of_record == "response_item" and sub not in RESPONSE_ITEMS:
-                found["flags"].append(f"line {n}: a {sub!r} response item, which this script does not read")
-            if kind_of_record == "response_item" and sub == "custom_tool_call":
-                name = payload.get("name")
-                if name != "exec":
-                    found["flags"].append(f"line {n}: custom tool {name!r}, which this script does not read")
+            try:
+                if not isinstance(rec, dict):
+                    found["flags"].append(f"line {n} is not a record")
                     continue
-                code = str(payload.get("input", ""))
-                named = list(TOOLS_NAMED.finditer(code))
-                for match in named:
-                    found["script_tools"][match.group(1)] += 1
-                    if match.group(1) not in SCRIPT_TOOLS:
-                        found["flags"].append(f"line {n}: an exec script calls tools.{match.group(1)}")
-                starts = {match.start() for match in named}
-                if any(match.start() not in starts for match in TOOLS_WORD.finditer(code)):
-                    found["flags"].append(f"line {n}: an exec script reaches tools other than by name: {code[:200]!r}")
-                if SCRIPT_ESCAPES.search(code):
-                    found["flags"].append(f"line {n}: an exec script can spell or build code as it runs, or reach "
-                                          f"past its tools: {code[:200]!r}")
-                src = code.encode()
-                tree = _JS.parse(src)
-                if tree.root_node.has_error:
-                    unparsed[str(payload.get("call_id") or f"line {n}")] = n
-                    tree = None
-                else:
-                    try:
-                        problems = cell_problems(tree, src)
-                    except RecursionError:
-                        problems, tree = ["nests too deeply for this script to read"], None
-                    found["flags"] += [f"line {n}: an exec script {problem}: {code[:200]!r}" for problem in problems]
-                verdict, why = check_script(code, workdir, tree)
-                if verdict != "web":
-                    found["script_suspect"].append({"tool": "exec script", "call": code[:4000], "why": why})
-            elif kind_of_record == "response_item" and sub in ("custom_tool_call_output", "function_call_output"):
-                # A script's result, or a running cell's that `wait` returns: the pages the web tool served.
-                output = payload.get("output")
-                if sub == "custom_tool_call_output":
-                    replies[str(payload.get("call_id"))].append(refused(output))
-                text = output_text(output)
-                pages = SERVED.findall(text)
-                stray = text.count("") - len(pages) - len(LINK.findall(text))
-                if stray:
-                    found["flags"].append(f"line {n}: a tool's reply holds {stray} cite marker(s) this script "
-                                          "does not read")
-                for url in pages:
-                    if not url or url in served:
+                kind_of_record = rec.get("type")
+                payload = rec.get("payload") or {}
+                sub = payload.get("type") if isinstance(payload, dict) else None
+                if kind_of_record not in RECORDS:
+                    found["flags"].append(f"line {n}: a {kind_of_record!r} record, which this script does not read")
+                elif kind_of_record == "event_msg" and sub not in EVENTS:
+                    found["flags"].append(f"line {n}: a {sub!r} event, which this script does not read")
+                elif kind_of_record == "response_item" and sub not in RESPONSE_ITEMS:
+                    found["flags"].append(f"line {n}: a {sub!r} response item, which this script does not read")
+                if kind_of_record == "response_item" and sub == "custom_tool_call":
+                    name = payload.get("name")
+                    if name != "exec":
+                        found["flags"].append(f"line {n}: custom tool {name!r}, which this script does not read")
                         continue
-                    served.add(url)
-                    verdict, why = check_page(url, workdir)
+                    code = payload.get("input", "")  # Codex writes a string; another type fails below
+                    named = list(TOOLS_NAMED.finditer(code))
+                    for match in named:
+                        found["script_tools"][match.group(1)] += 1
+                        if match.group(1) not in SCRIPT_TOOLS:
+                            found["flags"].append(f"line {n}: an exec script calls tools.{match.group(1)}")
+                    starts = {match.start() for match in named}
+                    if any(match.start() not in starts for match in TOOLS_WORD.finditer(code)):
+                        found["flags"].append(f"line {n}: an exec script reaches tools other than by name: "
+                                              f"{code[:200]!r}")
+                    if SCRIPT_ESCAPES.search(code):
+                        found["flags"].append(f"line {n}: an exec script can spell or build code as it runs, or reach "
+                                              f"past its tools: {code[:200]!r}")
+                    src = code.encode()
+                    tree = _JS.parse(src)
+                    if tree.root_node.has_error:
+                        unparsed[str(payload.get("call_id") or f"line {n}")] = n
+                        tree = None
+                    problems = []
+                    try:
+                        if tree is not None:
+                            problems = cell_problems(tree, src)
+                        verdict, why = check_script(code, workdir, tree)
+                    except RecursionError:  # nested deeper than Python's stack: the text checks still read it
+                        problems.append("nests too deeply for this script to read")
+                        verdict, why = check_script(code, workdir, None)
+                    found["flags"] += [f"line {n}: an exec script {problem}: {code[:200]!r}" for problem in problems]
                     if verdict != "web":
-                        found["script_suspect"].append({"tool": "web page", "call": url[:4000], "why": why})
-            elif kind_of_record == "response_item" and sub == "function_call":
-                name, space = payload.get("name"), payload.get("namespace")
-                found["functions"][name] += 1
-                if (space, name) not in FUNCTIONS:
-                    found["flags"].append(f"line {n}: function {name!r} in namespace {space!r}, which this script "
-                                          "does not read")
-            if kind_of_record != "event_msg" or sub != "item_completed":
-                continue
-            item = payload.get("item") or {}
-            if not isinstance(item, dict):
-                found["flags"].append(f"line {n}: a completed item this script cannot read")
-                continue
-            kind = item.get("type")
-            found["items"][f"{kind}:{item.get('kind')}" if kind == "Extension" else kind] += 1
-            if kind == "Extension" and str(item.get("kind", "")).startswith("web."):
-                lines.append({"type": "item.completed", "item": {
-                    "id": item.get("id"), "type": "web_search", "query": item.get("query", ""),
-                    "action": web_action(item.get("action")), "results": item.get("results")}})
-            elif kind == "CommandExecution":
-                command = item.get("command")
-                cwd = local_path(item.get("cwd"))
-                if cwd is not None and cwd.rstrip("/") != workdir.rstrip("/"):
-                    found["flags"].append(f"line {n}: a command ran in {cwd}, outside the work directory")
-                lines.append({"type": "item.completed", "item": {
-                    "id": item.get("id"), "type": "command_execution",
-                    "command": shlex.join(command) if isinstance(command, list) else command,
-                    "aggregated_output": item.get("aggregated_output", ""),
-                    "exit_code": item.get("exit_code"), "status": item.get("status")}})
-            elif kind == "AgentMessage":
-                text = " ".join(p.get("text", "") for p in item.get("content") or [] if isinstance(p, dict))
-                lines.append({"type": "item.completed", "item": {"id": item.get("id"), "type": "agent_message",
-                                                                  "text": text}})
-            elif kind == "Reasoning":
-                lines.append({"type": "item.completed", "item": {"id": item.get("id"), "type": "reasoning",
-                                                                  "text": ""}})
-            elif kind == "SubAgentActivity":
-                if item.get("kind") == "started" and item.get("agent_thread_id"):
-                    found["started_threads"].append(item["agent_thread_id"])
-            elif kind not in SKIPPED_ITEMS:
-                found["flags"].append(f"line {n}: a completed {kind!r} item, which this script does not read")
+                        found["script_suspect"].append({"tool": "exec script", "call": code[:4000], "why": why})
+                elif kind_of_record == "response_item" and sub in ("custom_tool_call_output", "function_call_output"):
+                    # A script's result, or a running cell's that `wait` returns: the pages the web tool served.
+                    output = payload.get("output")
+                    if sub == "custom_tool_call_output":
+                        replies[str(payload.get("call_id"))].append(refused(output))
+                    text = output_text(output)
+                    pages = SERVED.findall(text)
+                    stray = text.count("") - len(pages) - len(LINK.findall(text))
+                    if stray:
+                        found["flags"].append(f"line {n}: a tool's reply holds {stray} cite marker(s) this script "
+                                              "does not read")
+                    for url in pages:
+                        if not url or url in served:
+                            continue
+                        served.add(url)
+                        verdict, why = check_page(url, workdir)
+                        if verdict != "web":
+                            found["script_suspect"].append({"tool": "web page", "call": url[:4000], "why": why})
+                elif kind_of_record == "response_item" and sub == "function_call":
+                    name, space = payload.get("name"), payload.get("namespace")
+                    found["functions"][name] += 1
+                    if (space, name) not in FUNCTIONS:
+                        found["flags"].append(f"line {n}: function {name!r} in namespace {space!r}, which this script "
+                                              "does not read")
+                if kind_of_record != "event_msg" or sub != "item_completed":
+                    continue
+                item = payload.get("item") or {}
+                if not isinstance(item, dict):
+                    found["flags"].append(f"line {n}: a completed item this script cannot read")
+                    continue
+                kind = item.get("type")
+                found["items"][f"{kind}:{item.get('kind')}" if kind == "Extension" else kind] += 1
+                if kind == "Extension" and str(item.get("kind", "")).startswith("web."):
+                    lines.append({"type": "item.completed", "item": {
+                        "id": item.get("id"), "type": "web_search", "query": item.get("query", ""),
+                        "action": web_action(item.get("action")), "results": item.get("results")}})
+                elif kind == "CommandExecution":
+                    command = item.get("command")
+                    cwd = local_path(item.get("cwd"))
+                    if cwd is not None and cwd.rstrip("/") != workdir.rstrip("/"):
+                        found["flags"].append(f"line {n}: a command ran in {cwd}, outside the work directory")
+                    lines.append({"type": "item.completed", "item": {
+                        "id": item.get("id"), "type": "command_execution",
+                        "command": shlex.join(command) if isinstance(command, list) else command,
+                        "aggregated_output": item.get("aggregated_output", ""),
+                        "exit_code": item.get("exit_code"), "status": item.get("status")}})
+                elif kind == "AgentMessage":
+                    text = " ".join(p.get("text", "") for p in item.get("content") or [] if isinstance(p, dict))
+                    lines.append({"type": "item.completed", "item": {"id": item.get("id"), "type": "agent_message",
+                                                                      "text": text}})
+                elif kind == "Reasoning":
+                    lines.append({"type": "item.completed", "item": {"id": item.get("id"), "type": "reasoning",
+                                                                      "text": ""}})
+                elif kind == "SubAgentActivity":
+                    if item.get("kind") == "started" and item.get("agent_thread_id"):
+                        if not isinstance(item["agent_thread_id"], str):
+                            raise TypeError("a started sub-agent's thread id is not a string")
+                        found["started_threads"].append(item["agent_thread_id"])
+                elif kind not in SKIPPED_ITEMS:
+                    found["flags"].append(f"line {n}: a completed {kind!r} item, which this script does not read")
+            except (TypeError, AttributeError, ValueError, RecursionError) as error:
+                # A field the checks above cannot read (a list where Codex writes a string, say, or a string
+                # that does not encode as UTF-8): the line fails the run instead of stopping the audit.
+                found["flags"].append(f"line {n}: a record with a field this script cannot read "
+                                      f"({type(error).__name__})")
     found["flags"] += [f"line {line}: an exec script that does not parse as JavaScript, and whose one output does not "
                        "read as V8 refusing it" for call, line in unparsed.items() if replies.get(call) != [True]]
     # A shell command a script started may have no completed item (its cell stopped first); only the
@@ -863,7 +905,7 @@ def _calls(lines: list[dict]) -> dict[str, list]:
         item = line.get("item")
         if line.get("type") != "item.completed" or not isinstance(item, dict):
             continue
-        if item.get("type") in audit.CODEX_NOT_CALLS:
+        if isinstance(item.get("type"), str) and item["type"] in audit.CODEX_NOT_CALLS:
             continue
         calls = []
         for tool, inp in audit._tool_calls(line):
@@ -883,7 +925,7 @@ def transcript_lines(path: Path) -> list[dict]:
     for raw in path.read_text(errors="replace").split("\n"):
         try:
             line = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(line, dict):
             lines.append(line)

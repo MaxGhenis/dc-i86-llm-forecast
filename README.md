@@ -266,6 +266,8 @@ The script fails a run when:
 - the transcript records any thread but the collected attempt's main thread, or its calls differ from
   that thread's;
 - a thread's `spawn_agent` calls do not match the sub-agents it started;
+- a thread's log holds a line the script cannot read: one that does not parse, gives a key twice,
+  nests more than 64 levels or holds a field of a type its checks cannot read;
 - two logs of one thread differ; or
 - any thread makes a call that the audit counts as a violation.
 

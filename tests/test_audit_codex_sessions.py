@@ -112,8 +112,7 @@ def write_transcript(run: Path, thread: str, items=()) -> None:
     (run / "transcript.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
 
 
-@pytest.fixture
-def area(tmp_path, monkeypatch):
+def make_area(tmp_path: Path, monkeypatch) -> tuple[Path, Path, str]:
     """A MOCK collected Codex run with no attempts on record, its transcript, and a log from an
     unrelated job in the lanes. No test may start a process, and the gate must read each audit the
     script writes as passing exactly when the script says it passed."""
@@ -143,6 +142,11 @@ def area(tmp_path, monkeypatch):
                                                            "2026-11-03T18:00:00Z"),
               items=[command("cat /etc/hosts", str(tmp_path / "elsewhere"))])
     return lanes, run, workdir
+
+
+@pytest.fixture
+def area(tmp_path, monkeypatch):
+    return make_area(tmp_path, monkeypatch)
 
 
 def add_parent(lanes: Path, workdir: str, spawned=(HELPER,), records=(), items=None) -> Path:
@@ -283,8 +287,12 @@ def test_a_kept_log_is_final(area):
     ('{"type": "response_item", "payload": {"type": "custom_tool_call", "name": "MOCK_tool", "name": "exec", '
      '"input": "text(1)"}}', "does not parse"),
     ("[" * 100_000 + "]" * 100_000, "does not parse"),
+    # Python parses it, but it nests more than `DEPTH` levels: a line nearly as deep as Python's parser
+    # reads could parse and then stop the audit when it wrote the line's item out.
+    ('{"type": "event_msg", "payload": {"type": "token_count", "MOCK": ' + "[" * 63 + "]" * 63 + "}}",
+     "does not parse"),
     (b'{"type": "event_msg", "payload": {"type": "token_count", "MOCK": "\xff"}}', "does not parse"),
-], ids=["cut", "a list", "a key twice", "nested too deeply", "not UTF-8"])
+], ids=["cut", "a list", "a key twice", "nested too deeply", "nested 65 levels", "not UTF-8"])
 def test_a_log_line_that_is_not_a_record_is_flagged(area, line, flag):
     lanes, run, workdir = area
     parent = add_parent(lanes, workdir, spawned=())
@@ -292,6 +300,70 @@ def test_a_log_line_that_is_not_a_record_is_flagged(area, line, flag):
         fh.write((line if isinstance(line, bytes) else line.encode()) + b"\n")
     report = acs.audit_run(run, lanes)
     assert f"rollout-MOCK-parent.jsonl line 3 {flag}" in report["flags"] and not report["passed"]
+
+
+def completed(item: dict) -> dict:
+    return {"type": "event_msg", "payload": {"type": "item_completed", "item": item}}
+
+
+@pytest.mark.parametrize("record", [
+    {"type": ["event_msg"], "payload": {}},
+    {"type": "event_msg", "payload": {"type": {"MOCK": 1}}},
+    {"type": "response_item", "payload": {"type": "function_call", "name": ["spawn_agent"],
+                                          "namespace": "collaboration"}},
+    {"type": "response_item", "payload": {"type": "function_call", "name": "wait", "namespace": ["collaboration"]}},
+    completed({"type": {"MOCK": 1}, "id": "MOCK"}),
+    completed({**command("echo MOCK", "/MOCK/work"), "command": ["/bin/zsh", "-lc", 1]}),
+    completed({"type": "AgentMessage", "id": "MOCK", "content": 1}),
+    exec_call("text('\ud800')"),
+    {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "input": ["text(1)"]}},
+    {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "input": None}},
+    completed({**started(HELPER), "agent_thread_id": {"MOCK": 1}}),
+], ids=["record type a list", "event type an object", "function name a list", "namespace a list",
+        "item type an object", "command word a number", "message content a number", "script a lone surrogate",
+        "script a list", "script null", "sub-agent id an object"])
+def test_a_record_with_a_field_of_another_type_is_flagged(area, record):
+    """A field of another JSON type than Codex writes (a list where it writes a string, say) fails the
+    run with a flag on its line; it does not stop the audit."""
+    lanes, run, workdir = area
+    parent = add_parent(lanes, workdir, spawned=())
+    with parent.open("a") as fh:
+        fh.write(json.dumps(record) + "\n")
+    report = acs.audit_run(run, lanes)
+    assert any(flag.startswith("rollout-MOCK-parent.jsonl line 3: a record with a field this script cannot read (")
+               for flag in report["flags"])
+    assert not report["passed"]
+
+
+def nested(levels: int) -> list:
+    """An array nested `levels` deep."""
+    value: list = []
+    for _ in range(levels - 1):
+        value = [value]
+    return value
+
+
+@pytest.mark.parametrize("levels, passes", [(64, True), (65, False)])
+def test_a_log_line_nests_at_most_depth_levels(area, levels, passes):
+    lanes, run, workdir = area
+    parent = add_parent(lanes, workdir, spawned=())
+    with parent.open("a") as fh:
+        fh.write(json.dumps({"type": "event_msg", "payload": {"type": "token_count", "MOCK": nested(levels - 2)}})
+                 + "\n")
+    report = acs.audit_run(run, lanes)
+    assert report["passed"] is passes
+    assert ("rollout-MOCK-parent.jsonl line 3 does not parse" in report["flags"]) is not passes
+
+
+@given(value=st.recursive(st.none() | st.integers(), lambda inner: st.lists(inner, max_size=3)
+                          | st.dictionaries(st.text(max_size=2), inner, max_size=3), max_leaves=12),
+       levels=st.integers(min_value=0, max_value=8))
+def test_the_depth_check_agrees_with_counting_levels(value, levels):
+    """Differential: the check without recursion against levels counted recursively."""
+    def depth(node) -> int:
+        children = node.values() if isinstance(node, dict) else node if isinstance(node, list) else None
+        return 0 if children is None else 1 + max(map(depth, children), default=0)
+    assert acs._nests_deeper_than(value, levels) is (depth(value) > levels)
 
 
 def test_a_plain_web_script_passes(area):
@@ -420,12 +492,18 @@ def test_the_syntax_check_reads_each_rule_on_its_own(code, problem):
     assert any(problem in found for found in acs.cell_problems(acs._JS.parse(src), src))
 
 
-def test_a_script_too_deep_to_read_is_flagged(area):
+@pytest.mark.parametrize("code", ["text(" + " + ".join(['"MOCK"'] * 3000) + ' + "http://127.0.0.1:8080/MOCK")',
+                                  "text(" + "(" * 3000 + '"http://127.0.0.1:8080/MOCK"' + ")" * 3000 + ")"],
+                         ids=["a long sum", "deep parentheses"])
+def test_a_script_too_deep_to_read_is_flagged(area, code):
+    """The syntax checks (a long sum) and the string folding (deep parentheses) stop at Python's
+    stack; the text checks still read the script, and find the local address."""
     lanes, run, workdir = area
-    add_parent(lanes, workdir, spawned=(), records=[exec_call("text(" + " + ".join(['"MOCK"'] * 3000) + ")")])
+    add_parent(lanes, workdir, spawned=(), records=[exec_call(code)])
     report = acs.audit_run(run, lanes)
     assert any("nests too deeply for this script to read" in flag for flag in report["flags"])
-    assert not report["passed"]
+    parent = next(t for t in report["threads"] if t["thread_id"] == PARENT)
+    assert [call["tool"] for call in parent["script_suspect"]] == ["exec script"] and not report["passed"]
 
 
 @pytest.mark.parametrize("replies, passes", [
@@ -462,6 +540,10 @@ def test_a_script_the_grammar_cannot_parse_passes_only_as_one_v8_refused(area, r
     ('{search_query: [{q: "http" + `://${127n}.${0n}.${0n}.${1n}`}]}', "127.0.0.1"),
     ('{search_query: [{q: "http" + `://${0x7f}.${0b0}.${0e5}.${.1e1}`}]}', "127.0.0.1"),
     ("""JSON.parse('{"open": [{"ref_id": ' + '"http' + `://127.0.0.${0o1}"}]}`)""", "127.0.0.1"),
+    pytest.param('{search_query: [{q: "http://127.0.0.1:8080/" + ' + "1" * 4301 + "}]}", "127.0.0.1",
+                 id="a decimal past 4,300 digits"),
+    pytest.param('{search_query: [{q: "http://127.0.0.1:8080/" + 0x' + f"{10**4301:x}n}}]}}", "127.0.0.1",
+                 id="a hex BigInt past 4,300 digits"),
 ])
 def test_a_scripts_urls_are_read_as_a_web_calls_input(area, args, why):
     lanes, run, workdir = area
@@ -634,6 +716,29 @@ def test_the_log_and_the_transcript_must_record_the_same_calls(area, theirs, key
     assert any("record different calls" in flag for flag in report["flags"]) and not report["passed"]
 
 
+@pytest.mark.parametrize("line", ['{"type": "item.completed", "item": ', "[" * 100_000 + "]" * 100_000],
+                         ids=["cut", "nested too deeply"])
+def test_a_transcript_line_that_does_not_parse_is_left_out(area, line):
+    """The transcript check compares the lines that parse: a line cut short or nested deeper than
+    Python reads leaves the others to compare, and does not stop the audit."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    with (run / "transcript.jsonl").open("a") as fh:
+        fh.write(line + "\n")
+    report = acs.audit_run(run, lanes)
+    assert report["transcript_check"]["items"] == 1 and report["transcript_check"]["different"] == []
+    assert report["passed"]
+
+
+@pytest.mark.parametrize("kind", [["web_search"], {"MOCK": 1}], ids=["a list", "an object"])
+def test_a_transcript_item_of_a_type_this_script_cannot_read_fails(area, kind):
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    write_transcript(run, PARENT, [web("MOCK main query"), {"id": "MOCK-odd", "type": kind, "query": "MOCK"}])
+    report = acs.audit_run(run, lanes)
+    assert report["transcript_check"]["only_in_transcript"] == ['"MOCK-odd"'] and not report["passed"]
+
+
 def test_every_attempts_threads_are_audited_and_the_collected_one_matches_the_transcript(area, monkeypatch):
     lanes, run, workdir = area
     with_record(monkeypatch, run, TWO_ATTEMPTS)
@@ -764,6 +869,18 @@ def test_a_log_in_the_work_directory_this_script_cannot_read_is_flagged(area, ca
     (lanes / "codex-9" / "sessions" / "2026" / "11" / "03" / "rollout-MOCK-odd.jsonl").write_text(first + "\n")
     report = acs.audit_run(run, lanes)
     assert any(flag in f for f in report["flags"]) and not report["passed"]
+
+
+@pytest.mark.parametrize("timestamp", [1762193430, ["2026-11-03T18:10:30Z"]], ids=["a number", "a list"])
+def test_a_thread_whose_start_time_this_script_cannot_read_is_flagged_and_audited(area, timestamp):
+    lanes, run, workdir = area
+    add_parent(lanes, workdir)
+    write_log(lanes, "rollout-MOCK-helper.jsonl", {**helper_meta(workdir), "timestamp": timestamp},
+              items=[search("MOCK helper query")])
+    report = acs.audit_run(run, lanes)
+    assert f"rollout-MOCK-helper.jsonl: thread {HELPER} gives a start time this script cannot read" in report["flags"]
+    helper = next(t for t in report["threads"] if t["thread_id"] == HELPER)
+    assert helper["started"] is None and helper["audit"]["web_calls"] == 1 and not report["passed"]
 
 
 def spell(text: str, how: str) -> str:
@@ -1068,7 +1185,14 @@ def test_a_constant_string_folds_to_what_the_script_builds(pieces):
     ('"a" + 1_0', "a10"),
     ('"a" + 0x' + "f" * 300, "aInfinity"),  # past the largest double
     ('"a" + 9007199254740993n + 9007199254740993', "a90071992547409939007199254740992"),  # a BigInt keeps each digit
+    ('"a" + 0x20000000000001n + 0x20000000000001', "a90071992547409939007199254740992"),
+    ('"a" + 1_000n', "a1000"),
     ('"a" + 017', None),  # a legacy octal, which a module refuses
+    # Python turns at most 4,300 decimal digits into an int or back; JavaScript has no such limit.
+    pytest.param('"a" + ' + "1" * 4301, "aInfinity", id="a decimal past 4,300 digits"),
+    pytest.param('"a" + ' + "1" * 4301 + "n", "a" + "1" * 4301, id="a decimal BigInt past 4,300 digits"),
+    *[pytest.param(f'"a" + 0{base}{10**4301:{base}}n', "a1" + "0" * 4301,
+                   id=f"a BigInt in base {base} past 4,300 digits") for base in "xob"],
 ])
 def test_a_number_joins_a_string_as_javascript_writes_it(expr, folded):
     src = f"x = {expr};".encode()
@@ -1176,3 +1300,69 @@ def test_no_escape_hides_what_a_scripts_string_opens(target, place, data):
 
     if verdict(target) == "suspect":
         assert verdict(escaped) == "suspect", escaped
+
+
+
+JSON_VALUES = st.recursive(
+    st.none() | st.booleans() | st.integers() | st.floats(allow_nan=False) | st.text(max_size=6)
+    | st.sampled_from(sorted(acs.RECORDS | acs.EVENTS | acs.RESPONSE_ITEMS | {"Extension", "CommandExecution"})),
+    lambda inner: st.lists(inner, max_size=3)
+    | st.dictionaries(st.sampled_from(["type", "id", "payload", "item", "kind", "MOCK"]), inner, max_size=3),
+    max_leaves=6)
+
+
+def fields(node):
+    """Each (container, key) in a JSON value."""
+    for key in list(node) if isinstance(node, dict) else range(len(node)) if isinstance(node, list) else ():
+        yield node, key
+        yield from fields(node[key])
+
+
+def passing_logs(workdir: str) -> dict[str, list[dict]]:
+    """A main thread that opens a page by script, cites it and starts a sub-agent, which searches the
+    web and runs a command in the work directory: logs that pass with `area`'s transcript."""
+    url = "https://www.example.org/MOCK"
+    return {"rollout-MOCK-parent.jsonl": [
+                {"type": "session_meta", "payload": root_meta(workdir)},
+                exec_call(f'text(await tools.web__run({{open: [{{ref_id: "{url}"}}]}}))', "MOCK-call"),
+                tool_output(served(url), call_id="MOCK-call"), function_call("spawn_agent"),
+                completed(search("MOCK main query")), completed(started(HELPER))],
+            "rollout-MOCK-helper.jsonl": [
+                {"type": "session_meta", "payload": helper_meta(workdir)},
+                completed(search("MOCK helper query")), completed(command("echo MOCK", workdir))]}
+
+
+def write_logs(lanes: Path, logs: dict[str, list[dict]]) -> None:
+    for name, records in logs.items():
+        path = lanes / "codex-9" / "sessions" / "2026" / "11" / "03" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+
+def test_the_logs_the_property_changes_pass(area):
+    lanes, run, workdir = area
+    write_logs(lanes, passing_logs(workdir))
+    report = acs.audit_run(run, lanes)
+    assert report["flags"] == [] and report["served_pages"] == 1 and report["passed"]
+
+
+@settings(deadline=None, max_examples=60)
+@given(data=st.data())
+def test_a_run_with_any_field_changed_gets_a_verdict_the_gate_shares(data):
+    """Property: drop or replace one to three fields anywhere in a passing run's logs and transcript,
+    with any JSON value, and the audit still reaches a verdict, which the pooling gate shares
+    (`make_area`'s `audit_run` checks the gate)."""
+    with tempfile.TemporaryDirectory() as tmp, pytest.MonkeyPatch.context() as monkeypatch:
+        lanes, run, workdir = make_area(Path(tmp), monkeypatch)
+        logs = passing_logs(workdir)
+        transcript = [json.loads(line) for line in (run / "transcript.jsonl").read_text().splitlines()]
+        for _ in range(data.draw(st.integers(1, 3), label="changes")):
+            spots = [spot for records in (*logs.values(), transcript) for record in records for spot in fields(record)]
+            container, key = data.draw(st.sampled_from(spots), label="field")
+            if isinstance(container, dict) and data.draw(st.booleans(), label="drop"):
+                del container[key]
+            else:
+                container[key] = data.draw(JSON_VALUES, label="value")
+        write_logs(lanes, logs)
+        (run / "transcript.jsonl").write_text("".join(json.dumps(line) + "\n" for line in transcript))
+        acs.audit_run(run, lanes)

@@ -67,7 +67,10 @@ After `2026-11-04-sessions/`:
 After `2026-11-04-served/`:
 
 - The session-log audit now reports a first line that names the work directory but does not parse,
-  whichever way its quotes pair, and counts a line that gives a key twice as one that does not parse.
-  It writes each number a cell writes out as JavaScript writes it in a string. Re-auditing the four
-  Sol runs leaves every `codex-sessions/audit.json` and `attempts.json` byte for byte the same.
+  whichever way its quotes pair. It counts a line that gives a key twice or nests more than 64 levels
+  as one that does not parse. It flags a record with a field of a type its checks cannot read, a
+  session that gives a start time it cannot read, and any script nested deeper than its checks read.
+  It fails a run whose transcript holds an item of a type it cannot read. It writes each number a
+  cell writes out as JavaScript writes it in a string, however many digits it has. Re-auditing the
+  four Sol runs leaves every `codex-sessions/audit.json` and `attempts.json` byte for byte the same.
 - Every file in this manifest still matches.
