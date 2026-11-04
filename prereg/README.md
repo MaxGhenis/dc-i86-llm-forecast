@@ -13,6 +13,7 @@ the latest.
 | `2026-10-26-pooled/` | 08:01Z | all eleven runs, their audits and the pooled outputs | 973213, 973237 |
 | `2026-10-26-revised/` | 14:40Z | the same files after the changes below | 973255 |
 | `2026-11-04-sessions/` | 00:31Z | the same files after the changes below, plus the Sol runs' session-log audits and attempts | 974462 |
+| `2026-11-04-served/` | 05:19Z | the same files after the changes below | pending |
 
 To check a manifest, run `shasum -a 256 -c prereg/<folder>/SHA256SUMS` from the repository root; it
 lists any file whose bytes have changed. `ots verify prereg/<folder>/SHA256SUMS.ots` checks the proof
@@ -47,7 +48,18 @@ After `2026-10-26-revised/`:
 - `scripts/audit_codex_sessions.py` audited the four Sol runs' session logs, which hold their
   sub-agents and the first attempts of sol-1 and sol-3 (see the README). This manifest adds each Sol
   run's `codex-sessions/audit.json` and `attempts.json`.
-- That audit found one suspect call, in sol-3. Pooling with `--accept-suspect sol-3` changed one cell
-  of `outputs/summary.md`, sol-3's suspect calls, from 0 to 1, and the summary's note on suspect calls
-  now names the session logs.
+- That audit found one suspect call, in sol-3. `simulate` now adds that call to sol-3's count, so one
+  cell of `outputs/summary.md`, sol-3's suspect calls, changed from 0 to 1. The summary's note on
+  suspect calls now names the session logs. A reader admitted the call with `--accept-suspect sol-3`,
+  so sol-3 stays in the pool.
+- Every other file in the previous manifest still matches.
+
+After `2026-11-04-sessions/`:
+
+- The session-log audit now counts a page the web tool served when its reply puts an escaped newline
+  between the page's address and its cite marker. sol-1's and sol-2's new `codex-sessions/audit.json`
+  count more served pages: 1,349 for sol-1, up from 1,308, and 671 for sol-2, up from 654. The audit
+  accepts each added address, and no run's verdict or suspect count changed.
+- The summary's note on suspect calls now lists what only a Codex run's session logs record, the
+  pages the web tool served among them. No other line of `outputs/summary.md` changed.
 - Every other file in the previous manifest still matches.
