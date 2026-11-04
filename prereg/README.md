@@ -86,13 +86,14 @@ After `2026-11-04-served/`:
   its turns that hold no call, and items that each complete with the calls they started with. It flags
   a log that names the work directory but whose first line gives no absolute path for where its
   thread started, an agent path it cannot read, and a command run in a relative folder or one with a
-  `..` part. A kept copy that is not a regular file, or that it cannot read, stops it. Re-auditing the
-  four Sol runs leaves every `codex-sessions/audit.json` and `attempts.json` byte for byte the same.
+  `..` part. Anything but a regular file in a kept copy's place stops it, and so does a kept copy it
+  cannot read. Re-auditing the four Sol runs leaves every `codex-sessions/audit.json` and
+  `attempts.json` byte for byte the same.
 - `simulate` also checks each audit's work directory, job and counts, and that each thread's own audit
   read one event or more. It checks which threads the audit marks as collected, and with which attempt.
   It checks each thread's fields, and its counts of events and calls against its items, and excludes a
-  run whose audit or attempts file it cannot read as JSON. `prereg` stops at a run's file that is not a
-  regular file.
+  run whose audit or attempts file it cannot read as JSON. `prereg` stops at anything but a regular
+  file in place of a run's file.
 - The audit's check of the transcript now compares a call in a message's line, and compares ids that
   are numbers exactly, as `i86 audit` pairs them. The audit flags a log whose first line gives, as the
   folder where its thread started, a path with a NUL or a character UTF-8 cannot encode, and a command
@@ -107,4 +108,14 @@ After `2026-11-04-served/`:
   new file that it renames into place. `prereg` stops at a run's file in a folder it may not search.
   Re-auditing the four Sol runs leaves every `codex-sessions/audit.json` and `attempts.json` byte for
   byte the same.
+- `simulate` now also requires each thread's audit to list only searches and commands as suspect calls
+  and only commands as local calls, no more of either than the thread made, and each thread to name a
+  kept log of its own. The audit flags a command that a thread ran in a folder whose file URL holds a
+  `?`, `#` or `%`. It writes each kept copy, `attempts.json` and `audit.json` in full to a part file
+  before it gives the file its name, and removes the part file a process left when it died part way
+  through a write. It stops when it cannot search `codex-sessions/` or remove such a part file.
+  `prereg`, `simulate` and the audit stop, by name, at a `runs/` they cannot list and at a run folder
+  they may not search, and the audit at a collected run's `meta.json` that it cannot read as a JSON
+  object. Re-auditing the four Sol runs leaves every `codex-sessions/audit.json` and `attempts.json`
+  byte for byte the same.
 - Every file in this manifest still matches.

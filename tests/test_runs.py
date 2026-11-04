@@ -1,6 +1,7 @@
 """Dispatch bookkeeping: staging, sealing, late runs and which runs get pooled. MOCK runs only."""
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -129,9 +130,10 @@ def test_a_run_with_suspect_calls_is_pooled_only_once_the_operator_lists_it(area
     assert set(cli.accepted_runs(graph, "sha", accept_prior={"odd-call"})) == {"ok"}
 
 
-CALL = {"tool": "exec_command", "call": '{"command": "MOCK command"}', "why": "MOCK reason"}
-OTHER = {**CALL, "call": '{"command": "MOCK other command"}'}
+CALL = {"tool": "web_search", "call": '{"query": "MOCK query"}', "why": "MOCK reason"}  # a suspect search, as `audit` lists one
+OTHER = {**CALL, "call": '{"query": "MOCK other query"}'}
 LOCAL = {"tool": "shell", "call": '{"command": "cat MOCK.md"}'}  # as `audit` lists a call in the work directory
+SHELL = {"tool": "shell", "call": '{"command": "cat /MOCK/elsewhere.md"}', "why": "MOCK reason"}  # a suspect command
 JOB = "MOCK-job"
 WORKDIR = "/MOCK/work/sol"
 # subfleet's record of the MOCK job: a failed first attempt and the collected second one.
@@ -168,7 +170,8 @@ def _thread(tid, parent, suspect=(), script_suspect=(), spawns=0):
     call for each sub-agent, two pages served, and its scripts' suspect calls."""
     searches = 1 + len(suspect)
     return {"thread_id": tid, "spawned_by": parent, "agent_path": None if parent is None else "/root/MOCK",
-            "started": "2026-11-03T18:10:00Z", "file": f"codex-sessions/rollout-{tid}.jsonl", "sha256": "0" * 64,
+            "started": "2026-11-03T18:10:00Z", "file": f"codex-sessions/rollout-{tid}.jsonl",
+            "sha256": hashlib.sha256(f"MOCK log of {tid}".encode()).hexdigest(),
             "items": {"Extension:web.search": searches, "AgentMessage": 1,
                       **({"SubAgentActivity": spawns} if spawns else {})},
             "script_tools": {"web__run": 1}, "functions": {"spawn_agent": spawns} if spawns else {},
@@ -273,6 +276,46 @@ def _with_main_command(session):
     session.update(_totals(session["threads"]), transcript_check=_compared(session["threads"], "MOCK-main"))
 
 
+def _with_suspect_command(session):
+    """The sub-agent ran a command its audit lists as suspect: one more item, event, call and suspect
+    call."""
+    helper = session["threads"][2]
+    helper["items"]["CommandExecution"] = 1
+    helper["audit"].update(events=helper["audit"]["events"] + 1, tool_calls=helper["audit"]["tool_calls"] + 1,
+                           suspect=[SHELL])
+    session.update(_totals(session["threads"]))
+
+
+def _resorted(kind: str) -> dict:
+    """Review 9: a MOCK session audit whose sub-agent's calls still add up after an edit lists one of them
+    as a call no item of its made. Its suspect search moved into its local calls under its own tool
+    ("local search") or a shell's ("local shell"), or relabelled a suspect shell call ("suspect shell");
+    or one search listed twice as suspect, the second in place of a command ("searches"); or a suspect
+    command listed beside the one local call its one command made ("commands"); or its suspect search
+    moved into its local calls while its one command counts as a web call ("search for a command"), where
+    the counts hold and only the tool the local call names gives the edit away. The totals add up over
+    the threads, as an edit that hid the call would make them."""
+    session = _session(helper=[CALL])
+    helper = session["threads"][2]
+    if kind == "local search":
+        helper["audit"].update(suspect=[], local_calls=[CALL])
+    elif kind == "local shell":
+        helper["audit"].update(suspect=[], local_calls=[{**CALL, "tool": "shell"}])
+    elif kind == "suspect shell":
+        helper["audit"].update(suspect=[{**CALL, "tool": "shell"}])
+    elif kind == "suspect other":
+        helper["audit"].update(suspect=[{**CALL, "tool": "MOCK_tool"}])
+    elif kind == "search for a command":
+        helper["items"].update({"Extension:web.search": 1, "CommandExecution": 1})
+        helper["audit"].update(suspect=[], local_calls=[CALL])
+    else:
+        helper["items"].update({"Extension:web.search": 1, "CommandExecution": 1})
+        helper["audit"].update(web_calls=0, urls=[], suspect=[CALL, CALL] if kind == "searches" else [SHELL],
+                               local_calls=[] if kind == "searches" else [LOCAL])
+    session.update(_totals(session["threads"]))
+    return session
+
+
 def _unsorted(kind: str) -> dict:
     """A MOCK session audit whose sub-agent read one call more than its audit sorts: a command its audit
     does not list as a local call, or a suspect call or a web call taken out of its audit (the web
@@ -313,6 +356,13 @@ UNDER_ROOT = [_thread("MOCK-root", None, spawns=1), _thread("MOCK-main", "MOCK-r
 UNDER_EARLIER = [_thread("MOCK-earlier", None, spawns=1), _thread("MOCK-main", "MOCK-earlier")]
 
 
+# Review 9: the calls add up, but one is listed as a call no item of the thread made. Moving a suspect
+# search into the local calls pooled the run without the reader's leave.
+RESORTED = {
+    f"sol-resorted-{kind.replace(' ', '-')}": (_resorted(kind), ATTEMPTS, f"{JOB}/a2",
+                                               "lists a call of a tool its items do not call, or more such calls than")
+    for kind in ("local search", "local shell", "suspect shell", "suspect other", "searches", "commands",
+                 "search for a command")}
 # A record that says it passed but does not hold up, and the reason the gate gives (review finding 5):
 # (session, attempts, collected, the reason).
 INCONSISTENT = {
@@ -546,6 +596,15 @@ INCONSISTENT = {
                                "one thread's audit sorts more or fewer calls than it read"),
     "sol-web-call-dropped": (_unsorted("web"), ATTEMPTS, f"{JOB}/a2",
                              "one thread's audit sorts more or fewer calls than it read"),
+    **RESORTED,
+    # Review 9: the script keeps each thread's own log, and one log holds one thread.
+    "sol-two-threads-one-log": (_edited(lambda s: s["threads"][2].update(file=s["threads"][1]["file"],
+                                                                         sha256=s["threads"][1]["sha256"])),
+                                ATTEMPTS, f"{JOB}/a2", "two of its threads name one kept log"),
+    "sol-two-threads-one-file": (_edited(lambda s: s["threads"][2].update(file=s["threads"][1]["file"])),
+                                 ATTEMPTS, f"{JOB}/a2", "two of its threads name one kept log"),
+    "sol-two-threads-one-sha": (_edited(lambda s: s["threads"][2].update(sha256=s["threads"][1]["sha256"])),
+                                ATTEMPTS, f"{JOB}/a2", "two of its threads name one kept log"),
 }
 
 
@@ -565,6 +624,7 @@ def test_a_codex_run_is_pooled_only_with_a_passing_audit_of_its_session_logs(are
     _codex_run(graph, "sol-hidden", _session(main=[CALL]))  # only the session logs show the main thread's call
     _codex_run(graph, "sol-earlier", _session(earlier=[CALL]))
     _codex_run(graph, "sol-script", _session(main=[CALL], script=[OTHER]), suspect=[CALL])
+    _codex_run(graph, "sol-suspect-command", _edited(_with_suspect_command))
     unreadable = {
         "sol-bad": {"passed": True},  # not a session audit: it lists no threads
         "sol-passed-text": {**_session(), "passed": "false"},
@@ -605,11 +665,26 @@ def test_a_codex_run_is_pooled_only_with_a_passing_audit_of_its_session_logs(are
     assert "excluding sol-hidden: 1 suspect call(s)" in err
     assert "excluding sol-earlier: 1 suspect call(s)" in err  # an earlier attempt's thread counts
     assert "excluding sol-script: 2 suspect call(s)" in err  # a script's call counts beside its item's
-    accept = {"sol-odd", "sol-main", "sol-hidden", "sol-earlier", "sol-script", "sol-none", "sol-failed",
-              *unreadable, *INCONSISTENT}
+    assert "excluding sol-suspect-command: 1 suspect call(s)" in err
+    accept = {"sol-odd", "sol-main", "sol-hidden", "sol-earlier", "sol-script", "sol-suspect-command", "sol-none",
+              "sol-failed", *unreadable, *INCONSISTENT}
     assert set(cli.accepted_runs(graph, "sha", accept_suspect=accept)) == {
         "opus", "sol-ok", "sol-reasoning", "sol-main-command", "sol-never-started", "sol-odd", "sol-main", "sol-hidden",
-        "sol-earlier", "sol-script"}
+        "sol-earlier", "sol-script", "sol-suspect-command"}
+
+
+def test_each_record_that_does_not_hold_up_has_a_label_of_its_own():
+    """Python keeps the last of two equal keys in a dict, without an error. When two cases here shared one
+    label, the case whose total of commands does not add up never ran, and a mutant that stops the gate
+    checking that total passed every test. So each label in `INCONSISTENT`, its own or a merged dict's,
+    must name one case."""
+    module = ast.parse(Path(__file__).read_text())
+    cases = next(node.value for node in module.body if isinstance(node, ast.Assign)
+                 and [target.id for target in node.targets if isinstance(target, ast.Name)] == ["INCONSISTENT"])
+    labels = [key.value for key in cases.keys if key is not None]
+    labels += [label for key, value in zip(cases.keys, cases.values) if key is None for label in globals()[value.id]]
+    assert "sol-commands" in labels and "sol-resorted-commands" in labels
+    assert len(labels) == len(set(labels)) == len(INCONSISTENT)
 
 
 @pytest.mark.parametrize("name", ["audit.json", "attempts.json"])
@@ -652,6 +727,25 @@ def test_a_record_in_a_folder_the_gate_cannot_search_is_unreadable_not_absent(tm
     assert cli._json_file(folder / "attempts.json") == {}
     assert cli._json_file(folder / "MOCK-missing.json") is cli.ABSENT
     assert cli._json_file(folder / "attempts.json" / "MOCK-below-a-file.json") is cli.ABSENT
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches any folder")
+def test_a_transcript_the_gate_cannot_look_at_records_no_thread(area, graph, capsys):
+    """Review 9: a transcript that is a link into a folder the gate may not search raised an error from
+    `Path.is_file` before Python 3.14, which stopped `simulate`. The gate reads it as recording no
+    thread, on every Python, and excludes the run."""
+    _codex_run(graph, "sol-1", _session())
+    hidden = runners.RUNS.parent / "MOCK-hidden"
+    hidden.mkdir()
+    transcript = runners.RUNS / "sol-1" / "transcript.jsonl"
+    transcript.rename(hidden / "transcript.jsonl")
+    transcript.symlink_to(hidden / "transcript.jsonl")
+    hidden.chmod(0o600)
+    try:
+        assert cli.accepted_runs(graph, "sha") == {}
+    finally:
+        hidden.chmod(0o700)
+    assert "its main thread is not the thread the transcript records" in capsys.readouterr().err
+
 
 @pytest.mark.parametrize("workdir", [None, "", "MOCK/work/sol", ["/MOCK/work/sol"]],
                          ids=["none", "empty", "relative", "a list"])

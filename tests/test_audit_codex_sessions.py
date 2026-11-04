@@ -11,7 +11,9 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -233,7 +235,7 @@ def test_tools_records_and_places_the_script_does_not_read_are_flagged(area):
     report = acs.audit_run(run, lanes)
     flags = " ".join(report["flags"])
     for expected in ("tools.read_file", "'MOCK_shell'", "'MOCK_tool'", "'MOCK_record'", "'MOCK_event'",
-                     "'MOCK_response_item'", "outside the work directory", "'MOCKItem'", "'Extension'"):
+                     "'MOCK_response_item'", "not in the work directory itself", "'MOCKItem'", "'Extension'"):
         assert expected in flags
     assert not report["passed"]
 
@@ -244,13 +246,21 @@ def test_tools_records_and_places_the_script_does_not_read_are_flagged(area):
     ("MOCK/work/sol-1", "a path this script cannot place"),
     ("file://localhost{}", None), ("file://LOCALHOST{}/", None),
     ("file://MOCK-remote{}", "a path this script cannot place"), ("file://MOCK-remote:22{}", "a path this script cannot place"),
-    ("file://{}/MOCK", "outside the work directory"), ("file://{}0", "outside the work directory")])
+    ("file://{}/MOCK", "not in the work directory itself"), ("file://{}0", "not in the work directory itself"),
+    ("file://{}#/../../MOCK", "a path this script cannot place"), ("file://{}?/../../MOCK", "a path this script cannot place"),
+    ("file://{}#", "a path this script cannot place"), ("file://{}?", "a path this script cannot place"),
+    ("file://{}%2F", "a path this script cannot place"), ("file://{}/%2E", "a path this script cannot place"),
+    ("{}#", "not in the work directory itself")])
 def test_a_command_runs_in_the_work_directory_only_where_a_plain_path_names_it(area, spelled, flag):
     """Review 6: a command in the work directory spelled with a `.` part, `//` or a `/` at the end ran
     there. One in a path with a `..` part, or a relative one, ran wherever a link before it leads, so
-    it is flagged as a place this script cannot place; one in another folder ran outside the work
-    directory. Review 7: a file URL that names `localhost` names this host, and one that names another
-    host names no folder here, so this script cannot place it either."""
+    it is flagged as a place this script cannot place; one in another folder, a folder inside the work
+    directory among them, did not run in the work directory itself. Review 7: a file URL that names
+    `localhost` names this host, and one that names another host names no folder here, so this script
+    cannot place it either. Review 9: a file URL read as a URL drops a query and a fragment and decodes
+    its escapes, so `file://<work directory>#/../..` read as the work directory; Codex may write a path
+    into the URL as it stands, so a URL with a `?`, `#` or `%` names one of two folders, and this script
+    cannot place it. A plain path holds no URL syntax, so a `#` there belongs to a folder's name."""
     lanes, run, workdir = area
     add_parent(lanes, workdir)
     write_log(lanes, "rollout-MOCK-helper.jsonl", helper_meta(workdir),
@@ -477,6 +487,9 @@ def test_a_write_whose_last_bytes_fail_as_the_file_closes_leaves_nothing(tmp_pat
         def write(self, data):
             return self.fh.write(data)
 
+        def flush(self):
+            return self.fh.flush()
+
         def fileno(self):
             return self.fh.fileno()
 
@@ -489,6 +502,184 @@ def test_a_write_whose_last_bytes_fail_as_the_file_closes_leaves_nothing(tmp_pat
         acs._replace(old, b"MOCK new\n")
     assert sorted(p.name for p in tmp_path.iterdir()) == ["MOCK-old.json"]
     assert old.read_text() == "MOCK old\n"
+
+
+def test_a_part_file_the_system_will_not_give_its_name_goes(tmp_path, monkeypatch):
+    """When the system refuses the link or the rename that gives a part file its name, `_create` leaves
+    no file and `_replace` leaves the old one, and neither leaves its part file."""
+    def refuses(*args):
+        raise PermissionError(errno.EPERM, "MOCK: not permitted")
+
+    for name in ("link", "replace"):
+        monkeypatch.setattr(acs.os, name, refuses)
+    old = tmp_path / "MOCK-old.json"
+    old.write_text("MOCK old\n")
+    with pytest.raises(PermissionError, match="MOCK: not permitted"):
+        acs._create(tmp_path / "MOCK-new.json", b"MOCK new\n")
+    with pytest.raises(PermissionError, match="MOCK: not permitted"):
+        acs._replace(old, b"MOCK new\n")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["MOCK-old.json"]
+    assert old.read_text() == "MOCK old\n"
+
+
+def test_a_new_file_reaches_the_disk_before_it_takes_its_name(tmp_path, monkeypatch):
+    """Review 9: each write syncs its part file, with every byte in it, to the disk (fsync) before the file
+    takes its name, by a link (`_create`) or a rename (`_replace`)."""
+    calls, sizes = [], []
+    for name in ("link", "replace"):
+        monkeypatch.setattr(acs.os, name, lambda *args, real=getattr(os, name), name=name: (
+            calls.append(name), real(*args))[1])
+
+    def fsync(fd, real=os.fsync):
+        calls.append("fsync")
+        sizes.append(os.fstat(fd).st_size)
+        return real(fd)
+
+    monkeypatch.setattr(acs.os, "fsync", fsync)
+    acs._create(tmp_path / "MOCK-new.json", b"MOCK new\n")
+    acs._replace(tmp_path / "MOCK-new.json", b"MOCK newer\n")
+    assert calls == ["fsync", "link", "fsync", "replace"]
+    assert sizes == [len(b"MOCK new\n"), len(b"MOCK newer\n")]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["MOCK-new.json"]
+
+
+# A child process that runs `audit_run` on a MOCK run and dies (SIGKILL) part way through writing the
+# first file whose name holds `target`, whether the script opens it with `os.open` (as `tempfile` does),
+# `open` or `Path.open`: half the bytes on the disk, then gone, as `kill -9`, the system's out-of-memory
+# killer or a crash would leave it. It patches its own `os`, `io` and `builtins`, so only it dies.
+DIES_PART_WAY = """
+import builtins, importlib.util, io, os, signal, sys
+from pathlib import Path
+script, run, lanes, target = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("audit_codex_sessions", script)
+acs = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(acs)
+names, real_open, real_io_open = {}, os.open, io.open
+
+
+def opened(path, flags, *args, **kwargs):
+    fd = real_open(path, flags, *args, **kwargs)
+    names[fd] = os.path.basename(path)
+    return fd
+
+
+class DiesPartWay:
+    def __init__(self, fh, name):
+        self.fh, self.name = fh, name
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.fh.close()
+
+    def __getattr__(self, attr):
+        return getattr(self.fh, attr)
+
+    def write(self, data):
+        if target in self.name:
+            self.fh.write(data[:len(data) // 2])
+            self.fh.flush()
+            os.kill(os.getpid(), signal.SIGKILL)
+        return self.fh.write(data)
+
+
+def opened_file(file, mode="r", *args, **kwargs):
+    fh = real_io_open(file, mode, *args, **kwargs)
+    if not any(c in mode for c in "wxa+"):
+        return fh
+    return DiesPartWay(fh, names.get(file, "") if isinstance(file, int) else os.path.basename(os.fspath(file)))
+
+
+os.open, io.open, builtins.open = opened, opened_file, opened_file
+acs.audit_run(Path(run), Path(lanes))
+"""
+
+
+@pytest.mark.parametrize("target", ["rollout-MOCK-helper", "audit.json"])
+def test_a_run_that_dies_part_way_through_a_write_leaves_nothing_at_the_files_name(area, target):
+    """Review 9: `_create` wrote a kept copy at its final path, so a run killed part way through left a cut
+    copy there, and later runs took it as final. Once the lane pruned its logs, a sub-agent's violation
+    past the cut was gone and the run passed. Each write now goes to a part file that takes the file's
+    name only once whole, so a death part way leaves the part file and nothing at the name, and a death
+    while it writes the audit leaves the old one. The next run removes the part file and keeps the whole
+    log, and after the lane prunes its logs the violation still fails the run."""
+    lanes, run, workdir = area
+    parent = add_parent(lanes, workdir)
+    helper = write_log(lanes, "rollout-MOCK-helper.jsonl", helper_meta(workdir),
+                       items=[search("MOCK helper query"), command(f"cat {acs.ROOT / 'README.md'}", workdir)])
+    folder = run / "codex-sessions"
+    if target == "audit.json":
+        assert not acs.audit_run(run, lanes)["passed"]
+    before = {name: (folder / name).read_bytes() for name in os.listdir(folder)} if folder.exists() else {}
+    child = subprocess.Popen([sys.executable, "-c", DIES_PART_WAY, acs.__file__, str(run), str(lanes), target],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    _, err = child.communicate(timeout=300)
+    assert child.returncode == -signal.SIGKILL, err
+    parts = [name for name in os.listdir(folder) if acs.PART.fullmatch(name)]
+    assert len(parts) == 1 and target in parts[0]
+    after = {name: (folder / name).read_bytes() for name in os.listdir(folder) if name not in parts}
+    if target == "audit.json":
+        assert after == before
+    else:
+        assert after == {parent.name: parent.read_bytes()}
+    for pruned in (False, True):
+        if pruned:
+            parent.unlink()
+            helper.unlink()
+        report = acs.audit_run(run, lanes)
+        assert not report["passed"] and report["violations"] == 1
+        assert sorted(os.listdir(folder)) == sorted(["audit.json", parent.name, helper.name])
+
+
+def test_a_part_file_a_run_left_is_removed_and_one_this_script_cannot_remove_stops_it(area, monkeypatch):
+    """Review 9: a run that died part way through a write left its part file in `codex-sessions`, where
+    later runs passed it by. The next run removes each file named as this script names its part files,
+    and leaves any other; a part file it cannot remove stops it, by name."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    folder = run / "codex-sessions"
+    folder.mkdir()
+    for name in (".audit.json.MOCK1234.part", ".attempts.json.MOCK1234.part", ".rollout-MOCK-parent.jsonl.MOCK1234.part",
+                 ".MOCK-notes.part", "MOCK-audit.json.part", ".audit.json.MOCK1234"):
+        (folder / name).write_text("MOCK part\n")
+    assert acs.audit_run(run, lanes)["passed"]
+    assert sorted(os.listdir(folder)) == [".MOCK-notes.part", ".audit.json.MOCK1234", "MOCK-audit.json.part",
+                                          "audit.json", "rollout-MOCK-parent.jsonl"]
+    stuck = folder / ".audit.json.MOCK5678.part"
+    stuck.write_text("MOCK part\n")
+    real = os.unlink
+
+    def unlink(path, *args, **kwargs):
+        if Path(path) == stuck:
+            raise PermissionError(errno.EPERM, "MOCK: not permitted", str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(acs.os, "unlink", unlink)
+    with pytest.raises(SystemExit, match=r"this script cannot remove .*/\.audit\.json\.MOCK5678\.part, a part file a "
+                                         r"run of it left \(PermissionError\)"):
+        acs.audit_run(run, lanes)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches any folder")
+def test_a_kept_folder_this_script_cannot_search_stops_the_audit(area):
+    """Review 9: in a `codex-sessions` this script may list but not search, it read every entry as absent
+    and stopped with the wrong reason ("cannot keep", "cannot write"), though the files were there. It
+    now stops at the first file it looks for, by name, and leaves the folder as it found it."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    assert acs.audit_run(run, lanes)["passed"]
+    folder = run / "codex-sessions"
+    before = {name: (folder / name).read_bytes() for name in os.listdir(folder)}
+    folder.chmod(0o600)  # it may list the folder, but not reach what it holds
+    try:
+        with pytest.raises(SystemExit, match=r"this script cannot look for .*codex-sessions/audit\.json "
+                                             r"\(PermissionError\)"):
+            acs.audit_run(run, lanes)
+    finally:
+        folder.chmod(0o755)
+    assert {name: (folder / name).read_bytes() for name in os.listdir(folder)} == before
+
 
 @pytest.mark.parametrize("line, flag", [
     ("{MOCK", "does not parse"),
@@ -1447,6 +1638,7 @@ def test_a_session_in_the_work_directory_in_capitals_is_flagged(area):
 
 @pytest.mark.parametrize("kind, why", [
     ("a folder", "not a regular file"), ("a pipe", "not a regular file"), ("a link to nothing", "not a regular file"),
+    ("a link in a loop", "not a regular file"),
     pytest.param("no permission to read it", "PermissionError",
                  marks=pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file"))])
 def test_a_log_this_script_cannot_open_is_flagged(area, kind, why):
@@ -1457,10 +1649,25 @@ def test_a_log_this_script_cannot_open_is_flagged(area, kind, why):
     odd = lanes / "codex-9" / "sessions" / "2026" / "11" / "03" / "rollout-MOCK-odd.jsonl"
     {"a folder": odd.mkdir, "a pipe": lambda: os.mkfifo(odd),
      "a link to nothing": lambda: odd.symlink_to(odd.with_name("MOCK-gone")),
+     "a link in a loop": lambda: odd.symlink_to(odd),
      "no permission to read it": lambda: (odd.write_text("{}\n"), odd.chmod(0))}[kind]()
     report = acs.audit_run(run, lanes)
     assert report["flags"] == [f"rollout-MOCK-odd.jsonl: this script cannot open it ({why})"]
     assert not report["passed"]
+
+
+def test_a_log_a_link_leads_to_is_read(area):
+    """A lane's log may be a link to a regular file elsewhere: the script reads and keeps the file it
+    leads to, as it reads any log."""
+    lanes, run, workdir = area
+    parent = add_parent(lanes, workdir, spawned=())
+    elsewhere = lanes.parent / "MOCK-elsewhere" / parent.name
+    elsewhere.parent.mkdir()
+    parent.rename(elsewhere)
+    parent.symlink_to(elsewhere)
+    report = acs.audit_run(run, lanes)
+    assert report["passed"] and report["flags"] == []
+    assert (run / "codex-sessions" / parent.name).read_bytes() == elsewhere.read_bytes()
 
 
 def test_a_log_whose_whole_text_this_script_cannot_read_is_flagged(area, monkeypatch):
@@ -1506,6 +1713,101 @@ def test_a_folder_of_the_lanes_this_script_cannot_list_is_flagged(area, folder, 
         (lanes / folder).chmod(0o755)
     assert (f"{shown}: this script cannot list this folder (PermissionError), and a log in it could hold one of "
             "the run's threads") in report["flags"]
+    assert not report["passed"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches any folder")
+def test_a_log_in_a_lanes_folder_this_script_may_list_but_not_search_is_flagged_with_the_reason(area):
+    """Review 9: in a lanes folder this script may list but not search, it found each log's name and then
+    flagged the log as "not a regular file". The flag now gives the reason the system gave."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    extra = write_log(lanes, "rollout-MOCK-extra.jsonl", root_meta(workdir, "MOCK-extra"),
+                      items=[search("MOCK extra query")])
+    day = lanes / "codex-10" / "sessions" / "2026" / "11" / "03"
+    day.mkdir(parents=True)
+    extra.rename(day / extra.name)
+    day.chmod(0o600)
+    try:
+        report = acs.audit_run(run, lanes)
+    finally:
+        day.chmod(0o755)
+    assert report["flags"] == ["rollout-MOCK-extra.jsonl: this script cannot open it (PermissionError)"]
+    assert not report["passed"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches any folder")
+def test_a_run_folder_or_answer_this_script_cannot_look_for_stops_it_by_name(area):
+    """Review 9: with no labels, the script looks in each folder of `runs/` for a meta.json and an answer.
+    In a folder it may not search, `Path.exists` raised before Python 3.14, and from 3.14 on reads
+    nothing there, so the script would pass over a Codex run without a word. It stops, by name, on every
+    Python, and so does an answer it cannot look for."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    other = run.parent / "sol-2"
+    other.mkdir()
+    (other / "meta.json").write_text(json.dumps({"label": "sol-2", "lane_id": "codex-9"}))
+    for mode in (0o000, 0o600):
+        other.chmod(mode)
+        try:
+            with pytest.raises(SystemExit, match=r"cannot look for .*runs/sol-2/meta\.json \(PermissionError\)"):
+                acs.main(["--lanes", str(lanes)])
+        finally:
+            other.chmod(0o755)
+    hidden = run.parent.parent / "MOCK-hidden"
+    hidden.mkdir()
+    (hidden / "response.md").write_text("MOCK answer\n")
+    (other / "response.md").symlink_to(hidden / "response.md")
+    hidden.chmod(0o600)
+    try:
+        with pytest.raises(SystemExit, match=r"cannot look for .*runs/sol-2/response\.md \(PermissionError\)"):
+            acs.main(["--lanes", str(lanes)])
+    finally:
+        hidden.chmod(0o755)
+    assert not (other / "codex-sessions").exists()
+
+
+@pytest.mark.parametrize("kind", ["missing", "a folder", "a pipe", "not JSON", "a list", pytest.param(
+    "no permission to read it", marks=pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file"))])
+def test_a_runs_meta_json_this_script_cannot_read_stops_it_by_name(area, kind):
+    """Review 9: a run named on the command line whose meta.json is missing, is no regular file (a pipe
+    would block), does not parse or holds no object stopped the script with a traceback, or never
+    returned. It stops, by name, before it writes anything, and so does a collected run's meta.json when
+    the script audits every run: with no labels, it passed over one that was no regular file."""
+    lanes, run, workdir = area
+    meta = run / "meta.json"
+    text = meta.read_text()
+    meta.unlink()
+    {"missing": lambda: None, "a folder": meta.mkdir, "a pipe": lambda: os.mkfifo(meta),
+     "not JSON": lambda: meta.write_text("{MOCK"), "a list": lambda: meta.write_text("[]"),
+     "no permission to read it": lambda: (meta.write_text(text), meta.chmod(0o000))}[kind]()
+    match = r"this script cannot read .*sol-1/meta\.json as a run's record"
+    with pytest.raises(SystemExit, match=match):
+        acs.main(["sol-1", "--lanes", str(lanes)])
+    if kind != "missing":  # with no labels, a folder without a meta.json holds no run
+        with pytest.raises(SystemExit, match=match):
+            acs.main(["--lanes", str(lanes)])
+    assert not (run / "codex-sessions").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches any folder")
+def test_a_transcript_this_script_cannot_look_at_records_no_thread(area):
+    """Review 9: a transcript that is a link into a folder this script may not search raised an error from
+    `Path.is_file` before Python 3.14. The script reads it as recording no thread, on every Python, and
+    the run fails."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    hidden = run.parent.parent / "MOCK-hidden"
+    hidden.mkdir()
+    (run / "transcript.jsonl").rename(hidden / "transcript.jsonl")
+    (run / "transcript.jsonl").symlink_to(hidden / "transcript.jsonl")
+    hidden.chmod(0o600)
+    try:
+        report = acs.audit_run(run, lanes)
+    finally:
+        hidden.chmod(0o755)
+    assert report["flags"] == [f"the transcript records no thread whose id this script can read, not the collected "
+                               f"main thread {PARENT}"]
     assert not report["passed"]
 
 

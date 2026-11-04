@@ -33,11 +33,14 @@ transcript is the collected attempt's alone. For each Codex run this script:
    attempts on record, a run may have one main thread only, and must have collected its job's first
    attempt;
 3. copies the logs into `runs/<label>/codex-sessions/`, each as a new file where nothing is yet, never
-   replacing a different file. A kept copy that is not a regular file, or that this script cannot read,
-   stops it, and so does a `codex-sessions` that is not a folder or that this script cannot list or
-   write in, or an `audit.json` there that is not a regular file or that this script cannot write (a
-   link is neither: it would take the writes wherever it leads). `.gitignore` keeps the logs out of this
-   public repository; `audit.json` records each one's SHA-256;
+   replacing a different file. It writes each copy, as it writes `attempts.json`, to a part file beside
+   it, syncs that to the disk and links it into place, so the copy holds the whole log or nothing, even
+   when the process dies part way; the next run removes the part file such a death leaves. A kept copy
+   that is not a regular file, or that this script cannot read, stops it, and so does a `codex-sessions`
+   that is not a folder or that this script cannot list, search or write in, a part file there that it
+   cannot remove, or an `audit.json` there that is not a regular file or that this script cannot write
+   (a link is neither: it would take the writes wherever it leads). `.gitignore` keeps the logs out of
+   this public repository; `audit.json` records each one's SHA-256;
 4. turns each log's completed items into the `codex exec --json` items `i86 audit` reads (web searches,
    shell commands, messages) and audits them with `audit.audit_transcript`, as `i86 audit` audits a
    transcript. The collected main thread's items must match its transcript's, item by item, as
@@ -64,11 +67,12 @@ transcript is the collected attempt's alone. For each Codex run this script:
    and code mode's `wait`; a log line that does not parse, nests more than `DEPTH` levels or gives a key
    twice; a record, event or item of a kind it does not convert, or with a field its checks cannot read
    (a list where Codex writes a string, say); a cite marker in a tool's reply it cannot read; a shell
-   command a script calls with no completed item to audit; or a command run outside the work directory
-   or in a folder this script cannot place (a relative path, a file URL that names another host, or a
-   path with a `..` part);
-7. writes `runs/<label>/codex-sessions/audit.json` as a new file beside the old one and renames it into
-   place, so another name of the old file (a hard link) keeps its bytes.
+   command a script calls with no completed item to audit; or a command run anywhere but the work
+   directory itself (a folder inside it counts as another) or in a folder this script cannot place: a
+   relative path, a path with a `..` part, or a file URL that names another host or holds a `?`, `#` or
+   `%`, each of which could belong to a folder's name or to the URL's syntax;
+7. writes `runs/<label>/codex-sessions/audit.json` to a part file beside the old one, syncs it to the
+   disk and renames it into place, so another name of the old file (a hard link) keeps its bytes.
 
 The checks in 5 and 6 read each script without running it, so a script written to hide a call can
 still get past them: one that builds a name as it runs and indexes an object with it, say. What a
@@ -76,7 +80,9 @@ script returns to the model reaches it as the script's output, which the log rec
 
     .venv/bin/python scripts/audit_codex_sessions.py [LABEL ...] [--lanes DIR]
 
-It exits 1 if any thread fails the audit or any check above flags something.
+It exits 1 if any thread fails the audit or any check above flags something. It stops, with a
+message, at a `runs/` it cannot list, a folder in it that it cannot search, and a run's meta.json that
+it cannot read.
 """
 
 from __future__ import annotations
@@ -94,11 +100,12 @@ import os
 import posixpath
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 
 import tree_sitter_javascript
 from tree_sitter import Language, Parser
@@ -113,6 +120,8 @@ LANES = Path.home() / ".subfleet" / "lanes"
 # Where a lane's Codex keeps its session logs, under the lanes folder: one folder per part.
 LOG_PARTS = ("*", "sessions", "*", "*", "*", "rollout-*.jsonl")
 FOLDER = "codex-sessions"
+# The part files `_part_file` makes there, `.<name>.<random>.part`, for the files this script writes.
+PART = re.compile(r"\.(?:audit\.json|attempts\.json|rollout-.*\.jsonl)\.[^/]+\.part")
 # How many levels of objects and arrays a log line may nest. The Sol runs' logs nest at most 9; a line
 # that nests nearly as deep as Python's parser reads (about 10,000 here) can parse and then stop a
 # later step that writes its items out as JSON.
@@ -345,7 +354,10 @@ def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list
     found: dict[str, dict] = {}
     problems: list[str] = []
     for path in paths:
-        problem = None if os.path.isfile(path) else "not a regular file"  # a folder, or a pipe that would block
+        try:
+            problem = None if stat.S_ISREG(os.stat(path).st_mode) else "not a regular file"  # a pipe would block
+        except OSError as error:  # a link to nothing or in a loop, or a log in a folder this script may not search
+            problem = "not a regular file" if error.errno in (errno.ENOENT, errno.ELOOP) else type(error).__name__
         if problem is None:
             try:
                 with path.open("rb") as fh:
@@ -403,31 +415,47 @@ def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list
     return found, problems
 
 
-def _create(path: Path, data: bytes) -> None:
-    """Write `data` to a new file at `path`. Anything already there, a link included, stops it
-    (FileExistsError), so it writes through nothing. A write that fails, up to the last bytes the file
-    takes when it closes, leaves no part of `data`."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)  # as `open(path, "xb")` makes one
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            path.unlink()
-        raise
-
-
-def _replace(path: Path, data: bytes) -> None:
-    """Write `data` to `path` as a new file: first to a file of its own beside `path`, then renamed into
-    its place. This script never writes through what stood at `path`, so another name of that file (a
-    hard link) keeps its bytes, and `path` never holds part of `data`."""
+def _part_file(path: Path, data: bytes) -> str:
+    """A new file of this script's own beside `path`, named `.<name>.<random>.part` (`PART`), that holds
+    `data`, synced to the disk (fsync), with the mode `open` gives a new file rather than mkstemp's
+    owner-only one: its path. A write that fails, up to the last bytes the file takes when it closes,
+    removes it."""
     fd, part = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".part")
     try:
         with os.fdopen(fd, "wb") as fh:
             mask = os.umask(0)
             os.umask(mask)
-            os.fchmod(fh.fileno(), 0o666 & ~mask)  # as `open` makes a file, not mkstemp's owner-only mode
+            os.fchmod(fh.fileno(), 0o666 & ~mask)
             fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(part)
+        raise
+    return part
+
+
+def _create(path: Path, data: bytes) -> None:
+    """Write `data` to a new file at `path`: first to a part file beside it (`_part_file`), which it then
+    links at `path`. A link fails at anything already there, a link included (FileExistsError), as
+    `open(path, "xb")` does, so this script writes through nothing. And `path` holds all of `data` or
+    nothing, even when the process dies part way (killed, say): that leaves at most the part file, which
+    the next run removes (`audit_run`). A file system without hard links stops it."""
+    part = _part_file(path, data)
+    try:
+        os.link(part, path)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(part)
+
+
+def _replace(path: Path, data: bytes) -> None:
+    """Write `data` to `path` as a new file: first to a part file beside it (`_part_file`), then renamed
+    into its place. This script never writes through what stood at `path`, so another name of that file
+    (a hard link) keeps its bytes, and `path` never holds part of `data`."""
+    part = _part_file(path, data)
+    try:
         os.replace(part, path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -435,12 +463,24 @@ def _replace(path: Path, data: bytes) -> None:
         raise
 
 
+def _present(path: Path) -> bool:
+    """Whether anything is at `path`, a link included. A path this script cannot look at, in a folder it
+    may not search, stops it, by name, where `os.path.lexists` would read nothing there."""
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as error:
+        raise SystemExit(f"this script cannot look for {path} ({type(error).__name__})") from None
+    return True
+
+
 def keep(src: Path, dest_dir: Path) -> Path:
     """Copy a log into the run's folder, append-only: an existing copy must be a regular file that
     matches byte for byte. One that is not, or that cannot be read, stops the script, and so does a copy
     it cannot write; it writes a new copy only where nothing stands."""
     dest = dest_dir / src.name
-    if os.path.lexists(dest):
+    if _present(dest):
         if not os.path.isfile(dest):  # a folder, a pipe that would block, or a link to nothing
             raise SystemExit(f"{dest} is not a regular file; the kept copy is final")
         try:
@@ -486,7 +526,7 @@ def attempts(run_dir: Path, meta: dict) -> dict | None:
     if isinstance(info, dict) and isinstance(info.get("attempts"), list):
         fresh = {"job_id": job, "accepted_attempt_id": (info.get("job") or {}).get("accepted_attempt_id"),
                  "attempts": [{k: a.get(k) for k in ATTEMPT_FIELDS} for a in info["attempts"] if isinstance(a, dict)]}
-    if os.path.lexists(kept):
+    if _present(kept):
         old = None
         if os.path.isfile(kept):  # not a folder, or a pipe that would block
             try:
@@ -518,14 +558,16 @@ def _plain(path: str) -> str | None:
 
 def local_path(cwd) -> str | None:
     """A CommandExecution's cwd (a file:// URL or a path) as a path. A file URL that names a host other
-    than this one (`localhost`, or none) names no folder here, so it comes back as written, a path no
-    check places."""
+    than this one (`localhost`, or none) names no folder here. Nor can this script tell which folder a
+    file URL with a `?`, `#` or `%` names: Codex may write a path into the URL as it stands, so each
+    could belong to a folder's name or to the URL's syntax (a query, a fragment or an escape), and the
+    two readings name different folders. Either comes back as written, a path no check places."""
     if not isinstance(cwd, str) or not cwd:
         return None
     if not cwd.startswith("file:"):
         return cwd
     url = urlparse(cwd)
-    return unquote(url.path) if url.netloc.lower() in ("", "localhost") else cwd
+    return url.path if url.netloc.lower() in ("", "localhost") and not any(c in cwd for c in "?#%") else cwd
 
 
 def web_action(action):
@@ -1066,9 +1108,11 @@ def convert(path: Path, workdir: str) -> tuple[list[dict], dict]:
                     place = _plain(cwd)
                     if place is None:
                         found["flags"].append(f"line {n}: a command ran in {cwd[:200]}, a path this script cannot "
-                                              "place: relative, on another host, or with a `..` part")
+                                              "place: relative, with a `..` part, or a file URL on another host or "
+                                              "with a `?`, `#` or `%`")
                     elif place != _plain(workdir):
-                        found["flags"].append(f"line {n}: a command ran in {cwd[:200]}, outside the work directory")
+                        found["flags"].append(f"line {n}: a command ran in {cwd[:200]}, not in the work directory "
+                                              "itself (a folder inside it counts as another)")
                     lines.append({"type": "item.completed", "item": {
                         "id": item.get("id"), "type": "command_execution",
                         "command": shlex.join(command) if isinstance(command, list) else command,
@@ -1216,7 +1260,9 @@ def audit_thread(path: Path, workdir: str) -> tuple[dict, dict, list[dict]]:
 def transcript_thread(path: Path) -> str | None:
     """The thread a `codex exec --json` transcript records (its first `thread.started` event), or None
     if it records none or one whose id is not a string."""
-    if not path.is_file():  # not a folder, or a pipe that would block
+    # Not a folder, a pipe that would block, or a path this script cannot look at, which `Path.is_file`
+    # reads as an error before Python 3.14 and as no file from 3.14 on.
+    if not os.path.isfile(path):
         return None
     try:
         lines = transcript_lines(path)
@@ -1226,19 +1272,42 @@ def transcript_thread(path: Path) -> str | None:
     return tid if isinstance(tid, str) else None
 
 
+def _meta(run_dir: Path) -> dict:
+    """A run's meta.json. One that is not a regular file (a pipe would block), or that this script cannot
+    read as a JSON object, stops it, by name."""
+    path = run_dir / "meta.json"
+    try:
+        meta = json.loads(path.read_text()) if os.path.isfile(path) else None
+    except (OSError, ValueError, RecursionError):
+        meta = None
+    if not isinstance(meta, dict):
+        raise SystemExit(f"this script cannot read {path} as a run's record: a regular file of a JSON object")
+    return meta
+
+
 def audit_run(run_dir: Path, lanes: Path) -> dict:
-    meta = json.loads((run_dir / "meta.json").read_text())
+    meta = _meta(run_dir)
     # A link in place of either would take this script's writes wherever it leads.
-    if os.path.islink(run_dir / FOLDER) or os.path.lexists(run_dir / FOLDER) and not os.path.isdir(run_dir / FOLDER):
+    if os.path.islink(run_dir / FOLDER) or _present(run_dir / FOLDER) and not os.path.isdir(run_dir / FOLDER):
         raise SystemExit(f"{run_dir / FOLDER} is not a folder; the kept copies are final")
     out = run_dir / FOLDER / "audit.json"
-    if os.path.islink(out) or os.path.lexists(out) and not os.path.isfile(out):  # a folder, or a pipe that would block
+    if os.path.islink(out) or _present(out) and not os.path.isfile(out):  # a folder, or a pipe that would block
         raise SystemExit(f"{out} is not a regular file, so this script will not write the audit over it")
     try:
         kept_names = _names(run_dir / FOLDER) or []
     except OSError as error:
         raise SystemExit(f"this script cannot list {run_dir / FOLDER} ({type(error).__name__}); the kept copies "
                          "are final") from None
+    # A run of this script that died part way through a write (`_create`, `_replace`) left its part file.
+    for name in kept_names:
+        if PART.fullmatch(name):
+            try:
+                os.unlink(run_dir / FOLDER / name)
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                raise SystemExit(f"this script cannot remove {run_dir / FOLDER / name}, a part file a run of it "
+                                 f"left ({type(error).__name__})") from None
     workdir = meta.get("workdir")
     lane_logs, unlisted = session_logs(lanes)
     logs = [*lane_logs, *sorted(run_dir / FOLDER / name for name in kept_names
@@ -1364,7 +1433,7 @@ def audit_run(run_dir: Path, lanes: Path) -> dict:
                         and all(t["audit"]["passed"] for t in report["threads"]))
     try:
         (run_dir / FOLDER).mkdir(parents=True, exist_ok=True)
-        if os.path.lexists(out) and not os.access(out, os.W_OK):  # a file the system will not let this script write
+        if _present(out) and not os.access(out, os.W_OK):  # a file the system will not let this script write
             raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(out))
         _replace(out, (json.dumps(report, indent=1) + "\n").encode())
     except OSError as error:
@@ -1373,13 +1442,13 @@ def audit_run(run_dir: Path, lanes: Path) -> dict:
 
 
 def codex_runs() -> list[Path]:
-    """Collected runs a Codex lane served."""
+    """Collected runs a Codex lane served: each run with an answer and a meta.json that says so. A `runs/`
+    this script cannot list, and a folder in it or a run's answer that it cannot look for, stop it, by
+    name (`runners.run_dirs`, `runners.exists`), and so does a collected run's meta.json that it cannot
+    read (`_meta`)."""
     out = []
-    for d in sorted(RUNS.iterdir()):
-        meta_path = d / "meta.json"
-        if not meta_path.is_file() or not (d / "response.md").exists():
-            continue
-        if runners.served_by_codex(json.loads(meta_path.read_text())):
+    for d in runners.run_dirs(RUNS):
+        if runners.exists(d / "response.md") and runners.served_by_codex(_meta(d)):
             out.append(d)
     return out
 

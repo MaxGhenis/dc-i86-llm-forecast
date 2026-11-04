@@ -123,6 +123,73 @@ def test_a_sessions_folder_prereg_cannot_search_stops_it(tmp_path, monkeypatch):
     assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches any folder")
+@pytest.mark.parametrize("mode", [0o000, 0o600])
+def test_a_run_folder_prereg_cannot_search_stops_it(tmp_path, monkeypatch, mode):
+    """Review 9: prereg looks in each folder of `runs/` for a meta.json. In one it may not search,
+    `Path.exists` raised before Python 3.14, and from 3.14 on reads nothing there, so prereg would leave
+    the run out of its manifest without a word. It stops, by name, on every Python, before it writes a
+    manifest, and so does `simulate`."""
+    prereg = area(tmp_path, monkeypatch)
+    run = tmp_path / "runs" / "sol-1"
+    run.mkdir(parents=True)
+    (run / "meta.json").write_text("MOCK meta\n")
+    run.chmod(mode)
+    match = r"cannot look for .*runs/sol-1/meta\.json \(PermissionError\)"
+    try:
+        with pytest.raises(SystemExit, match=match):
+            cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+        with pytest.raises(SystemExit, match=match):
+            cli.accepted_runs(None, "sha")
+    finally:
+        run.chmod(0o700)
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists any folder")
+@pytest.mark.parametrize("mode", [0o000, 0o300])
+def test_a_runs_folder_prereg_cannot_list_stops_it(tmp_path, monkeypatch, mode):
+    """A `runs/` the tools cannot list could hold any run, so prereg and `simulate` stop, by name, before
+    prereg writes a manifest, where they raised before."""
+    prereg = area(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+    (runs / "sol-1").mkdir(parents=True)
+    (runs / "sol-1" / "meta.json").write_text("MOCK meta\n")
+    runs.chmod(mode)
+    match = r"cannot list .*/runs \(PermissionError\)"
+    try:
+        with pytest.raises(SystemExit, match=match):
+            cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+        with pytest.raises(SystemExit, match=match):
+            cli.accepted_runs(None, "sha")
+    finally:
+        runs.chmod(0o700)
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
+
+
+def test_the_run_folders_are_those_that_hold_a_meta_json(tmp_path, monkeypatch):
+    """`runners.run_dirs` reads what `Path.exists` read as nothing there before Python 3.14 as no run: a
+    file, a pipe or a link to nothing or in a loop in `runs/`, and a folder whose meta.json is a link to
+    nothing. A folder that holds a meta.json is a run, in order of its name."""
+    area(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+    for label in ("sol-2", "sol-1"):
+        (runs / label).mkdir(parents=True)
+        (runs / label / "meta.json").write_text("MOCK meta\n")
+    (runs / "MOCK-file").write_text("MOCK\n")
+    os.mkfifo(runs / "MOCK-pipe")
+    (runs / "MOCK-gone").symlink_to(runs / "MOCK-nothing")
+    (runs / "MOCK-loop").symlink_to(runs / "MOCK-loop")
+    (runs / "MOCK-no-meta").mkdir()
+    (runs / "MOCK-meta-gone").mkdir()
+    (runs / "MOCK-meta-gone" / "meta.json").symlink_to(runs / "MOCK-nothing")
+    assert runners.run_dirs() == [runs / "sol-1", runs / "sol-2"]
+    assert runners.run_dirs(tmp_path / "MOCK-no-runs") == []
+    assert runners.run_dirs(runs / "MOCK-gone") == []
+    with pytest.raises(SystemExit, match=r"cannot list .*/runs/MOCK-file \(NotADirectoryError\)"):
+        runners.run_dirs(runs / "MOCK-file")
+
+
 def test_a_sessions_entry_that_is_a_file_holds_nothing_for_prereg_to_hash(tmp_path, monkeypatch):
     """Nothing can sit below a file, so prereg finds no audit or attempts in a run whose `codex-sessions`
     is a file, and hashes the run's other files."""

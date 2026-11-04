@@ -257,7 +257,9 @@ def _session_audit(run_dir: Path):
 def _transcript_thread(path: Path) -> str | None:
     """The thread a `codex exec --json` transcript records (its first `thread.started` event), or None
     if it records none or one whose id is not a string."""
-    if not path.is_file():  # not a folder, or a pipe that would block
+    # Not a folder, a pipe that would block, or a path this check cannot look at, which `Path.is_file`
+    # reads as an error before Python 3.14 and as no file from 3.14 on.
+    if not os.path.isfile(path):
         return None
     try:
         text = path.read_text(errors="replace")
@@ -298,10 +300,12 @@ def _thread_problem(t: dict) -> str | None:
     `codex-sessions`, as the script names each kept log, a SHA-256, and calls in the form the audits
     write them. Its own audit must count the events and calls its items make: the script turns each web
     search, command, message and reasoning item into one line of the stream it audits, and `audit` reads
-    one call from each search and command. `audit` reads each such call as a web call or lists it as a
-    suspect or a local call (or a violation, which a passing thread has none of), so those add up to its
-    calls, and it gives each web call one address or more. And the thread's scripts may call the shell
-    no more often than its commands completed."""
+    one call from each search and command. `audit` reads each search as a web call or lists it as a
+    suspect call, and each command as a web call or lists it as a suspect or a local call (or a
+    violation, which a passing thread has none of). So those add up to its calls, its suspect searches
+    number no more than its searches, its local and suspect commands no more than its commands, and it
+    gives each web call one address or more. And the thread's scripts may call the shell no more often
+    than its commands completed."""
     items, own = t["items"], t["audit"]
     if set(t) != THREAD_KEYS or set(own) != AUDIT_KEYS:
         return "one thread's entry or its audit has other fields than the script writes"
@@ -324,29 +328,38 @@ def _thread_problem(t: dict) -> str | None:
             and bool(urls) == (own["web_calls"] > 0)):
         return ("one thread's audit sorts more or fewer calls than it read, or lists web addresses that do not "
                 "match its web calls")
+    suspect = collections.Counter(r["tool"] for r in own["suspect"])
+    if not (set(suspect) <= {"web_search", "shell"} and all(r["tool"] == "shell" for r in own["local_calls"])
+            and suspect["web_search"] <= _searches(items)
+            and suspect["shell"] + len(own["local_calls"]) <= items.get("CommandExecution", 0)):
+        return "one thread's audit lists a call of a tool its items do not call, or more such calls than they make"
     if t["script_tools"].get("exec_command", 0) > items.get("CommandExecution", 0):
         return "one thread's scripts call the shell more often than its commands completed"
     return None
 
 
 def _session_problem(run_dir: Path, rec: dict) -> str | None:
-    """Why a session audit that says it passed does not hold up, or None. The gate reads the verdict again
-    rather than trust it: the run's own work directory, an absolute path; no flags, missing threads or
-    orphans; each thread with an id of its own, counts of zero or more, and it passed its own audit,
-    which reads one event or more and finds no violation; no item, script tool or function the script
-    fails a run for; each parent among the threads, every thread descended from a main thread with no
-    cycle, each thread's `spawn_agent` calls as many as the threads that name it as their parent, and
-    as many sub-agent events or more; totals that add up; each thread's fields and counts as
-    `_thread_problem` reads them; as its main thread, a thread `codex exec` started, the one the
-    transcript records; a check of the transcript that compared each of the main thread's searches and
-    commands and found the same calls in it and in the main thread's log; and each thread marked as
-    collected exactly when it descends from the main thread, and with the attempt whose session it
-    descends from. With attempts on record (`attempts.json`), they must be the job's attempts a1, a2 and
-    on, the job meta.json's and the audit's, and meta.json's attempt must be the one subfleet accepted
-    and the audit names, with the main thread as its session; each attempt that started must name its
-    own session among the threads, a main thread, and each main thread must be an attempt's session.
-    With none, the run has one main thread, from the job's first attempt. Last, the record must have the
-    fields the script writes, and no others."""
+    """Why a session audit that says it passed does not hold up, or None. Rather than trust the verdict,
+    the gate checks that the record holds together: the run's own work directory, an absolute path; no
+    flags, missing threads or orphans; each thread with an id of its own, counts of zero or more, and it
+    passed its own audit, which reads one event or more and finds no violation; no item, script tool or
+    function the script fails a run for; each parent among the threads, every thread descended from a
+    main thread with no cycle, each thread's `spawn_agent` calls as many as the threads that name it as
+    their parent, and as many sub-agent events or more; totals that add up; each thread's fields and
+    counts as `_thread_problem` reads them, and a kept log of its own, by name and SHA-256; as its main
+    thread, a thread `codex exec` started, the one the transcript records; a check of the transcript that
+    compared each of the main thread's searches and commands and found the same calls in it and in the
+    main thread's log; and each thread marked as collected exactly when it descends from the main
+    thread, and with the attempt whose session it descends from. With attempts on record
+    (`attempts.json`), they must be the job's attempts a1, a2 and on, the job meta.json's and the
+    audit's, and meta.json's attempt must be the one subfleet accepted and the audit names, with the
+    main thread as its session; each attempt that started must name its own session among the threads,
+    a main thread, and each main thread must be an attempt's session. With none, the run has one main
+    thread, from the job's first attempt. Last, the record must have the fields the script writes, and
+    no others. The gate reads the record alone, so it cannot tell the script's record from one edited to
+    hide a suspect call without breaking these checks: one that reads the call as a web or local call,
+    say, or drops a suspect call that only a thread's scripts or served pages show. A re-run of the
+    script on the kept logs can."""
     meta = runners.read_meta(run_dir)
     threads = rec["threads"]
     parent = {t["thread_id"]: t.get("spawned_by") for t in threads}
@@ -399,6 +412,8 @@ def _session_problem(run_dir: Path, rec: dict) -> str | None:
         problem = _thread_problem(t)
         if problem:
             return problem
+    if len({t["file"] for t in threads}) != len(threads) or len({t["sha256"] for t in threads}) != len(threads):
+        return "two of its threads name one kept log"
     main = rec.get("main_thread")
     if not isinstance(main, str) or main not in ids:
         return "it names no main thread among its threads"

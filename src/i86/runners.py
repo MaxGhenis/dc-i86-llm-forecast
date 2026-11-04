@@ -42,6 +42,7 @@ Backends:
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -155,8 +156,37 @@ def bookkeeping_lock():
                     fcntl.flock(fd, fcntl.LOCK_UN)
 
 
-def run_dirs() -> list[Path]:
-    return sorted(p for p in RUNS.iterdir() if (p / "meta.json").exists()) if RUNS.exists() else []
+# What `Path.exists` reads as nothing at a path before Python 3.14: nothing there, a part of the path
+# that is no folder, or a link in a loop. From 3.14 on it reads every error so, a folder it may not
+# search among them.
+NOTHING_THERE = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
+
+
+def exists(path: Path) -> bool:
+    """Whether something is at `path`, a link followed, as `Path.exists` reads it before Python 3.14. A
+    path this cannot look at, in a folder it may not search, stops the command, by name, on every
+    Python: there `Path.exists` raises before 3.14 and from 3.14 on reads nothing there."""
+    try:
+        os.stat(path)
+    except OSError as error:
+        if error.errno in NOTHING_THERE:
+            return False
+        raise SystemExit(f"cannot look for {path} ({type(error).__name__})") from None
+    return True
+
+
+def run_dirs(runs: Path | None = None) -> list[Path]:
+    """The folders in `runs` (by default `runs/`) that hold a meta.json, in order of their names. A `runs`
+    this cannot list, or a folder in it where this cannot look for a meta.json (`exists`), could hold a
+    run, so either stops the command, by name."""
+    runs = RUNS if runs is None else runs
+    if not exists(runs):
+        return []
+    try:
+        folders = sorted(runs.iterdir())
+    except OSError as error:
+        raise SystemExit(f"cannot list {runs} ({type(error).__name__})") from None
+    return [p for p in folders if exists(p / "meta.json")]
 
 
 def now() -> str:
