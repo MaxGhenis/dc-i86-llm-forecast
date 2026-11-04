@@ -273,8 +273,9 @@ Every thread's suspect calls count toward the run's, including an earlier attemp
 
 On these lanes the model calls the web tool from JavaScript cells, and a log's items record only part
 of what a cell opens. So the script also reads each cell's code as a web call's input and audits every
-page the web tool says it served. It decodes the escapes in each string a cell writes out and joins
-the strings a `+` or a template puts together before it checks them. It flags a cell that calls any
+page the web tool says it served. It decodes the escapes in each string a cell writes out, writes
+each number as JavaScript writes it in a string, and joins what a `+` or a template puts together
+into one string before it checks them. It flags a cell that calls any
 tool but the web tool and the shell, reaches `tools` other than by name, or names a global the cells'
 runtime lacks. It also flags `eval`, `Function`, `constructor` and other words that can build code or
 reach a prototype, whether a cell writes one out or spells it from strings. A cell opens a page by
@@ -282,7 +283,8 @@ giving `ref_id` a web address or the id of a result the web tool returned. The s
 that writes `ref_id` anywhere but as a key in an object literal, or gives that key any value but a
 web address or id in quotes. A cell that does not parse as JavaScript passes only when
 its log shows the runtime refused to compile it. The script reads cells without running them, so a
-cell that builds a name or an address as it runs could still hide a call.
+cell that builds a name or an address as it runs, by adding numbers or calling a function, could
+still hide a call.
 
 The script writes `runs/<label>/codex-sessions/audit.json`, with each log's SHA-256, and
 `attempts.json`, subfleet's record of the job's attempts. The logs themselves hold the lanes' account

@@ -63,3 +63,11 @@ After `2026-11-04-sessions/`:
 - The summary's note on suspect calls now lists what only a Codex run's session logs record, the
   pages the web tool served among them. No other line of `outputs/summary.md` changed.
 - Every other file in the previous manifest still matches.
+
+After `2026-11-04-served/`:
+
+- The session-log audit now reports a first line that names the work directory but does not parse,
+  whichever way its quotes pair, and counts a line that gives a key twice as one that does not parse.
+  It writes each number a cell writes out as JavaScript writes it in a string. Re-auditing the four
+  Sol runs leaves every `codex-sessions/audit.json` and `attempts.json` byte for byte the same.
+- Every file in this manifest still matches.

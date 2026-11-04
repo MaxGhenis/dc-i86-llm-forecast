@@ -5,6 +5,7 @@ temporary directories; the tests never run subfleet or any other command. The po
 
 import importlib.util
 import json
+import math
 import re
 import shlex
 import shutil
@@ -275,12 +276,20 @@ def test_a_kept_log_is_final(area):
         acs.audit_run(run, lanes)
 
 
-@pytest.mark.parametrize("line, flag", [("{MOCK", "does not parse"), ("[1]", "is not a record")])
+@pytest.mark.parametrize("line, flag", [
+    ("{MOCK", "does not parse"),
+    ("[1]", "is not a record"),
+    # A key given twice reads as its last value here, and could read otherwise elsewhere.
+    ('{"type": "response_item", "payload": {"type": "custom_tool_call", "name": "MOCK_tool", "name": "exec", '
+     '"input": "text(1)"}}', "does not parse"),
+    ("[" * 100_000 + "]" * 100_000, "does not parse"),
+    (b'{"type": "event_msg", "payload": {"type": "token_count", "MOCK": "\xff"}}', "does not parse"),
+], ids=["cut", "a list", "a key twice", "nested too deeply", "not UTF-8"])
 def test_a_log_line_that_is_not_a_record_is_flagged(area, line, flag):
     lanes, run, workdir = area
     parent = add_parent(lanes, workdir, spawned=())
-    with parent.open("a") as fh:
-        fh.write(line + "\n")
+    with parent.open("ab") as fh:
+        fh.write((line if isinstance(line, bytes) else line.encode()) + b"\n")
     report = acs.audit_run(run, lanes)
     assert f"rollout-MOCK-parent.jsonl line 3 {flag}" in report["flags"] and not report["passed"]
 
@@ -449,6 +458,10 @@ def test_a_script_the_grammar_cannot_parse_passes_only_as_one_v8_refused(area, r
     ('{search_query: [{q: "dc-i86-" + "llm-forecast"}]}', "repository"),
     ('{search_query: [{q: "http://" + "127.0.0.1:8080/MOCK"}]}', "127.0.0.1"),
     (r'{search_query: [{q: "file\:///etc/hosts"}]}', "other than http(s)"),
+    # Review 3: a number that a template or a `+` puts in a string, as JavaScript writes it there.
+    ('{search_query: [{q: "http" + `://${127n}.${0n}.${0n}.${1n}`}]}', "127.0.0.1"),
+    ('{search_query: [{q: "http" + `://${0x7f}.${0b0}.${0e5}.${.1e1}`}]}', "127.0.0.1"),
+    ("""JSON.parse('{"open": [{"ref_id": ' + '"http' + `://127.0.0.${0o1}"}]}`)""", "127.0.0.1"),
 ])
 def test_a_scripts_urls_are_read_as_a_web_calls_input(area, args, why):
     lanes, run, workdir = area
@@ -797,21 +810,27 @@ def test_a_sub_agent_whose_log_spells_the_work_directory_with_escapes_is_audited
 
 
 @pytest.mark.parametrize("before", [None, 'MOCK "quote'], ids=["alone", "after an escaped quote"])
-@pytest.mark.parametrize("case", ["cut", "other record"])
+@pytest.mark.parametrize("case", ["cut", "other record", "quotes paired otherwise", "a key twice"])
 def test_a_first_line_that_escapes_the_work_directory_and_cannot_be_read_is_flagged(area, tmp_path, case, before):
     """A log whose first line spells the work directory with escapes, but does not parse as a session's
-    record, is flagged, also after a string that escapes a quote; one that spells another directory so
-    is not."""
+    record, is flagged: also after a string that escapes a quote, when a missing quote pairs the
+    line's quotes otherwise (review 3), and when the line gives a key twice. One that spells another
+    directory so is not."""
     lanes, run, workdir = area
     add_parent(lanes, workdir, spawned=())
     folder = lanes / "codex-9" / "sessions" / "2026" / "11" / "03"
     for name, where in [("rollout-MOCK-odd.jsonl", workdir), ("rollout-MOCK-odd-elsewhere.jsonl", str(tmp_path / "MOCK"))]:
-        payload = root_meta(where, "MOCK-odd") if case == "cut" else {"cwd": where}
+        payload = {"cwd": where} if case == "other record" else root_meta(where, "MOCK-odd")
         if before is not None:
             payload = {"note": before, **payload}
-        record = {"type": "session_meta" if case == "cut" else "MOCK_record", "payload": payload}
+        record = {"type": "MOCK_record" if case == "other record" else "session_meta", "payload": payload}
         first = json.dumps(record).replace(json.dumps(where), '"' + spell(where, "escaped slashes") + '"')
-        (folder / name).write_text((first[:-10] if case == "cut" else first) + "\n")
+        first = {"cut": first[:-10], "other record": first,
+                 # Read left to right, the quote that closes the key opens a string, and the directory
+                 # falls between two strings.
+                 "quotes paired otherwise": first.replace('"cwd"', 'cwd"'),
+                 "a key twice": first[:-2] + ', "cwd": "/MOCK/elsewhere"}}'}[case]
+        (folder / name).write_text(first + "\n")
     report = acs.audit_run(run, lanes)
     assert [flag.split(":")[0] for flag in report["flags"]] == ["rollout-MOCK-odd.jsonl"] and not report["passed"]
 
@@ -1039,6 +1058,41 @@ def test_a_constant_string_folds_to_what_the_script_builds(pieces):
         assert acs._fold(assignment.child_by_field_name("right"), src) == "".join(pieces)
 
 
+@pytest.mark.parametrize("expr, folded", [
+    ('"a" + 1 + 2', "a12"),  # a string, then each number joined to it
+    ('(1) + "a" + 0x10', "1a16"),
+    ("`${1n}${1e21}${1e-7}${0.000001}`", "11e+211e-70.000001"),
+    ('1 + 2 + "a"', None),  # `1 + 2` adds, which this script does not fold
+    ('(1) + (2) + "a"', None),
+    ('"a" + (1 + 2)', None),
+    ('"a" + 1_0', "a10"),
+    ('"a" + 0x' + "f" * 300, "aInfinity"),  # past the largest double
+    ('"a" + 017', None),  # a legacy octal, which a module refuses
+])
+def test_a_number_joins_a_string_as_javascript_writes_it(expr, folded):
+    src = f"x = {expr};".encode()
+    assignment = acs._JS.parse(src).root_node.named_children[0].named_children[0]
+    assert acs._fold(assignment.child_by_field_name("right"), src) == folded
+
+
+@given(x=st.floats(min_value=0, allow_nan=False))
+@example(x=0.0)
+@example(x=100.0)
+@example(x=1e20)
+@example(x=1e21)
+@example(x=1e-6)
+@example(x=1e-7)
+@example(x=5e-324)
+def test_a_numbers_string_gives_back_the_number(x):
+    """Property: the string `_number` makes of a double gives back the double, in the form ECMAScript
+    writes: no exponent from 1e-6 up to 1e21, and no zero at the end of the digits after a point."""
+    x = abs(x)
+    text = acs._number("1e400" if x == math.inf else repr(x))
+    assert float(text) == x
+    assert re.fullmatch(r"0|Infinity|[1-9]\d*(\.\d*[1-9])?|0\.0*[1-9](\d*[1-9])?|[1-9](\.\d*[1-9])?e[+-][1-9]\d*", text)
+    assert ("e" in text) is not (x == 0 or x == math.inf or 1e-6 <= x < 1e21)
+
+
 @given(data=st.data())
 def test_an_index_that_can_build_a_denied_name_is_flagged(data):
     """Property: split a name the script denies into pieces, write at least one of them out as a string
@@ -1061,7 +1115,8 @@ def test_an_index_that_can_build_a_denied_name_is_flagged(data):
 def test_discovery_reads_the_work_directory_however_json_spells_it(path, note, data):
     """Property (review finding 2): a log whose first line spells the work directory with any mix of
     escapes (`\\/`, `\\u` in either case), after a string that may escape quotes and backslashes, is
-    found, and flagged when it does not parse; one that spells another directory is neither."""
+    found, and flagged when it does not parse: cut short, missing the quote that closes that string
+    (review 3), or giving a key twice. One that spells another directory is neither."""
     workdir = "/" + "/".join(path)
 
     def spelled(text: str) -> str:
@@ -1075,14 +1130,21 @@ def test_discovery_reads_the_work_directory_however_json_spells_it(path, note, d
     with tempfile.TemporaryDirectory() as tmp:
         log = Path(tmp) / "rollout-MOCK.jsonl"
         for where, named in [(workdir, True), (workdir + "-MOCK", False)]:
-            first = ('{"type": "session_meta", "payload": {"note": ' + json.dumps(note) + ', "id": "MOCK-thread", "cwd": '
-                     + spelled(where) + ', "source": "exec"}}')
+            head = '{"type": "session_meta", "payload": {"note": '
+            tail = ', "id": "MOCK-thread", "cwd": ' + spelled(where) + ', "source": "exec"}}'
+            first = head + json.dumps(note) + tail
             log.write_text(first + "\n")
             threads, problems = acs.find_threads([log], workdir)
             assert (set(threads) == {"MOCK-thread"}) is named and problems == []
-            log.write_text(first[:-3] + "\n")  # cut inside its last string: it does not parse
-            threads, problems = acs.find_threads([log], workdir)
-            assert threads == {} and len(problems) == int(named)
+            for broken in (first[:-3],  # cut inside its last string
+                           # Read left to right, the directory falls between two strings.
+                           head + json.dumps(note)[:-1] + tail,
+                           first[:-2] + ', "cwd": "/MOCK-elsewhere"}}'):
+                with pytest.raises(ValueError):
+                    acs._record(broken)
+                log.write_text(broken + "\n")
+                threads, problems = acs.find_threads([log], workdir)
+                assert threads == {} and len(problems) == int(named)
 
 
 # What a JavaScript string may escape as the character itself: no escape with a meaning of its own

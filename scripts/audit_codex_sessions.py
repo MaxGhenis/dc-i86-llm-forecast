@@ -63,6 +63,7 @@ import argparse
 import collections
 import hashlib
 import json
+import math
 import re
 import shlex
 import shutil
@@ -118,7 +119,6 @@ LINK = re.compile("cite\\d+†[^-]*")
 # How Codex reports a script V8 refused to compile: it failed with a SyntaxError and printed nothing.
 REFUSED = re.compile(r"Script failed\nWall time [0-9.]+ seconds\nOutput:\n")
 FIRST_ATTEMPT = re.compile(r"/a1\Z")  # subfleet's attempt ids run <job>/a1, <job>/a2, ...
-JSON_STRING = re.compile(rb'"(?:[^"\\]|\\.)*"')  # a string in a line of JSON, its escapes as written
 # What a 0.159 session log holds, besides the calls this script reads. Anything else is flagged.
 RECORDS = {"session_meta", "event_msg", "response_item", "turn_context", "world_state", "token_usage_record",
            "inter_agent_communication_metadata"}
@@ -160,6 +160,12 @@ KEY_PARTS = {"identifier", "number", "member_expression", "property_identifier",
 # A JavaScript string's escapes: `\u{...}`, `\uXXXX`, `\xXX`, a line continuation, or one character.
 ESCAPE = re.compile(r"\\(?:u\{([0-9A-Fa-f]{1,6})\}|u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2})|(\r\n|[\s\S]))")
 SIMPLE_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+# A number as a module may write it (strict mode: no legacy octal like `017`, and `_` only between
+# digits): a whole number in base 16, 8, 2 or 10, which `n` makes a BigInt, or a decimal.
+WHOLE = re.compile(r"0[xX](?P<x>[0-9a-fA-F](?:_?[0-9a-fA-F])*)|0[oO](?P<o>[0-7](?:_?[0-7])*)"
+                   r"|0[bB](?P<b>[01](?:_?[01])*)|(?P<d>0|[1-9](?:_?[0-9])*)")
+DECIMAL = re.compile(r"(?:(?:0|[1-9](?:_?[0-9])*)(?:\.(?:[0-9](?:_?[0-9])*)?)?|\.[0-9](?:_?[0-9])*)"
+                     r"(?:[eE][+-]?[0-9](?:_?[0-9])*)?")
 
 
 def thread_spawn(meta: dict) -> dict | None:
@@ -181,10 +187,12 @@ def sha256(path: Path) -> str:
 
 
 def _names(first: bytes, needle: bytes, workdir: str) -> bool:
-    """Whether a log's first line holds the work directory as JSON writes it (`needle`), or as one
-    of its JSON strings that spells it with an escape (`\\/`, `\\u002f`)."""
-    return needle in first or any((b"\\/" in token or b"\\u" in token) and _decodes_to(token, workdir)
-                                  for token in JSON_STRING.findall(first))
+    """Whether a log's first line holds the work directory as JSON writes it (`needle`), or as a
+    JSON string that spells it with an escape (`\\/`, `\\u002f`). The directory holds no quote, so
+    such a string runs from one quote in the line to the next, however a line that does not parse
+    pairs its quotes."""
+    return needle in first or any((b"\\/" in piece or b"\\u" in piece) and _decodes_to(b'"' + piece + b'"', workdir)
+                                  for piece in first.split(b'"')[1:-1])
 
 
 def _decodes_to(token: bytes, text: str) -> bool:
@@ -194,15 +202,26 @@ def _decodes_to(token: bytes, text: str) -> bool:
         return False
 
 
+def _record(raw: bytes | str):
+    """A line of a session log as JSON. A line that gives a key twice in one object reads here as the
+    last value and could read elsewhere as the first, so it does not parse (ValueError)."""
+    def unique(pairs):
+        keys = [key for key, _ in pairs]
+        if len(set(keys)) < len(keys):
+            raise ValueError("a key appears twice in one object")
+        return dict(pairs)
+    return json.loads(raw, object_pairs_hook=unique)
+
+
 def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list[str]]:
     """Every session log among `paths` whose thread started in `workdir`, by thread id, and what the
     search could not read. A JSON string spells the work directory either as `json.dumps` writes it
     or with an escape, `\\/` or `\\u`, since the directory holds no quote, backslash or control
     character. So a first line with neither cannot name it as its `cwd`, and only the others are
     parsed (the lanes hold tens of thousands of logs). One whose first line names it but does not
-    parse as a `session_meta` record, a session there with no thread id or a source this script
-    cannot read, and a thread whose logs differ are reported; a second log of a thread that matches
-    the first byte for byte is the same log."""
+    parse (`_record`) as a `session_meta` record, a session there with no thread id or a source this
+    script cannot read, and a thread whose logs differ are reported; a second log of a thread that
+    matches the first byte for byte is the same log."""
     needle = json.dumps(workdir, ensure_ascii=False).encode()
     found: dict[str, dict] = {}
     problems: list[str] = []
@@ -215,7 +234,7 @@ def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list
         if needle not in first and b"\\/" not in first and b"\\u" not in first:
             continue
         try:
-            record = json.loads(first)
+            record = _record(first)
         except (ValueError, RecursionError):
             if _names(first, needle, workdir):
                 problems.append(f"{path.name}: its first line names the work directory but does not parse")
@@ -350,14 +369,61 @@ def _plus(node) -> bool:
     return node.type == "binary_expression" and getattr(node.child_by_field_name("operator"), "type", None) == "+"
 
 
+def _numeric(node) -> bool:
+    """Whether a node is a number written out, perhaps in parentheses."""
+    if node.type == "parenthesized_expression" and len(_parts(node)) == 1:
+        return _numeric(_parts(node)[0])
+    return node.type == "number"
+
+
+def _number(literal: str) -> str | None:
+    """The string JavaScript makes of a number written out (`${0x7f}` builds "127", `${1e21}` "1e+21"
+    and `${127n}` "127"), or None for one a module refuses to compile (`017`, `1__0`, `1.5n`)."""
+    whole = WHOLE.fullmatch(literal.removesuffix("n"))
+    if whole is None:
+        return _number_string(float(literal.replace("_", ""))) if DECIMAL.fullmatch(literal) else None
+    base, digits = next((base, digits) for base, digits in zip((16, 8, 2, 10), whole.group("x", "o", "b", "d"))
+                        if digits is not None)
+    value = int(digits.replace("_", ""), base)
+    if literal.endswith("n"):
+        return str(value)
+    try:
+        return _number_string(float(value))
+    except OverflowError:  # past the largest double, which JavaScript rounds to Infinity
+        return "Infinity"
+
+
+def _number_string(x: float) -> str:
+    """ECMAScript's Number::toString for a number x ≥ 0: the fewest significant digits that give back
+    x (as Python's `repr` finds them), written out from 1e-6 up to 1e21 and with an exponent beyond."""
+    if x == math.inf:
+        return "Infinity"
+    if x == 0:
+        return "0"
+    mantissa, _, exponent = repr(x).partition("e")
+    whole, _, fraction = mantissa.partition(".")
+    digits = (whole + fraction).lstrip("0")
+    point = len(whole) + int(exponent or 0) - (len(whole + fraction) - len(digits))  # x = 0.digits × 10**point
+    digits = digits.rstrip("0")
+    if len(digits) <= point <= 21:
+        return digits + "0" * (point - len(digits))
+    if 0 < point <= 21:
+        return digits[:point] + "." + digits[point:]
+    if -6 < point <= 0:
+        return "0." + "0" * -point + digits
+    mantissa = digits[0] + ("." + digits[1:] if len(digits) > 1 else "")
+    return mantissa + ("e+" if point > 0 else "e-") + str(abs(point - 1))
+
+
 def _fold(node, src: bytes) -> str | None:
-    """The string a constant expression builds: a string, a number, a template whose substitutions
-    fold, or `+` of them. None for anything a script computes as it runs."""
+    """The string a constant expression builds: a string, a number as JavaScript writes it in a string
+    (`_number`), a template whose substitutions fold, or a `+` of them with a string on at least one
+    side (a `+` of two numbers adds them). None for anything a script computes as it runs."""
     kind = node.type
     if kind == "string":
         return _unescape("".join(_text(part, src) for part in node.named_children))
     if kind == "number":
-        return _text(node, src)
+        return _number(_text(node, src))
     if kind == "template_string":
         parts = []
         for part in node.named_children:
@@ -373,7 +439,10 @@ def _fold(node, src: bytes) -> str | None:
     if kind == "parenthesized_expression" and len(_parts(node)) == 1:
         return _fold(_parts(node)[0], src)
     if _plus(node):
-        left, right = _fold(node.child_by_field_name("left"), src), _fold(node.child_by_field_name("right"), src)
+        left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+        if _numeric(left) and _numeric(right):
+            return None
+        left, right = _fold(left, src), _fold(right, src)
         return None if left is None or right is None else left + right
     return None
 
@@ -667,11 +736,11 @@ def convert(path: Path, workdir: str) -> tuple[list[dict], dict]:
     served: set[str] = set()
     unparsed: dict[str, int] = {}  # each script the grammar cannot parse, by call id: its line
     replies: dict[str, list[bool]] = collections.defaultdict(list)  # by call id: whether each output reads as refused
-    with path.open() as fh:
+    with path.open("rb") as fh:  # bytes, so a line that is not UTF-8 does not parse rather than stopping the audit
         for n, raw in enumerate(fh, 1):
             try:
-                rec = json.loads(raw)
-            except ValueError:
+                rec = _record(raw)
+            except (ValueError, RecursionError):
                 found["flags"].append(f"line {n} does not parse")
                 continue
             if not isinstance(rec, dict):
