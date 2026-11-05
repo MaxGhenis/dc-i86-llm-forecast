@@ -175,18 +175,44 @@ def exists(path: Path) -> bool:
     return True
 
 
+def not_a_link(path: Path) -> Path:
+    """`path`, unless a link sits there, which stops the command, by name. What a link leads to lies
+    outside `runs/`: a command would read a run git does not hold, and the audit script would write
+    there."""
+    if os.path.islink(path):
+        raise SystemExit(f"{path} is a link, not a folder of runs or a run's own folder")
+    return path
+
+
 def run_dirs(runs: Path | None = None) -> list[Path]:
     """The folders in `runs` (by default `runs/`) that hold a meta.json, in order of their names. A `runs`
     this cannot list, or a folder in it where this cannot look for a meta.json (`exists`), could hold a
-    run, so either stops the command, by name."""
-    runs = RUNS if runs is None else runs
+    run, so either stops the command, by name, as a link does in place of `runs` or of a run's folder
+    (`not_a_link`)."""
+    runs = not_a_link(RUNS if runs is None else runs)
     if not exists(runs):
         return []
     try:
         folders = sorted(runs.iterdir())
     except OSError as error:
         raise SystemExit(f"cannot list {runs} ({type(error).__name__})") from None
-    return [p for p in folders if exists(p / "meta.json")]
+    return [not_a_link(p) for p in folders if exists(p / "meta.json")]
+
+
+def attempt_started(attempt: dict) -> bool:
+    """Whether subfleet's record of an attempt says it started: it gives a session or a start time, a
+    state past its launch or an outcome from a provider. subfleet writes none of these for an attempt
+    it never launched: that one holds `reserved`, or ends `failed` or `interrupted` with the outcome
+    class `unknown`."""
+    return bool(attempt.get("native_session_id") or attempt.get("started_at")
+                or attempt.get("state") in ("starting", "running", "finalizing", "succeeded")
+                or attempt.get("outcome_class") not in (None, "unknown"))
+
+
+def first_attempt(job, attempt) -> bool:
+    """Whether `attempt`, the id of the attempt a run collected, is the first of `job`, the run's job:
+    subfleet's attempt ids run <job>/a1, <job>/a2 and on. With no job to match, the id alone says."""
+    return attempt == f"{job}/a1" if job is not None else str(attempt).endswith("/a1")
 
 
 def now() -> str:

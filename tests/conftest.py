@@ -7,8 +7,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from hypothesis import settings  # noqa: E402
+
 from i86 import audit, runners  # noqa: E402
 from i86 import graph as graph_mod  # noqa: E402
+
+# These properties check what the code reads, not how fast: on a loaded host an example can take far
+# longer than Hypothesis's 200 ms deadline, which would fail the test for no fault of the code.
+settings.register_profile("no-deadline", parent=settings.default, deadline=None)
+settings.load_profile("no-deadline")
 
 
 class WaitedOnAPipe(BaseException):

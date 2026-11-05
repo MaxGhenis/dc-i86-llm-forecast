@@ -436,7 +436,7 @@ def _session_problem(run_dir: Path, rec: dict) -> str | None:
     if record is ABSENT:
         if len(roots) != 1:
             return f"it has no attempts on record and {len(roots)} main threads"
-        if collected is not None and not str(collected).endswith("/a1"):
+        if collected is not None and not runners.first_attempt(meta.get("job_id"), collected):
             return f"it has no attempts on record, and the run collected {collected}, not its job's first attempt"
         attempt_of = {}
     else:
@@ -460,8 +460,7 @@ def _session_problem(run_dir: Path, rec: dict) -> str | None:
         sessions = {a["attempt_id"]: a.get("native_session_id") for a in listed}
         if sessions.get(collected) != main:
             return "its main thread is not the collected attempt's session"
-        if any((a.get("native_session_id") or a.get("started_at")) and a.get("native_session_id") not in ids
-               for a in listed):
+        if any(runners.attempt_started(a) and a.get("native_session_id") not in ids for a in listed):
             return "an attempt that started names no session among its threads"
         named = [a["native_session_id"] for a in listed if a.get("native_session_id")]
         if len(set(named)) != len(named):

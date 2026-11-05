@@ -185,7 +185,10 @@ def test_the_run_folders_are_those_that_hold_a_meta_json(tmp_path, monkeypatch):
     (runs / "MOCK-meta-gone" / "meta.json").symlink_to(runs / "MOCK-nothing")
     assert runners.run_dirs() == [runs / "sol-1", runs / "sol-2"]
     assert runners.run_dirs(tmp_path / "MOCK-no-runs") == []
-    assert runners.run_dirs(runs / "MOCK-gone") == []
+    (runs / "MOCK-to-no-meta").symlink_to(runs / "MOCK-no-meta")
+    assert runners.run_dirs() == [runs / "sol-1", runs / "sol-2"]
+    with pytest.raises(SystemExit, match=r"runs/MOCK-gone is a link"):
+        runners.run_dirs(runs / "MOCK-gone")
     with pytest.raises(SystemExit, match=r"cannot list .*/runs/MOCK-file \(NotADirectoryError\)"):
         runners.run_dirs(runs / "MOCK-file")
 
@@ -235,3 +238,21 @@ def test_a_first_manifest_needs_no_dated_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no stamp")))
     assert cli.cmd_prereg(argparse.Namespace(no_stamp=True)) == 0
     assert "graph/graph.yaml" in (prereg / "SHA256SUMS").read_text()
+
+
+@pytest.mark.parametrize("linked", ["the run", "runs"])
+def test_a_link_in_place_of_a_run_or_of_runs_stops_prereg(tmp_path, monkeypatch, linked):
+    """Review 10: prereg hashed what a link led to under `runs/` names, though git would hold only the link."""
+    area(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no stamp")))
+    run = tmp_path / "runs" / "sol-1"
+    run.mkdir(parents=True)
+    (run / "meta.json").write_text("MOCK meta\n")
+    place = run if linked == "the run" else run.parent
+    place.rename(place.with_name("MOCK-outside"))
+    place.symlink_to(place.with_name("MOCK-outside"))
+    sums = tmp_path / "prereg" / "SHA256SUMS"
+    before = sums.read_text()
+    with pytest.raises(SystemExit, match=rf"{re.escape(str(place))} is a link"):
+        cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+    assert sums.read_text() == before

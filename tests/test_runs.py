@@ -119,7 +119,7 @@ def test_pooling_takes_only_current_prompt_audited_runs_with_no_prior_context(ar
 
 
 def test_a_run_with_suspect_calls_is_pooled_only_once_the_operator_lists_it(area, graph, capsys):
-    """Round-12 finding 3 (Opus): a suspect call may have read anything, so its run waits for a reader."""
+    """Round-12 finding 3 (Opus): a suspect call may have read anything, so its run waits for `--accept-suspect`."""
     _accepted_run(graph, "ok")
     call = {"tool": "Bash", "call": '{"command": "MOCK command"}', "why": "MOCK reason"}
     _accepted_run(graph, "odd-call", suspect=[call, call])
@@ -357,7 +357,7 @@ UNDER_EARLIER = [_thread("MOCK-earlier", None, spawns=1), _thread("MOCK-main", "
 
 
 # Review 9: the calls add up, but one is listed as a call no item of the thread made. Moving a suspect
-# search into the local calls pooled the run without the reader's leave.
+# search into the local calls pooled the run without `--accept-suspect`.
 RESORTED = {
     f"sol-resorted-{kind.replace(' ', '-')}": (_resorted(kind), ATTEMPTS, f"{JOB}/a2",
                                                "lists a call of a tool its items do not call, or more such calls than")
@@ -589,7 +589,7 @@ INCONSISTENT = {
     "sol-script-suspect-call-number": (_session(script=[{**CALL, "call": 1}]), ATTEMPTS, f"{JOB}/a2",
                                        "one thread lists a call other than as the audits list one"),
     # Review 8: a call a thread's audit read but does not sort, with the totals made to add up again.
-    # Dropping a suspect call so would pool the run without the reader's leave.
+    # Dropping a suspect call so would pool the run without `--accept-suspect`.
     "sol-suspect-dropped": (_unsorted("suspect"), ATTEMPTS, f"{JOB}/a2",
                             "one thread's audit sorts more or fewer calls than it read"),
     "sol-local-call-dropped": (_unsorted("local"), ATTEMPTS, f"{JOB}/a2",
@@ -844,7 +844,7 @@ def _simulated_counts(graph, monkeypatch, accept) -> dict:
        main=st.integers(0, 3), transcript=st.integers(0, 3), passed=st.booleans(), accept=st.booleans())
 def test_the_gate_admits_and_counts_as_its_rule_says(graph, threads, main, transcript, passed, accept):
     """Property (differential against the rule written out): a Codex run whose session audit holds up
-    is pooled exactly when that audit passed and the run has no suspect call or the reader accepted it;
+    is pooled exactly when that audit passed and the run has no suspect call or `--accept-suspect` names it;
     its count is the main thread's item calls as the longer of its two audits lists them, plus that
     thread's script calls and every call of every other thread; and `simulate` reports that count."""
     main %= len(threads)
@@ -1056,3 +1056,56 @@ def test_a_recovered_transcript_with_an_added_event_is_not_collected(area, monke
         f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "MOCK"}]}}) + "\n")
     assert not runners.seal(run_dir)
     assert runners.read_meta(run_dir)["collect_error"]
+
+
+@pytest.mark.parametrize("change, accepted", [
+    ({"state": "succeeded"}, False),
+    ({"state": "running"}, False),
+    ({"state": "failed", "outcome_class": "transient"}, False),
+    ({"state": "failed", "started_at": "MOCK"}, False),
+    ({"state": "failed", "outcome_class": "unknown", "finished_at": "MOCK"}, True),
+    ({"state": "interrupted", "outcome_class": "unknown", "finished_at": "MOCK"}, True),
+    ({"state": "reserved"}, True),
+    ({}, True),
+], ids=str)
+def test_an_attempt_the_record_says_ran_must_name_a_session_among_the_threads(area, graph, capsys, change, accepted):
+    """Review 10: the gate read an attempt as started only from its session or start time."""
+    session = _session(threads=[_thread("MOCK-main", None, spawns=1), _thread("MOCK-helper", "MOCK-main")])
+    attempts = {**ATTEMPTS, "attempts": [{"attempt_id": f"{JOB}/a1", "native_session_id": None, "started_at": None,
+                                          **change}, ATTEMPTS["attempts"][1]]}
+    _codex_run(graph, "sol-1", session, attempts=attempts)
+    assert ("sol-1" in cli.accepted_runs(graph, "sha")) is accepted
+    assert accepted or "an attempt that started names no session among its threads" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("collected, accepted", [(f"{JOB}/a1", True), ("MOCK-other-job/a1", False), (f"{JOB}/a2", False),
+                                                 (f"x{JOB}/a1", False)])
+def test_with_no_attempts_on_record_the_gate_wants_the_runs_own_first_attempt(area, graph, capsys, collected, accepted):
+    """Review 10: the gate read only the `/a1` at the end of the collected attempt's id."""
+    session = _session(threads=[_thread("MOCK-main", None, spawns=1), _thread("MOCK-helper", "MOCK-main")])
+    _codex_run(graph, "sol-1", session, attempts=None, collected=collected)
+    assert ("sol-1" in cli.accepted_runs(graph, "sha")) is accepted
+    assert accepted or "not its job's first attempt" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("state", ["reserved", "starting", "running", "finalizing", "succeeded", "failed", "interrupted",
+                                   "lost", "cancelled", "quarantined", None, ["MOCK"], {"MOCK": 1}])
+@pytest.mark.parametrize("outcome", [None, "unknown", "ok", "transient", ["MOCK"], {"MOCK": 1}])
+def test_a_session_or_a_start_time_always_says_an_attempt_started(state, outcome):
+    """Property over every state subfleet writes and fields of other types: a session or a start time says
+    so whatever else the record gives, and no field of an odd type raises."""
+    bare = {"state": state, "outcome_class": outcome}
+    assert runners.attempt_started({**bare, "native_session_id": "MOCK"})
+    assert runners.attempt_started({**bare, "started_at": "MOCK"})
+    ran = state in ("starting", "running", "finalizing", "succeeded") or outcome not in (None, "unknown")
+    assert runners.attempt_started(bare) is ran
+
+
+def test_a_link_in_place_of_a_run_or_of_runs_stops_simulate(area, graph, tmp_path):
+    """Review 10: what a link leads to lies outside `runs/`, where git holds none of it."""
+    _accepted_run(graph, "opus-1")
+    outside = tmp_path / "MOCK-outside"
+    (runners.RUNS / "opus-1").rename(outside)
+    (runners.RUNS / "opus-1").symlink_to(outside)
+    with pytest.raises(SystemExit, match=r"opus-1 is a link"):
+        cli.accepted_runs(graph, "sha")

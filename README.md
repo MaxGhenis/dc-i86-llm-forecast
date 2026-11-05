@@ -35,9 +35,8 @@ votes, dollars, jobs or birds. Yes/no questions take probabilities, and the ban'
 probability for each option. The Yes share takes a full cumulative distribution.
 
 **The cutoff contrast.** Comparing the 49.5% and 50.5% cells separates what passing changes from what
-a large margin reveals about voters. This follows the paired within-run design of
-[dc-mayor-llm-forecast](https://github.com/MaxGhenis/dc-mayor-llm-forecast), and the paired legal-state
-arms of Thesis's bill lane.
+a large margin reveals about voters. This paired within-run design follows the paired legal-state arms
+of Thesis's bill lane.
 
 Denver votes the same day, so DC's result cannot cause Denver's. The simulator interpolates Denver's
 question across 50% and holds it at 50% in both cutoff arms.
@@ -243,10 +242,11 @@ every review's inputs.
 output, readonly writes and expansions against the shells on generated and measured programs.
 Within its assumptions, a call in the subset reads nothing outside the work directory but what the
 tools load to run (libraries, locale data, user names) and the ignore files rg and ugrep consult,
-which only choose among the files they search. A call outside it is suspect, and whether it read
-anything is for a reader to judge from the call and the model's reasons before the run is pooled.
-The audit catches accidental and casual reads. A forecaster set on hiding one could make the read
-look like a call the model misreads, and then only the reader of the suspect calls stands in the way.
+which only choose among the files they search. A call outside it is suspect, since the audit cannot
+say what it read. Whoever pools the runs judges that from the call and the model's reasons, and pools
+a run with suspect calls only by naming it in `--accept-suspect`. The audit catches accidental and
+casual reads. A forecaster set on hiding one could make the read look like a call the model misreads,
+and then only whoever pools the runs could catch it.
 
 A Codex run's transcript holds only the collected attempt's main thread. Under Codex CLI 0.159,
 `codex exec --json` leaves out the sub-agents a forecaster spawns, which make tool calls of their own.
@@ -256,11 +256,15 @@ transcript of the attempt it collects. The lanes' session logs record every thre
 directory as the folder where it started, however the log's JSON spells the path. It compares paths as
 text, so it misses a thread whose log records another path to that folder, such as a symlink to it. It
 audits each thread's calls as `i86 audit` audits a transcript, and checks the collected main thread's
-calls against the transcript's, item by item.
+calls against the transcript's, item by item and in order.
 
 The script fails a run when:
 
-- a main thread belongs to none of the job's attempts, or an attempt that started left no log;
+- a main thread belongs to none of the job's attempts, or an attempt that started left no log. The
+  script counts an attempt as started when subfleet's record gives it a session, a start time, an
+  outcome class other than `unknown`, or the state `starting`, `running`, `finalizing` or `succeeded`;
+- subfleet has no attempts on record and the run collected anything but its own job's first attempt;
+- the run gives as its job anything but a string;
 - subfleet's record of the attempts names another job, skips an attempt, gives two attempts one
   session, or gives an attempt a sub-agent's thread as its session;
 - a thread descends from no main thread;
@@ -271,8 +275,10 @@ The script fails a run when:
   cannot encode, counts as none);
 - a session started in a folder inside the work directory, or at another path that names it;
 - the transcript records any thread but the collected attempt's main thread, or records calls that
-  differ from that thread's. The script reads calls and pairs ids as `i86 audit` does, so a message's
-  line can hold a call, and two ids that are numbers match only when they are equal;
+  differ from that thread's or come in another order. The script reads calls and pairs ids as
+  `i86 audit` does, so a message's line can hold a call, and two ids that are numbers match only when
+  they are equal. Two commands count as one call when they match as written, or when a shell reads
+  nothing but words from each and the same words from both;
 - the transcript holds any line but the thread's one start, events of its turns that hold no call, and
   items that each complete with the calls they started with;
 - a line of the transcript that starts or updates an item holds a call in its `message`, which
@@ -280,8 +286,8 @@ The script fails a run when:
 - a thread's `spawn_agent` calls do not match the sub-agents it started;
 - a thread ran a command anywhere but the work directory itself (a folder inside it counts as
   another), or in a folder the script cannot place: a relative path, a path with a `..` part, or a
-  file URL that names another host or holds a `?`, `#` or `%`, since each could belong to a folder's
-  name or to the URL's syntax;
+  file URL that names another host or holds a `?`, `#`, `%` or control character, since a folder's
+  name can hold any of these and a URL reader gives each another meaning or drops it;
 - a thread's log holds a line the script cannot read: one that does not parse, gives a key twice,
   nests more than 64 levels or holds a field of a type its checks cannot read;
 - two logs of one thread differ; or
@@ -337,7 +343,8 @@ edit after it.
 stamp no longer matches the stamped list. It stops, by name, at anything but a regular file in place
 of a run's file, at any file it cannot read, and at a run's file it cannot look for, in a folder it
 may not search. `prereg`, `simulate`, `collect`, `check`, `i86 audit` and the script all stop, by
-name, at a `runs/` they cannot list and at a run folder they may not search. The script also stops,
+name, at a `runs/` they cannot list, at a run folder they may not search, and at a link in place of
+`runs/` or of a run folder, since git keeps the link and not what it leads to. The script also stops,
 by name, at a collected run's `meta.json` that it cannot read as a JSON object.
 
 The four GPT-6.1 Sol runs left 24 threads: 18 sub-agents and six main threads, since sol-1 and sol-3
@@ -347,8 +354,8 @@ address of every page the web tool served them and fails no call. It flags one c
 sub-agent in sol-3's first attempt asked the web tool to open
 `https://lim s.dccouncil.gov/Legislation/B25-0122`, with a space inside the Council's `lims` host
 name. The audit cannot tell where a host named `lim` leads; the web tool answered "Unable to resolve
-open call due to invalid ref_id argument" and served no page for it. After reading that call, a
-reader pooled sol-3 into the committed outputs with `simulate --accept-suspect sol-3`.
+open call due to invalid ref_id argument" and served no page for it. A Claude Code session read that
+call and pooled sol-3 into the committed outputs with `simulate --accept-suspect sol-3`.
 
 ## Files
 

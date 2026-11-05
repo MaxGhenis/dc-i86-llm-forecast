@@ -14,6 +14,7 @@ the latest.
 | `2026-10-26-revised/` | 14:40Z | the same files after the changes below | 973255 |
 | `2026-11-04-sessions/` | 00:31Z | the same files after the changes below, plus the Sol runs' session-log audits and attempts | 974462 |
 | `2026-11-04-served/` | 05:19Z | the same files after the changes below | 974487 |
+| `2026-11-05-wording/` | 16:01Z | the same files after the changes below | pending |
 
 To check a manifest, run `shasum -a 256 -c prereg/<folder>/SHA256SUMS` from the repository root; it
 lists any file whose bytes have changed. `ots verify prereg/<folder>/SHA256SUMS.ots` checks the proof
@@ -50,8 +51,8 @@ After `2026-10-26-revised/`:
   run's `codex-sessions/audit.json` and `attempts.json`.
 - That audit found one suspect call, in sol-3. `simulate` now adds that call to sol-3's count, so one
   cell of `outputs/summary.md`, sol-3's suspect calls, changed from 0 to 1. The summary's note on
-  suspect calls now names the session logs. A reader admitted the call with `--accept-suspect sol-3`,
-  so sol-3 stays in the pool.
+  suspect calls now names the session logs. A Claude Code session read the call and admitted it with
+  `--accept-suspect sol-3`, so sol-3 stays in the pool.
 - Every other file in the previous manifest still matches.
 
 After `2026-11-04-sessions/`:
@@ -118,4 +119,16 @@ After `2026-11-04-served/`:
   they may not search, and the audit at a collected run's `meta.json` that it cannot read as a JSON
   object. Re-auditing the four Sol runs leaves every `codex-sessions/audit.json` and `attempts.json`
   byte for byte the same.
-- Every file in this manifest still matches.
+- The audit's check of the transcript now fails a run whose transcript records the log's calls in
+  another order. It counts two commands as one call when they match as written, or when a shell reads
+  nothing but words from each and the same words from both. The audit and `simulate` count an attempt
+  as started when subfleet's record gives it a session, a start time, an outcome class other than
+  `unknown`, or the state `starting`, `running`, `finalizing` or `succeeded`. With no attempts on
+  record, they fail a run that collected anything but its own job's first attempt. The audit also
+  flags a command that ran in a folder whose file URL holds a control character, and a run that gives
+  as its job anything but a string. `prereg`, `simulate` and the audit stop at a link in place of
+  `runs/` or of a run folder. Re-auditing the four Sol runs leaves every `codex-sessions/audit.json`
+  and `attempts.json` byte for byte the same.
+- The summary's note on suspect calls now says the audit cannot clear them, and that `simulate` pools
+  such a run only when `--accept-suspect` names it. No other line of `outputs/summary.md` changed.
+- Every other file in this manifest still matches.

@@ -28,10 +28,10 @@ transcript is the collected attempt's alone. For each Codex run this script:
    `runs/<label>/codex-sessions/attempts.json`, as a new file where nothing is yet, never replacing a
    different record; a kept file that is not a regular file of JSON holding a list of attempts stops the
    script. The record must list the job's attempts a1, a2 and on. Each main thread must be the session
-   of one of them, each attempt that started must name a session of its own with a log, a main thread,
-   and the collected attempt's main thread must be the thread the committed transcript records. Without
-   attempts on record, a run may have one main thread only, and must have collected its job's first
-   attempt;
+   of one of them, each attempt that started (`runners.attempt_started`) must name a session of its own
+   with a log, a main thread, and the collected attempt's main thread must be the thread the committed
+   transcript records. Without attempts on record, a run may have one main thread only, and must have
+   collected its own job's first attempt;
 3. copies the logs into `runs/<label>/codex-sessions/`, each as a new file where nothing is yet, never
    replacing a different file. It writes each copy, as it writes `attempts.json`, to a part file beside
    it, syncs that to the disk and links it into place, so the copy holds the whole log or nothing, even
@@ -43,11 +43,13 @@ transcript is the collected attempt's alone. For each Codex run this script:
    this public repository; `audit.json` records each one's SHA-256;
 4. turns each log's completed items into the `codex exec --json` items `i86 audit` reads (web searches,
    shell commands, messages) and audits them with `audit.audit_transcript`, as `i86 audit` audits a
-   transcript. The collected main thread's items must match its transcript's, item by item, as
-   `audit` reads their calls (a message's line can hold one) and keys their ids (numbers exactly),
-   and the transcript may hold no other line but the thread's one start, events of its turns that
-   hold no call, and items that each complete with the calls they started with. A line that starts or
-   updates an item may hold no call in its `message`, which `audit` counts there and then;
+   transcript. The collected main thread's items must match its transcript's, item by item and in the
+   same order, as `audit` reads their calls (a message's line can hold one) and keys their ids (numbers
+   exactly). Two commands match when they match as written, or when a shell reads nothing but words from
+   each and the same words from both (`_words`). The transcript may hold no other line but the thread's
+   one start, events of its turns that hold no call, and items that each complete with the calls they
+   started with. A line that starts or updates an item may hold no call in its `message`, which `audit`
+   counts there and then;
 5. reads what the items miss. An item records only part of what a `tools.web__run` call opens, nothing
    of what a click opens, and nothing for a call whose cell never finished. So it checks every `exec`
    script's text, and each string the script writes out or builds from constants with its escapes
@@ -69,8 +71,8 @@ transcript is the collected attempt's alone. For each Codex run this script:
    (a list where Codex writes a string, say); a cite marker in a tool's reply it cannot read; a shell
    command a script calls with no completed item to audit; or a command run anywhere but the work
    directory itself (a folder inside it counts as another) or in a folder this script cannot place: a
-   relative path, a path with a `..` part, or a file URL that names another host or holds a `?`, `#` or
-   `%`, each of which could belong to a folder's name or to the URL's syntax;
+   relative path, a path with a `..` part, or a file URL that names another host or holds a `?`, `#`, `%`
+   or control character, each of which could belong to a folder's name or to the URL's syntax;
 7. writes `runs/<label>/codex-sessions/audit.json` to a part file beside the old one, syncs it to the
    disk and renames it into place, so another name of the old file (a hard link) keeps its bytes.
 
@@ -81,8 +83,8 @@ script returns to the model reaches it as the script's output, which the log rec
     .venv/bin/python scripts/audit_codex_sessions.py [LABEL ...] [--lanes DIR]
 
 It exits 1 if any thread fails the audit or any check above flags something. It stops, with a
-message, at a `runs/` it cannot list, a folder in it that it cannot search, and a run's meta.json that
-it cannot read.
+message, at a `runs/` it cannot list, a folder in it that it cannot search, a link in place of `runs/`
+or of a run folder, and a run's meta.json that it cannot read.
 """
 
 from __future__ import annotations
@@ -120,8 +122,20 @@ LANES = Path.home() / ".subfleet" / "lanes"
 # Where a lane's Codex keeps its session logs, under the lanes folder: one folder per part.
 LOG_PARTS = ("*", "sessions", "*", "*", "*", "rollout-*.jsonl")
 FOLDER = "codex-sessions"
-# The part files `_part_file` makes there, `.<name>.<random>.part`, for the files this script writes.
-PART = re.compile(r"\.(?:audit\.json|attempts\.json|rollout-.*\.jsonl)\.[^/]+\.part")
+# The part files `_part_file` makes there, for the files this script writes. Each name leaves out the
+# name of the file it becomes, which may take all the 255 bytes a name can hold.
+PART = re.compile(r"\.audit-[^/]+\.part")
+# What `_words` reads: the characters a shell takes as plain text outside quotes, and the spaces and tabs
+# between words. `=` has rules of its own there. A character past the Latin-1 controls counts as text.
+BARE = r"a-zA-Z0-9_\-./,:@+%=\]\u00a0-\U0010ffff"
+_BLANKS = re.compile(r"[ \t]*")
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_WORD_PART = re.compile(rf"""'[^']*'|"(?:[^"\\$`]|\\[^\n])*"|\\[^\n]|[{BARE}]+""")
+# Words a shell reads as its own syntax at the head of a command, as zsh's `reswords` and bash's
+# `compgen -k` list them, less those that hold a character outside `BARE`, which keep a command as written.
+LEADERS = frozenset({"case", "coproc", "declare", "do", "done", "elif", "else", "end", "esac", "export", "fi",
+                     "float", "for", "foreach", "function", "if", "in", "integer", "local", "nocorrect",
+                     "readonly", "repeat", "select", "then", "time", "typeset", "until", "while", "]]"})
 # How many levels of objects and arrays a log line may nest. The Sol runs' logs nest at most 9; a line
 # that nests nearly as deep as Python's parser reads (about 10,000 here) can parse and then stop a
 # later step that writes its items out as JSON.
@@ -160,7 +174,6 @@ SERVED = re.compile(r"\(([^()\s-]*)\)(?:\s|\\[nrt])*citeturn\d+[a-z]
 LINK = re.compile("cite\\d+†[^-]*")
 # How Codex reports a script V8 refused to compile: it failed with a SyntaxError and printed nothing.
 REFUSED = re.compile(r"Script failed\nWall time [0-9.]+ seconds\nOutput:\n")
-FIRST_ATTEMPT = re.compile(r"/a1\Z")  # subfleet's attempt ids run <job>/a1, <job>/a2, ...
 # The `codex exec --json` events that hold no item: a thread's start, and its turns' events.
 TURN_EVENTS = {"thread.started", "turn.started", "turn.completed", "turn.failed", "error"}
 # What a 0.159 session log holds, besides the calls this script reads. Anything else is flagged.
@@ -416,11 +429,11 @@ def find_threads(paths: list[Path], workdir: str) -> tuple[dict[str, dict], list
 
 
 def _part_file(path: Path, data: bytes) -> str:
-    """A new file of this script's own beside `path`, named `.<name>.<random>.part` (`PART`), that holds
+    """A new file of this script's own beside `path`, named `.audit-<random>.part` (`PART`), that holds
     `data`, synced to the disk (fsync), with the mode `open` gives a new file rather than mkstemp's
     owner-only one: its path. A write that fails, up to the last bytes the file takes when it closes,
     removes it."""
-    fd, part = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".part")
+    fd, part = tempfile.mkstemp(dir=path.parent, prefix=".audit-", suffix=".part")
     try:
         with os.fdopen(fd, "wb") as fh:
             mask = os.umask(0)
@@ -521,7 +534,7 @@ def attempts(run_dir: Path, meta: dict) -> dict | None:
     no job, or none on record."""
     kept = run_dir / FOLDER / "attempts.json"
     job = meta.get("job_id")
-    info = subfleet_record(job) if job else None
+    info = subfleet_record(job) if job and isinstance(job, str) else None
     fresh = None
     if isinstance(info, dict) and isinstance(info.get("attempts"), list):
         fresh = {"job_id": job, "accepted_attempt_id": (info.get("job") or {}).get("accepted_attempt_id"),
@@ -559,15 +572,17 @@ def _plain(path: str) -> str | None:
 def local_path(cwd) -> str | None:
     """A CommandExecution's cwd (a file:// URL or a path) as a path. A file URL that names a host other
     than this one (`localhost`, or none) names no folder here. Nor can this script tell which folder a
-    file URL with a `?`, `#` or `%` names: Codex may write a path into the URL as it stands, so each
-    could belong to a folder's name or to the URL's syntax (a query, a fragment or an escape), and the
-    two readings name different folders. Either comes back as written, a path no check places."""
+    file URL with a `?`, `#`, `%` or control character names: Codex may write a path into the URL as it
+    stands, so each could belong to a folder's name or to the URL's syntax (a query, a fragment or an
+    escape; `urlparse` drops a tab, a line feed and a carriage return), and the two readings name
+    different folders. Either comes back as written, a path no check places."""
     if not isinstance(cwd, str) or not cwd:
         return None
     if not cwd.startswith("file:"):
         return cwd
     url = urlparse(cwd)
-    return url.path if url.netloc.lower() in ("", "localhost") and not any(c in cwd for c in "?#%") else cwd
+    unclear = any(c in "?#%" or c < " " or c == "\x7f" for c in cwd)
+    return url.path if url.netloc.lower() in ("", "localhost") and not unclear else cwd
 
 
 def web_action(action):
@@ -1109,7 +1124,7 @@ def convert(path: Path, workdir: str) -> tuple[list[dict], dict]:
                     if place is None:
                         found["flags"].append(f"line {n}: a command ran in {cwd[:200]}, a path this script cannot "
                                               "place: relative, with a `..` part, or a file URL on another host or "
-                                              "with a `?`, `#` or `%`")
+                                              "with a `?`, `#`, `%` or control character")
                     elif place != _plain(workdir):
                         found["flags"].append(f"line {n}: a command ran in {cwd[:200]}, not in the work directory "
                                               "itself (a folder inside it counts as another)")
@@ -1148,15 +1163,47 @@ def convert(path: Path, workdir: str) -> tuple[list[dict], dict]:
     return lines, found
 
 
-def _calls(lines: list[dict]) -> dict[tuple, tuple[str, list]]:
-    """Each completed item's calls, as `audit` reads them, in the order the items complete (so that an
-    item that repeats another's id still counts), under its id's key as `audit` makes it
-    (`audit._id_key`: numbers alike only when equal, however close) beside the id as JSON writes it. An
-    item counts only when `audit` reads a call from its line, which it reads from a tool use in the
-    line's `message` as well as from the item: a message, reasoning, a to-do list or an error holds
-    none of its own. A shell command is compared as the words it splits into: the transcript quotes
-    the command the log keeps as a list."""
-    out: dict[tuple, tuple[str, list]] = {}
+def _words(command: str) -> list[str] | str:
+    """The words a shell reads from a command, when words are all it reads there; otherwise the command
+    as written. Single quotes, double quotes and backslashes may spell a word any way they spell it in
+    a shell. Anything else a shell acts on keeps the command as written, whatever `shlex.split` would
+    make of it: a character outside `BARE` outside quotes (`;`, `$`, `*`, `>`, a line feed), a `$` or a
+    backtick in double quotes, a backslash that continues a line, a bare `=` with nothing before it in
+    its word but empty quotes (zsh expands it), a bare `=` in the first word (an assignment) or a first
+    word in `LEADERS`. So does any control character but a tab or a line feed, in quotes as well: bash
+    3.2 reads a backslash and a DEL in double quotes otherwise."""
+    if _CONTROL.search(command):
+        return command
+    words: list[str] = []
+    i = _BLANKS.match(command).end()
+    while i < len(command):
+        word = ""
+        while part := _WORD_PART.match(command, i):
+            text = part[0]
+            if text[0] == "'":
+                word += text[1:-1]
+            elif text[0] == '"':
+                word += re.sub(r'\\([$`"\\])', r"\1", text[1:-1])
+            elif text[0] == "\\":
+                word += text[1]
+            elif "=" in text and (not words or (not word and text[0] == "=")):
+                return command
+            else:
+                word += text
+            i = part.end()
+        if i < len(command) and command[i] not in " \t":
+            return command
+        words.append(word)
+        i = _BLANKS.match(command, i).end()
+    return command if words and words[0] in LEADERS else words
+
+
+def _item_calls(lines: list[dict]):
+    """(its id's key, the id as JSON writes it, its calls) for each completed item from whose line `audit`
+    reads a call, in order. `audit` reads a call from a tool use in the line's `message` as well as from
+    the item: a message, reasoning, a to-do list or an error holds none of its own. `audit._id_key` keys
+    an id, so numbers match only when equal, however close. A shell command counts as its words
+    (`_words`): the transcript quotes the command the log keeps as a list."""
     for line in lines:
         item = line.get("item")
         if line.get("type") != "item.completed" or not isinstance(item, dict):
@@ -1164,14 +1211,18 @@ def _calls(lines: list[dict]) -> dict[tuple, tuple[str, list]]:
         calls = []
         for tool, inp in audit._tool_calls(line):
             if tool == "shell" and isinstance(inp, dict) and isinstance(inp.get("command"), str):
-                try:
-                    inp = {**inp, "command": shlex.split(inp["command"])}
-                except ValueError:
-                    pass
+                inp = {**inp, "command": _words(inp["command"])}
             calls.append([tool, json.dumps(inp, sort_keys=True, default=str)])
-        if not calls:
-            continue
-        out.setdefault(audit._id_key(item.get("id")), (json.dumps(item.get("id")), []))[1].append(calls)
+        if calls:
+            yield audit._id_key(item.get("id")), json.dumps(item.get("id")), calls
+
+
+def _calls(lines: list[dict]) -> dict[tuple, tuple[str, list]]:
+    """Each item's calls (`_item_calls`) under its id's key, beside the id as JSON writes it, in the order
+    the items complete, so that an item that repeats another's id still counts."""
+    out: dict[tuple, tuple[str, list]] = {}
+    for key, name, calls in _item_calls(lines):
+        out.setdefault(key, (name, []))[1].append(calls)
     return out
 
 
@@ -1203,9 +1254,10 @@ def _id_and_calls(line: dict) -> tuple:
 
 
 def check_transcript(transcript: Path, log_lines: list[dict]) -> dict:
-    """Whether the committed transcript records the same calls as the main thread's log, item by item,
-    and no other line from which `audit` reads a call. Each completed item is compared by its id, with
-    any call in its line's `message`. An item started or updated must complete with the calls it
+    """Whether the committed transcript records the same calls as the main thread's log, item by item
+    and in the same order, and no other line from which `audit` reads a call. Each completed item is
+    compared by its id, with any call in its line's `message`; a call a script writes, then one that
+    runs it, reads otherwise the other way round. An item started or updated must complete with the calls it
     started with, paired as `audit` pairs them: `audit` audits one that never completes as it started.
     Its line may hold no call in a `message`, which `audit` audits there and then, as a call of its own.
     Every other line must be the thread's one start or a turn's event, from which `audit` reads no call.
@@ -1240,12 +1292,16 @@ def check_transcript(transcript: Path, log_lines: list[dict]) -> dict:
             unread.append(number)
     unread += [number for _, _, number in begun]
     mine, theirs = _calls(log_lines), _calls(completed)
+    both = mine.keys() & theirs.keys()
+    moved = {ours for ours, others in zip((item[0] for item in _item_calls(log_lines) if item[0] in both),
+                                          (item[0] for item in _item_calls(completed) if item[0] in both))
+             if ours != others}
     return {"items": sum(len(calls) for _, calls in theirs.values()),
             "only_in_transcript": [*sorted(name for key, (name, _) in theirs.items() if key not in mine),
                                    *(f"line {n}" for n in sorted(set(unread)))],
             "only_in_log": sorted(name for key, (name, _) in mine.items() if key not in theirs),
             "different": sorted(name for key, (name, calls) in theirs.items()
-                                if key in mine and calls != mine[key][1])}
+                                if key in mine and (calls != mine[key][1] or key in moved))}
 
 
 def audit_thread(path: Path, workdir: str) -> tuple[dict, dict, list[dict]]:
@@ -1286,6 +1342,8 @@ def _meta(run_dir: Path) -> dict:
 
 
 def audit_run(run_dir: Path, lanes: Path) -> dict:
+    runners.not_a_link(run_dir.parent)
+    runners.not_a_link(run_dir)
     meta = _meta(run_dir)
     # A link in place of either would take this script's writes wherever it leads.
     if os.path.islink(run_dir / FOLDER) or _present(run_dir / FOLDER) and not os.path.isdir(run_dir / FOLDER):
@@ -1318,6 +1376,8 @@ def audit_run(run_dir: Path, lanes: Path) -> dict:
         threads = {}
         problems = [f"the run gives {json.dumps(workdir)[:200]} as its work directory, not an absolute path"]
     problems = [*unlisted, *problems]
+    if meta.get("job_id") is not None and not isinstance(meta["job_id"], str):
+        problems.append(f"the run gives {json.dumps(meta['job_id'])[:200]} as its job, not a string")
     roots = sorted((t for t, v in threads.items() if v["spawned_by"] is None), key=lambda t: threads[t]["started"] or "")
     report = {"run": run_dir.name, "workdir": workdir, "threads": [], "missing": [], "flags": list(problems),
               "orphans": sorted(t for t, v in threads.items() if v["spawned_by"] and v["spawned_by"] not in threads)}
@@ -1344,7 +1404,7 @@ def audit_run(run_dir: Path, lanes: Path) -> dict:
             if sid is not None and not isinstance(sid, str):
                 report["flags"].append(f"subfleet's record gives attempt {attempt.get('attempt_id')} a session this "
                                        f"script cannot read: {json.dumps(sid)[:200]}")
-            elif not sid and attempt.get("started_at"):
+            elif not sid and runners.attempt_started(attempt):
                 report["flags"].append(f"subfleet records no session for attempt {attempt.get('attempt_id')}, "
                                        "which started")
         named = [(a["native_session_id"], a.get("attempt_id")) for a in record["attempts"]
@@ -1366,7 +1426,7 @@ def audit_run(run_dir: Path, lanes: Path) -> dict:
     elif len(roots) != 1:
         report["flags"].append(f"{len(roots)} threads started by codex exec in the work directory and no attempts "
                                "on record; expected 1")
-    elif collected is not None and not FIRST_ATTEMPT.search(str(collected)):
+    elif collected is not None and not runners.first_attempt(meta.get("job_id"), collected):
         # An earlier attempt may have left threads whose logs are gone; without the record, nothing says.
         report["flags"].append(f"no attempts on record, and the run collected {collected}, not its job's first "
                                "attempt (<job>/a1)")

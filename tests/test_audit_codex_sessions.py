@@ -18,10 +18,10 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from hypothesis import event, example, given, settings
+from hypothesis import HealthCheck, assume, event, example, given, settings
 from hypothesis import strategies as st
 
-from i86 import cli
+from i86 import audit, cli
 
 spec = importlib.util.spec_from_file_location(
     "audit_codex_sessions", Path(__file__).parent.parent / "scripts" / "audit_codex_sessions.py")
@@ -544,9 +544,10 @@ def test_a_new_file_reaches_the_disk_before_it_takes_its_name(tmp_path, monkeypa
 
 
 # A child process that runs `audit_run` on a MOCK run and dies (SIGKILL) part way through writing the
-# first file whose name holds `target`, whether the script opens it with `os.open` (as `tempfile` does),
-# `open` or `Path.open`: half the bytes on the disk, then gone, as `kill -9`, the system's out-of-memory
-# killer or a crash would leave it. It patches its own `os`, `io` and `builtins`, so only it dies.
+# first file whose name, or whose part file's final name, holds `target`, whether the script opens it
+# with `os.open` (as `tempfile` does), `open` or `Path.open`: half the bytes on the disk, then gone, as
+# `kill -9`, the system's out-of-memory killer or a crash would leave it. It patches its own `os`, `io`,
+# `builtins` and `_part_file`, so only it dies.
 DIES_PART_WAY = """
 import builtins, importlib.util, io, os, signal, sys
 from pathlib import Path
@@ -554,12 +555,17 @@ script, run, lanes, target = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("audit_codex_sessions", script)
 acs = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(acs)
-names, real_open, real_io_open = {}, os.open, io.open
+names, real_open, real_io_open, real_part_file, writing = {}, os.open, io.open, acs._part_file, [""]
+
+
+def part_file(path, data):
+    writing[0] = path.name
+    return real_part_file(path, data)
 
 
 def opened(path, flags, *args, **kwargs):
     fd = real_open(path, flags, *args, **kwargs)
-    names[fd] = os.path.basename(path)
+    names[fd] = writing[0] + os.path.basename(path)
     return fd
 
 
@@ -591,7 +597,7 @@ def opened_file(file, mode="r", *args, **kwargs):
     return DiesPartWay(fh, names.get(file, "") if isinstance(file, int) else os.path.basename(os.fspath(file)))
 
 
-os.open, io.open, builtins.open = opened, opened_file, opened_file
+os.open, io.open, builtins.open, acs._part_file = opened, opened_file, opened_file, part_file
 acs.audit_run(Path(run), Path(lanes))
 """
 
@@ -617,7 +623,7 @@ def test_a_run_that_dies_part_way_through_a_write_leaves_nothing_at_the_files_na
     _, err = child.communicate(timeout=300)
     assert child.returncode == -signal.SIGKILL, err
     parts = [name for name in os.listdir(folder) if acs.PART.fullmatch(name)]
-    assert len(parts) == 1 and target in parts[0]
+    assert len(parts) == 1
     after = {name: (folder / name).read_bytes() for name in os.listdir(folder) if name not in parts}
     if target == "audit.json":
         assert after == before
@@ -640,13 +646,13 @@ def test_a_part_file_a_run_left_is_removed_and_one_this_script_cannot_remove_sto
     add_parent(lanes, workdir, spawned=())
     folder = run / "codex-sessions"
     folder.mkdir()
-    for name in (".audit.json.MOCK1234.part", ".attempts.json.MOCK1234.part", ".rollout-MOCK-parent.jsonl.MOCK1234.part",
-                 ".MOCK-notes.part", "MOCK-audit.json.part", ".audit.json.MOCK1234"):
+    for name in (".audit-MOCK1234.part", ".audit-MOCK\n5678.part", ".audit.json.MOCK1234.part", ".MOCK-notes.part",
+                 "MOCK-audit.json.part", ".audit-MOCK1234"):
         (folder / name).write_text("MOCK part\n")
     assert acs.audit_run(run, lanes)["passed"]
-    assert sorted(os.listdir(folder)) == [".MOCK-notes.part", ".audit.json.MOCK1234", "MOCK-audit.json.part",
-                                          "audit.json", "rollout-MOCK-parent.jsonl"]
-    stuck = folder / ".audit.json.MOCK5678.part"
+    assert sorted(os.listdir(folder)) == [".MOCK-notes.part", ".audit-MOCK1234", ".audit.json.MOCK1234.part",
+                                          "MOCK-audit.json.part", "audit.json", "rollout-MOCK-parent.jsonl"]
+    stuck = folder / ".audit-MOCK5678.part"
     stuck.write_text("MOCK part\n")
     real = os.unlink
 
@@ -656,9 +662,59 @@ def test_a_part_file_a_run_left_is_removed_and_one_this_script_cannot_remove_sto
         return real(path, *args, **kwargs)
 
     monkeypatch.setattr(acs.os, "unlink", unlink)
-    with pytest.raises(SystemExit, match=r"this script cannot remove .*/\.audit\.json\.MOCK5678\.part, a part file a "
+    with pytest.raises(SystemExit, match=r"this script cannot remove .*/\.audit-MOCK5678\.part, a part file a "
                                          r"run of it left \(PermissionError\)"):
         acs.audit_run(run, lanes)
+
+
+@pytest.mark.parametrize("name", ["rollout-" + "M" * 241 + ".jsonl", "rollout-MOCK\nparent.jsonl"],
+                         ids=["every byte a name can hold", "a line feed"])
+def test_a_log_is_kept_whatever_its_name_and_its_part_file_goes(area, name):
+    """Review 10: a part file's name held the kept file's, so a log whose name took more than 240 bytes
+    could not be kept, and a part file whose name held a line feed stayed for good. A part file's name
+    now leaves out the kept file's."""
+    lanes, run, workdir = area
+    log = write_log(lanes, name, root_meta(workdir), items=[search("MOCK main query")])
+    assert acs.audit_run(run, lanes)["passed"]
+    folder = run / "codex-sessions"
+    assert sorted(os.listdir(folder)) == sorted(["audit.json", name])
+    assert (folder / name).read_bytes() == log.read_bytes()
+
+
+@given(name=st.text(st.characters(blacklist_characters="/\x00"), min_size=1, max_size=40))
+def test_a_part_file_never_goes_by_the_name_of_a_file_this_script_keeps(name):
+    """Property: the removal of part files can reach neither a kept log nor a record, whatever the log's
+    name, and it reaches each name `_part_file` can give."""
+    assert not any(acs.PART.fullmatch(kept) for kept in (f"rollout-{name}.jsonl", "audit.json", "attempts.json"))
+    assert acs.PART.fullmatch(f".audit-{name}.part")
+
+
+def test_a_part_file_takes_the_name_the_removal_looks_for(tmp_path):
+    part = acs._part_file(tmp_path / ("rollout-" + "M" * 241 + ".jsonl"), b"MOCK\n")
+    assert acs.PART.fullmatch(os.path.basename(part))
+
+
+@pytest.mark.parametrize("linked", ["the run", "runs"])
+def test_a_link_in_place_of_a_run_or_of_runs_stops_the_script_before_it_writes(area, linked):
+    """Review 10: the script stopped at a link in place of `codex-sessions`, but a link in place of the
+    run took its writes wherever it led, outside `runs/`."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    place = run if linked == "the run" else run.parent
+    outside = place.with_name("MOCK-outside")
+    place.rename(outside)
+    place.symlink_to(outside)
+    before = sorted(str(p) for p in outside.rglob("*"))
+    with pytest.raises(SystemExit, match=rf"{re.escape(str(place))} is a link"):
+        acs.audit_run(run, lanes)
+    assert sorted(str(p) for p in outside.rglob("*")) == before
+
+
+def test_a_link_among_the_runs_stops_the_script_with_no_labels(area):
+    lanes, run, workdir = area
+    (run.parent / "MOCK-link").symlink_to(run)
+    with pytest.raises(SystemExit, match=r"MOCK-link is a link"):
+        acs.codex_runs()
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root searches any folder")
@@ -1128,6 +1184,129 @@ def test_a_command_compares_by_its_words(area):
                                     "exit_code": 0, "status": "completed"}])
     report = acs.audit_run(run, lanes)
     assert report["transcript_check"]["different"] == [] and report["passed"]
+
+
+def shell_item(item_id: str, text: str) -> dict:
+    """A command as `codex exec --json` writes it in a transcript: one string, quoted."""
+    return {"id": item_id, "type": "command_execution", "command": text, "aggregated_output": "", "exit_code": 0,
+            "status": "completed"}
+
+
+@pytest.mark.parametrize("program, theirs", [
+    ("cd MOCK;pwd", "/bin/zsh -lc 'cd MOCK';pwd"),
+    ("echo $MOCK", "/bin/zsh -lc 'echo '$MOCK"),
+    ("$(printf MOCK)", '/bin/zsh -lc "$(printf MOCK)"'),
+    ("`printf MOCK`", '/bin/zsh -lc "`printf MOCK`"'),
+    ("MOCK*", "/bin/zsh -lc MOCK*"),
+    ("MOCK?", "/bin/zsh -lc MOCK?"),
+    ("[MOCK]", "/bin/zsh -lc [MOCK]"),
+    (">MOCK", "/bin/zsh -lc >MOCK"),
+    ("<MOCK", "/bin/zsh -lc <MOCK"),
+    ("MOCK&", "/bin/zsh -lc MOCK&"),
+    ("MOCK|cat", "/bin/zsh -lc MOCK|cat"),
+    ("(MOCK)", "/bin/zsh -lc (MOCK)"),
+    ("~/MOCK", "/bin/zsh -lc ~/MOCK"),
+    ("{a,b}", "/bin/zsh -lc {a,b}"),
+    ("MOCK#", "/bin/zsh -lc MOCK#"),
+], ids=lambda value: value)
+def test_a_transcript_command_a_shell_reads_otherwise_fails(area, program, theirs):
+    """Review 10: the check compared `shlex.split`'s words, which read `;`, `$`, `*` or `>` outside quotes as
+    plain text: `/bin/zsh -lc 'cd MOCK';pwd` split as the log's `/bin/zsh -lc 'cd MOCK;pwd'` did, though
+    the first prints another folder. Each pair here splits alike and runs otherwise."""
+    lanes, run, workdir = area
+    assert shlex.split(shlex.join(["/bin/zsh", "-lc", program])) == shlex.split(theirs)
+    add_parent(lanes, workdir, spawned=(), items=[command(program, workdir, "MOCK-1")])
+    write_transcript(run, PARENT, [shell_item("MOCK-1", theirs)])
+    report = acs.audit_run(run, lanes)
+    assert report["transcript_check"]["different"] == ['"MOCK-1"']
+    assert any("record different calls" in flag for flag in report["flags"]) and not report["passed"]
+
+
+def test_a_transcript_command_that_runs_what_the_log_keeps_as_one_word_fails(area):
+    """Review 10: a log that keeps the words `echo` and `MOCK;echo` and a transcript that writes
+    `echo MOCK;echo` split alike and print different lines."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), items=[{**command("MOCK", workdir, "MOCK-1"), "command": ["echo", "MOCK;echo"]}])
+    write_transcript(run, PARENT, [shell_item("MOCK-1", "echo MOCK;echo")])
+    report = acs.audit_run(run, lanes)
+    assert report["transcript_check"]["different"] == ['"MOCK-1"'] and not report["passed"]
+
+
+@pytest.mark.parametrize("program, theirs", [
+    ("echo MOCK", "'/bin/zsh' '-lc' 'echo MOCK'"),
+    ("echo MOCK", '"/bin/zsh" "-lc" "echo MOCK"'),
+    ("echo MOCK", "/bin/zsh -lc echo\\ MOCK"),
+    ("echo MOCK", "  /bin/zsh\t-lc   'echo MOCK'  "),
+    ('echo "MOCK"', "/bin/zsh -lc 'echo \"MOCK\"'"),
+    ('echo "MOCK"', '/bin/zsh -lc "echo \\"MOCK\\""'),
+    ("echo 'MOCK'", """/bin/zsh -lc 'echo '"'"'MOCK'"'"''"""),
+    ("echo $MOCK", '/bin/zsh -lc "echo \\$MOCK"'),
+    ("echo `MOCK`", '/bin/zsh -lc "echo \\`MOCK\\`"'),
+    ("echo \\MOCK", '/bin/zsh -lc "echo \\\\MOCK"'),
+    ("echo \\MOCK", '/bin/zsh -lc "echo \\MOCK"'),
+], ids=lambda value: value)
+def test_a_transcript_may_quote_a_command_any_way_a_shell_reads_the_same(area, program, theirs):
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), items=[command(program, workdir, "MOCK-1")])
+    write_transcript(run, PARENT, [shell_item("MOCK-1", theirs)])
+    report = acs.audit_run(run, lanes)
+    assert report["transcript_check"]["different"] == [] and not any("different calls" in f for f in report["flags"])
+
+
+@pytest.mark.parametrize("program", ["echo MOCK", "cat MOCK.txt", "cat /etc/hosts", "echo $HOME", "cd /tmp; ls",
+                                     "ls | wc -l", "echo 'MOCK a' > MOCK", 'printf "%s" "$(cat /etc/hosts)"',
+                                     "`echo cat` /etc/hosts"])
+def test_two_quotings_that_count_as_one_command_read_the_same_to_the_audit(tmp_path, program):
+    """Differential: what the check takes as one command, `i86 audit` audits as one: same verdict on each
+    list of calls."""
+    double = '/bin/zsh -lc "' + re.sub(r'(["\\$`])', r"\\\1", program) + '"'
+    assert acs._words(shlex.join(["/bin/zsh", "-lc", program])) == acs._words(double) == ["/bin/zsh", "-lc", program]
+    verdicts = []
+    for name, text in (("single", shlex.join(["/bin/zsh", "-lc", program])), ("double", double)):
+        (tmp_path / name).mkdir()
+        write_transcript(tmp_path / name, PARENT, [shell_item("MOCK-1", text)])
+        result = audit.audit_transcript(tmp_path / name / "transcript.jsonl", str(tmp_path))
+        verdicts.append({key: [(call["tool"], call.get("reason")) for call in result[key]]
+                         for key in ("violations", "suspect", "local_calls")})
+    assert verdicts[0] == verdicts[1]
+
+
+@pytest.mark.parametrize("ours, theirs", [
+    ([1, 2], [2, 1]),
+    ([1, 2, 3], [2, 3, 1]),
+    ([1, 2, 1], [1, 1, 2]),
+], ids=str)
+def test_a_transcript_that_records_the_same_calls_in_another_order_fails(area, ours, theirs):
+    """Review 10: the check compared each id's calls alone, so a transcript passed with the log's calls in
+    any order across ids, though order changes what the audit reads: a script run before it is written
+    reads nothing it should not, and run after, whatever it now holds."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), items=[command(f"echo MOCK-{i}", workdir, f"MOCK-{i}") for i in ours])
+    write_transcript(run, PARENT, [shell_item(f"MOCK-{i}", shlex.join(["/bin/zsh", "-lc", f"echo MOCK-{i}"]))
+                                   for i in theirs])
+    report = acs.audit_run(run, lanes)
+    assert report["transcript_check"]["only_in_log"] == report["transcript_check"]["only_in_transcript"] == []
+    assert report["transcript_check"]["different"] and not report["passed"]
+
+
+def test_a_transcript_that_records_the_calls_in_the_logs_order_passes(area):
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), items=[search("MOCK a"), command("echo MOCK-1", workdir, "MOCK-1"), search("MOCK b"),
+                                                  command("echo MOCK-1", workdir, "MOCK-1")])
+    write_transcript(run, PARENT, [web("MOCK a"), shell_item("MOCK-1", "/bin/zsh -lc 'echo MOCK-1'"), web("MOCK b"),
+                                   shell_item("MOCK-1", "/bin/zsh -lc 'echo MOCK-1'")])
+    report = acs.audit_run(run, lanes)
+    assert report["transcript_check"]["different"] == [] and not report["flags"]
+
+
+def test_a_call_on_one_side_alone_does_not_read_as_a_move(area):
+    """A call that only the log or only the transcript holds fails under its own name, and leaves the
+    calls around it in order."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), items=[search("MOCK a"), search("MOCK log only"), search("MOCK b")])
+    write_transcript(run, PARENT, [web("MOCK a"), web("MOCK b"), web("MOCK transcript only")])
+    check = acs.audit_run(run, lanes)["transcript_check"]
+    assert check["different"] == [] and check["only_in_log"] and check["only_in_transcript"]
 
 
 @pytest.mark.parametrize("theirs, key", [
@@ -2241,12 +2420,101 @@ def test_a_web_action_takes_the_transcripts_form(words, fields):
 @given(argv=st.lists(st.text(st.characters(blacklist_categories=("Cs",), blacklist_characters="\x00"), max_size=8),
                      min_size=1, max_size=4))
 def test_a_command_compares_the_same_however_it_is_quoted(argv):
-    """Property: a command the log keeps as words compares equal to any quoting of the same words."""
+    """Property: a command the log keeps as words compares equal to any quoting of the same words, and
+    reads back as those words. `shlex.join` leaves bare a word that starts with `=`, an `=` in the first
+    word and a reserved word at the head, which a shell reads otherwise: that command stays as written,
+    so a transcript that quotes it fails the check, and here the generator leaves them out."""
     def line(cmd):
         return [{"type": "item.completed", "item": {"id": "MOCK", "type": "command_execution", "command": cmd}}]
 
-    double = " ".join('"' + re.sub(r'(["\\])', r"\\\1", word) + '"' for word in argv)
+    assume(argv[0] not in acs.LEADERS and "=" not in argv[0] and not any(word.startswith("=") for word in argv))
+    assume(not any(acs._CONTROL.search(word) for word in argv))
+    double = " ".join('"' + re.sub(r'(["\\$`])', r"\\\1", word) + '"' for word in argv)
     assert acs._calls(line(shlex.join(argv))) == acs._calls(line(double))
+    assert acs._words(shlex.join(argv)) == argv
+
+
+@pytest.mark.parametrize("command_text, words", [
+    ("", []),
+    (" \t ", []),
+    ("/bin/zsh -lc 'cd MOCK;pwd'", ["/bin/zsh", "-lc", "cd MOCK;pwd"]),
+    ("echo 'MOCK a' \"MOCK b\" MOCK\\ c", ["echo", "MOCK a", "MOCK b", "MOCK c"]),
+    ("echo '$MOCK' \"\\$MOCK\" \\$MOCK", ["echo", "$MOCK", "$MOCK", "$MOCK"]),
+    ('echo "\\`\\"\\\\" "\\MOCK"', ["echo", '`"\\', "\\MOCK"]),
+    ("echo '' \"\"", ["echo", "", ""]),
+    ("echo MOCK=a MOCK=''", ["echo", "MOCK=a", "MOCK="]),
+    ("echo \\=MOCK '='MOCK \"=\"MOCK", ["echo", "=MOCK", "=MOCK", "=MOCK"]),
+    ("echo a''=MOCK ''a=MOCK", ["echo", "a=MOCK", "a=MOCK"]),
+    ("echo 'MOCK\ta' \"MOCK\tb\" 'MOCK\nc'", ["echo", "MOCK\ta", "MOCK\tb", "MOCK\nc"]),
+    ("'MOCK=a' echo", ["MOCK=a", "echo"]),
+    ("MOCK\\=a echo", ["MOCK=a", "echo"]),
+    ('echo "MOCK\nline"', ["echo", "MOCK\nline"]),
+    ("echo a,b:c@d+e%f-g.h/i_j]", ["echo", "a,b:c@d+e%f-g.h/i_j]"]),
+    ("echo 0 a1 9", ["echo", "0", "a1", "9"]),
+    ("echo \u00e9 \u00a0 \u2028", ["echo", "\u00e9", "\u00a0", "\u2028"]),
+], ids=repr)
+def test_a_command_of_words_alone_reads_as_its_words(command_text, words):
+    assert acs._words(command_text) == words
+
+
+@pytest.mark.parametrize("command_text", [
+    "echo MOCK;echo", "echo MOCK&", "echo MOCK|cat", "echo >MOCK", "echo <MOCK", "(echo)", "echo $MOCK", "echo `MOCK`",
+    'echo "$MOCK"', 'echo "`MOCK`"', "echo MOCK*", "echo MOCK?", "echo [MOCK", "echo ~", "echo {a,b}", "echo #MOCK",
+    "echo !MOCK", "echo ^MOCK", "echo MOCK\necho", "echo a\\\nb", 'echo "a\\\nb"', "echo a\rb", "echo a\x01b",
+    "echo a\x7fb", "echo a\x85b", "echo 'MOCK", 'echo "MOCK', "echo MOCK\\", "echo =MOCK", "MOCK=a echo", "M=a",
+    "M'O'=a echo", "echo a\x00b", "echo 'a\x00b'", "time echo", "'time' echo", "if MOCK", "]] MOCK",
+    "echo ''=MOCK", 'echo ""=MOCK', "echo ''''=MOCK", "echo 'a\x01b'", 'echo "a\x7fb"', "echo \\\x01", 'echo "\\\x7f"',
+    "echo 'a\rb'", 'echo "a\x1bb"', "echo 'a\x0bb'", "echo 'a\x0cb'", "echo a(b", "echo a)b", "\necho", "echo \nMOCK",
+    "echo \n",
+], ids=repr)
+def test_a_command_that_holds_anything_but_words_stays_as_written(command_text):
+    assert acs._words(command_text) == command_text
+
+
+SHELLS = {"zsh": ["/bin/zsh", "-f", "-c"], "bash": ["/bin/bash", "--norc", "--noprofile", "-c"]}
+# Letters that name no command, so what a misread piece runs is nothing, in a folder of its own. The first
+# list reads as words in most orders, so the property reaches the shells often; the second adds pieces that
+# keep most commands as written.
+WORD_PIECES = ["a", "b", " ", "  ", "\t", "%", ",", ":", "+", "-", ".", "/", "@", "]", "é", " ", " ", "'a b'",
+               '"a b"', "'a;b'", '"a;b"', "\\ ", '\\"', "\\$", "\\`", "\\\\", "\\a", "''", '""', '"\\a"', '"\\$"', '"\\`"', '"\\\\"',
+               '"\\""', "'$a'", '"\n"', "'\n'", "a=b", "=a"]
+PIECES = [*WORD_PIECES, "'", '"', "\\", "$", "`", ";", "&", "|", "<", ">", "(", ")", "*", "?", "[", "~", "{", "}", "#", "!", "^",
+          "=", "\n", "\r", "\x01", "\x7f"]
+
+
+@pytest.mark.parametrize("shell", sorted(SHELLS))
+@given(command_text=st.one_of(st.lists(st.sampled_from(WORD_PIECES), max_size=8),
+                              st.lists(st.sampled_from(PIECES), max_size=8)).map("".join))
+@settings(max_examples=400, suppress_health_check=[HealthCheck.filter_too_much])
+@example(command_text="a 'b c' \"d\\$e\" f\\ g")
+@example(command_text="a ''=b")  # zsh reads `''=b` as `=b`, and looks for a command named b.
+@example(command_text='"\\\x7f"')  # bash 3.2 reads this with a mark of its own in the word.
+@example(command_text="'\r'")
+def test_the_shells_read_the_words_this_script_reads(shell, command_text):
+    """Differential: wherever this script reads a command as words, zsh and bash read those words from
+    it, as a function's arguments, and nothing else."""
+    words = acs._words(command_text)
+    assume(isinstance(words, list))
+    with tempfile.TemporaryDirectory() as folder:
+        proc = subprocess.run([*SHELLS[shell], 'args() { for word; do printf "%s\\0" "$word"; done; }; args ' + command_text], cwd=folder,
+                              capture_output=True, stdin=subprocess.DEVNULL, timeout=60,
+                              env={"PATH": "/usr/bin:/bin", "LC_ALL": "en_US.UTF-8"})
+        assert os.listdir(folder) == []
+    assert proc.returncode == 0 and proc.stderr == b"", proc.stderr
+    assert proc.stdout.decode().split("\0")[:-1] == words
+
+
+def test_every_word_the_shells_reserve_keeps_a_command_as_written():
+    """Differential: a word a shell reserves acts as syntax at the head of a command, and not once quoted,
+    so no command that starts with one reads as words."""
+    env = {"PATH": "/usr/bin:/bin"}
+    zsh = subprocess.run([*SHELLS["zsh"], "zmodload zsh/parameter; print -l ${(k)reswords}"], capture_output=True,
+                         text=True, env=env, timeout=60, check=True).stdout.split()
+    bash = subprocess.run([*SHELLS["bash"], "compgen -k"], capture_output=True, text=True, env=env, timeout=60,
+                          check=True).stdout.split()
+    assert {"time", "if", "nocorrect", "foreach", "function"} <= {*zsh, *bash}
+    for word in {*zsh, *bash}:
+        assert acs._words(f"{word} MOCK") == f"{word} MOCK", word
 
 
 @given(pieces=st.lists(st.text(max_size=6), min_size=1, max_size=4))
@@ -2578,7 +2846,7 @@ def test_a_run_with_any_field_changed_gets_a_verdict_the_gate_shares(data):
 
 def test_a_record_whose_thread_drops_a_suspect_call_does_not_hold_up(area):
     """Review 8: a sub-agent that opens a page on this machine makes a suspect call, which keeps the run
-    out of the pool until a reader accepts it. A record edited to drop that call, its total lowered to
+    out of the pool until `--accept-suspect` names the run. A record edited to drop that call, its total lowered to
     match, said it passed, and the gate pooled the run: it let a thread's audit sort fewer calls than it
     read. The gate now finds that such a record does not hold up."""
     lanes, run, workdir = area
@@ -2646,3 +2914,110 @@ def test_a_transcript_the_check_passes_holds_as_many_calls_for_audit_as_the_log(
             main = next(t for t in report["threads"] if t["thread_id"] == PARENT)
             assert acs.audit.audit_transcript(run / "transcript.jsonl", workdir)["tool_calls"] == len(queries)
             assert main["audit"]["tool_calls"] == len(queries) == check["items"]
+
+
+@pytest.mark.parametrize("change", [
+    {"state": "succeeded"}, {"state": "running"}, {"state": "starting"}, {"state": "finalizing"},
+    {"state": "failed", "outcome_class": "transient"}, {"state": "failed", "outcome_class": "ok"},
+    {"state": "lost", "outcome_class": "limited"}, {"state": "failed", "started_at": "2026-11-03T18:00:00Z"},
+], ids=str)
+def test_an_attempt_the_record_says_ran_must_name_a_session(area, monkeypatch, change):
+    """Review 10: the script and the gate read an attempt as started only from its session or its start
+    time, so an attempt that succeeded with neither, whose log could hold any call, left nothing to find,
+    and the run passed on the later attempt's log alone."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    record = with_record(monkeypatch, run, [(f"{JOB}/a1", None, "failed", None), (f"{JOB}/a2", PARENT, "succeeded")])
+    record["attempts"][0].update({"finished_at": "2026-11-03T18:10:00Z", **change})
+    report = acs.audit_run(run, lanes)
+    assert f"subfleet records no session for attempt {JOB}/a1, which started" in report["flags"]
+    assert not report["passed"]
+
+
+@pytest.mark.parametrize("change", [
+    {"state": "failed", "outcome_class": "unknown", "finished_at": "2026-11-03T18:10:00Z"},
+    {"state": "interrupted", "outcome_class": "unknown", "finished_at": "2026-11-03T18:10:00Z"},
+    {"state": "reserved"}, {"state": "cancelled"},
+], ids=str)
+def test_an_attempt_subfleet_never_launched_needs_no_session(area, monkeypatch, change):
+    """subfleet ends an attempt it never launched `failed` or `interrupted`, with the outcome class
+    `unknown` and a finish time; no provider ran, so no log can exist."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    record = with_record(monkeypatch, run, [(f"{JOB}/a1", None, "failed", None), (f"{JOB}/a2", PARENT, "succeeded")])
+    record["attempts"][0].update(change)
+    report = acs.audit_run(run, lanes)
+    assert report["flags"] == [] and report["passed"]
+
+
+@pytest.mark.parametrize("job, attempt, passes", [
+    (JOB, f"{JOB}/a1", True),
+    (JOB, "MOCK-other-job/a1", False),
+    (JOB, f"{JOB}/a2", False),
+    (JOB, f"x{JOB}/a1", False),
+    (None, f"{JOB}/a1", True),
+    (None, f"{JOB}/a2", False),
+    (JOB, None, True),
+    (None, None, True),
+], ids=str)
+def test_with_no_attempts_on_record_a_run_collected_its_own_jobs_first_attempt(area, monkeypatch, job, attempt, passes):
+    """Review 10: without attempts on record, the script and the gate read only the `/a1` at the end of
+    the collected attempt's id, so a run of one job that named another job's first attempt passed."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    monkeypatch.setattr(acs, "subfleet_record", lambda job_id: None)
+    meta = json.loads((run / "meta.json").read_text())
+    meta.update({key: value for key, value in (("job_id", job), ("attempt_id", attempt)) if value is not None})
+    (run / "meta.json").write_text(json.dumps(meta))
+    assert acs.audit_run(run, lanes)["passed"] is passes
+
+
+@pytest.mark.parametrize("job", [5, 0, ["MOCK"], [], {"MOCK": 1}, {}, True, False], ids=str)
+def test_a_job_id_that_is_not_a_string_is_flagged(area, job):
+    """Review 10's fuzz of the record: a `job_id` of another type went to `subfleet` as an argument, and
+    the script stopped with a traceback."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    meta = json.loads((run / "meta.json").read_text())
+    meta["job_id"] = job
+    (run / "meta.json").write_text(json.dumps(meta))
+    report = acs.audit_run(run, lanes)
+    assert any("as its job, not a string" in flag for flag in report["flags"]) and not report["passed"]
+
+
+@pytest.mark.parametrize("control", ["\t", "\n", "\r", "\x01", "\x1f", "\x7f"], ids=repr)
+def test_a_file_url_with_a_control_character_names_no_folder_this_script_can_place(area, control):
+    """Review 10: `urlparse` drops a tab, a line feed and a carriage return, so a command in the folder
+    `<work directory><tab>`, another folder, read as one in the work directory."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), items=[command("echo MOCK", workdir + control, "MOCK-1")])
+    write_transcript(run, PARENT, [shell_item("MOCK-1", "/bin/zsh -lc 'echo MOCK'")])
+    report = acs.audit_run(run, lanes)
+    assert any("a path this script cannot place" in flag for flag in report["flags"]) and not report["passed"]
+
+
+@given(path=st.text(st.sampled_from(list("ab/.?#%;:@[]\t\n\r \x01\x7f\\\u00e9")), max_size=12))
+@example(path="work\t")
+@example(path="work;a")
+@example(path="work/\n")
+def test_a_file_url_places_the_folder_its_path_names_or_none(path):
+    """Property: a file URL on this host and the raw path written into it place one folder, or this script
+    places neither. A URL `urlparse` refuses raises ValueError, which the log's reader flags as a field it
+    cannot read."""
+    path = "/" + path
+    for url in (f"file://{path}", f"file://localhost{path}"):
+        try:
+            place = acs.local_path(url)
+        except ValueError:
+            continue
+        assert acs._plain(place) in (None, acs._plain(path))
+
+
+@pytest.mark.parametrize("url", ["file://[MOCK/work", "file://\u2100/work"], ids=repr)
+def test_a_file_url_that_urlparse_refuses_is_a_field_this_script_cannot_read(area, url):
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), items=[{**command("echo MOCK", workdir, "MOCK-1"), "cwd": url}])
+    write_transcript(run, PARENT, [shell_item("MOCK-1", "/bin/zsh -lc 'echo MOCK'")])
+    report = acs.audit_run(run, lanes)
+    assert any("a record with a field this script cannot read (ValueError)" in flag for flag in report["flags"])
+    assert not report["passed"]
