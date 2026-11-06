@@ -2517,12 +2517,14 @@ def test_a_web_action_takes_the_transcripts_form(words, fields):
 def test_a_command_compares_the_same_however_it_is_quoted(argv):
     """Property: a command the log keeps as words compares equal to any quoting of the same words, and
     reads back as those words. `shlex.join` leaves bare a word that starts with `=`, an `=` in the first
-    word and a reserved word at the head, which a shell reads otherwise: that command stays as written,
-    so a transcript that quotes it fails the check, and here the generator leaves them out."""
+    word, a first word that starts with `%` and a reserved word at the head, which a shell reads otherwise:
+    that command stays as written, so a transcript that quotes it fails the check, and here the generator
+    leaves them out."""
     def line(cmd):
         return [{"type": "item.completed", "item": {"id": "MOCK", "type": "command_execution", "command": cmd}}]
 
     assume(argv[0] not in acs.LEADERS and "=" not in argv[0] and not any(word.startswith("=") for word in argv))
+    assume(not argv[0].startswith("%"))
     assume(not any(acs._CONTROL.search(word) for word in argv))
     double = " ".join('"' + re.sub(r'(["\\$`])', r"\\\1", word) + '"' for word in argv)
     assert acs._calls(line(shlex.join(argv))) == acs._calls(line(double))
