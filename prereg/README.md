@@ -14,13 +14,13 @@ the latest.
 | `2026-10-26-revised/` | 14:40Z | the same files after the changes below | 973255 |
 | `2026-11-04-sessions/` | 00:31Z | the same files after the changes below, plus the Sol runs' session-log audits and attempts | 974462 |
 | `2026-11-04-served/` | 05:19Z | the same files after the changes below | 974487 |
-| `2026-11-05-wording/` | 16:01Z | the same files after the changes below | pending |
+| `2026-11-05-wording/` | 16:01Z | the same files after the changes below | 974697, 974704, 974752 |
 
 To check a manifest, run `shasum -a 256 -c prereg/<folder>/SHA256SUMS` from the repository root; it
 lists any file whose bytes have changed. `ots verify prereg/<folder>/SHA256SUMS.ots` checks the proof
 against a Bitcoin node. Without one, the digest the proof computes can be compared with the block's
 merkle root from a block explorer. Commit 007eb25 did this for the first two stamps, and the commits
-that added blocks 973255, 974462 and 974487 to the table did it for the third, fourth and fifth.
+that added the later blocks to the table did it for the other four.
 
 ## Changes after each stamp
 
