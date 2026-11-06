@@ -36,19 +36,21 @@ transcript is the collected attempt's alone. For each Codex run this script:
    replacing a different file. It writes each copy, as it writes `attempts.json`, to a part file beside
    it, syncs that to the disk and links it into place, so the copy holds the whole log or nothing, even
    when the process dies part way; the next run removes the part file such a death leaves. A kept copy
-   that is not a regular file, or that this script cannot read, stops it, and so does a `codex-sessions`
-   that is not a folder or that this script cannot list, search or write in, a part file there that it
-   cannot remove, or an `audit.json` there that is not a regular file or that this script cannot write
-   (a link is neither: it would take the writes wherever it leads). `.gitignore` keeps the logs out of
-   this public repository; `audit.json` records each one's SHA-256;
+   that is not a regular file, or that this script cannot read, stops it. So does a link in
+   `codex-sessions`, before this script reads or removes anything there; a `codex-sessions` that is not a
+   folder or that this script cannot list, search or write in; a part file there that it cannot remove;
+   and an `audit.json` there that is not a regular file or that this script cannot write (a link is
+   neither: it would take the writes wherever it leads). `.gitignore` keeps the logs out of this public
+   repository; `audit.json` records each one's SHA-256;
 4. turns each log's completed items into the `codex exec --json` items `i86 audit` reads (web searches,
    shell commands, messages) and audits them with `audit.audit_transcript`, as `i86 audit` audits a
    transcript. The collected main thread's items must match its transcript's, item by item and in the
    same order, as `audit` reads their calls (a message's line can hold one) and keys their ids (numbers
    exactly). Two commands match when they match as written, or when a shell reads nothing but words from
-   each and the same words from both (`_words`). The transcript may hold no other line but the thread's
-   one start, events of its turns that hold no call, and items that each complete with the calls they
-   started with. A line that starts or updates an item may hold no call in its `message`, which `audit`
+   each and the same words from both (`_words`); a control character other than a tab or a line feed,
+   quoted or not, keeps a command as written. The transcript may hold no other line but the thread's one
+   start, events of its turns that hold no call, and items that each complete with the calls they started
+   with. A line that starts or updates an item may hold no call in its `message`, which `audit`
    counts there and then;
 5. reads what the items miss. An item records only part of what a `tools.web__run` call opens, nothing
    of what a click opens, and nothing for a call whose cell never finished. So it checks every `exec`
@@ -83,8 +85,9 @@ script returns to the model reaches it as the script's output, which the log rec
     .venv/bin/python scripts/audit_codex_sessions.py [LABEL ...] [--lanes DIR]
 
 It exits 1 if any thread fails the audit or any check above flags something. It stops, with a
-message, at a `runs/` it cannot list, a folder in it that it cannot search, a link in place of `runs/`
-or of a run folder, and a run's meta.json that it cannot read.
+message, at a `LABEL` that is not the name of one folder in `runs/`, a `runs/` it cannot list, a folder
+in it that it cannot search, a link in place of `runs/` or of a run folder, and a run's meta.json that
+it cannot read.
 """
 
 from __future__ import annotations
@@ -517,7 +520,7 @@ def subfleet_record(job_id: str) -> dict | None:
     """subfleet's record of a job (`subfleet runs show JOB --json`), or None if it has none to give."""
     try:
         proc = subprocess.run(["subfleet", "runs", "show", job_id, "--json"], capture_output=True, text=True)
-    except OSError:
+    except (OSError, ValueError):  # no such program, a NUL in the job, or a reply that is not UTF-8
         return None
     if proc.returncode != 0:
         return None
@@ -1169,9 +1172,10 @@ def _words(command: str) -> list[str] | str:
     a shell. Anything else a shell acts on keeps the command as written, whatever `shlex.split` would
     make of it: a character outside `BARE` outside quotes (`;`, `$`, `*`, `>`, a line feed), a `$` or a
     backtick in double quotes, a backslash that continues a line, a bare `=` with nothing before it in
-    its word but empty quotes (zsh expands it), a bare `=` in the first word (an assignment) or a first
-    word in `LEADERS`. So does any control character but a tab or a line feed, in quotes as well: bash
-    3.2 reads a backslash and a DEL in double quotes otherwise."""
+    its word but empty quotes (zsh expands it), a bare `=` in the first word (an assignment), a first
+    word in `LEADERS` or a first word that starts with `%`, quoted or not (zsh reads a bare one as a job,
+    and bash reads either as one). So does any control character but a tab or a line feed, in quotes as
+    well: bash 3.2 reads a backslash and a DEL in double quotes otherwise."""
     if _CONTROL.search(command):
         return command
     words: list[str] = []
@@ -1195,7 +1199,7 @@ def _words(command: str) -> list[str] | str:
             return command
         words.append(word)
         i = _BLANKS.match(command, i).end()
-    return command if words and words[0] in LEADERS else words
+    return command if words and (words[0] in LEADERS or words[0].startswith("%")) else words
 
 
 def _item_calls(lines: list[dict]):
@@ -1356,6 +1360,11 @@ def audit_run(run_dir: Path, lanes: Path) -> dict:
     except OSError as error:
         raise SystemExit(f"this script cannot list {run_dir / FOLDER} ({type(error).__name__}); the kept copies "
                          "are final") from None
+    # What a link leads to lies outside the record, and the removal below could take the only bytes of a
+    # kept copy that leads to a file with a part file's name.
+    for name in kept_names:
+        if os.path.islink(run_dir / FOLDER / name):
+            raise SystemExit(f"{run_dir / FOLDER / name} is a link; the kept copies are final")
     # A run of this script that died part way through a write (`_create`, `_replace`) left its part file.
     for name in kept_names:
         if PART.fullmatch(name):
@@ -1513,6 +1522,16 @@ def codex_runs() -> list[Path]:
     return out
 
 
+def run_folder(label: str) -> Path:
+    """The folder in `runs/` a label names. A label spelled as a path to anywhere else (`a/../b`, `/a`)
+    stops the script, by name: it would lead out of `runs/`, or past the look for a link, which reads the
+    last names on a path."""
+    parts = Path(label).parts
+    if len(parts) != 1 or parts[0] == ".." or "/" in parts[0]:
+        raise SystemExit(f"{label!r} names no run: give the name of a folder in {RUNS}")
+    return RUNS / parts[0]
+
+
 def say(text: str) -> None:
     """Print a line in stdout's encoding, writing a character it cannot encode as its escape: a log's
     JSON can spell a lone surrogate (`\\ud800`), which no encoding writes."""
@@ -1525,7 +1544,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("labels", nargs="*", help="runs to audit (default: every collected Codex run)")
     ap.add_argument("--lanes", type=Path, default=LANES, help="the Subfleet lanes folder")
     args = ap.parse_args(argv)
-    dirs = [RUNS / label for label in args.labels] if args.labels else codex_runs()
+    dirs = [run_folder(label) for label in args.labels] if args.labels else codex_runs()
     worst = 0
     for d in dirs:
         r = audit_run(d, args.lanes)

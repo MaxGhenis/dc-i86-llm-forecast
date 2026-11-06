@@ -278,7 +278,9 @@ The script fails a run when:
   differ from that thread's or come in another order. The script reads calls and pairs ids as
   `i86 audit` does, so a message's line can hold a call, and two ids that are numbers match only when
   they are equal. Two commands count as one call when they match as written, or when a shell reads
-  nothing but words from each and the same words from both;
+  nothing but words from each and the same words from both. A control character other than a tab or a
+  line feed, quoted or not, keeps a command as written. `i86 audit` reads the transcript's own spelling,
+  so one it cannot read stays a suspect call;
 - the transcript holds any line but the thread's one start, events of its turns that hold no call, and
   items that each complete with the calls they started with;
 - a line of the transcript that starts or updates an item holds a call in its `message`, which
@@ -315,15 +317,15 @@ The script writes `runs/<label>/codex-sessions/audit.json`, with each log's SHA-
 account identifiers and local paths, and `.gitignore` keeps them out of this repository. The script
 keeps a copy of each log in the run's folder and never replaces one. It stops when a kept copy
 differs from the lane's, when anything but a regular file sits in a kept copy's place, or when it
-cannot read one; it reads a kept copy through a link to a regular file. It also stops when a link or
-anything but a folder sits where it keeps the copies, or when it cannot list, search or write in
-that folder. Where it writes `audit.json`, a link, anything but a regular file, or a file it cannot
-write stops it. It writes each file in full to a part file beside it before it gives the file its
-name. It links each copy and `attempts.json` into place only where nothing sits yet, and renames
-`audit.json` into place, so a hard link to the old file keeps the old bytes. A process that dies
-part way through a write leaves at most a part file, never part of a file under its name. The
-script's next audit of the run removes such a part file, and stops, by name, at one it cannot
-remove. The script does not guard against a power cut.
+cannot read one. It also stops when a link or anything but a folder sits where it keeps the copies,
+when that folder holds a link, or when it cannot list, search or write in that folder. Where it
+writes `audit.json`, a link, anything but a regular file, or a file it cannot write stops it. It
+writes each file in full to a part file beside it before it gives the file its name. It links each
+copy and `attempts.json` into place only where nothing sits yet, and renames `audit.json` into
+place, so a hard link to the old file keeps the old bytes. A process that dies part way through a
+write leaves at most a part file, never part of a file under its name. The script's next audit of
+the run removes such a part file, and stops, by name, at one it cannot remove. The script does not
+guard against a power cut.
 
 `simulate` pools a Codex run only when this audit passed. It checks that verdict against the run's
 work directory and job, and against what the two files record: the threads, their parents, fields,
@@ -332,20 +334,22 @@ and calls must match its items, and its web, suspect and local calls must add up
 audit may list only searches and commands as suspect calls and only commands as local calls, no more
 of either than the thread made. Its web addresses must match its web calls, and it must name a kept
 log of its own, by file name and SHA-256. `simulate` excludes a run when it cannot read either file
-as JSON, or cannot look for one in a folder it may not search. It counts the run's suspect calls along
-with the transcript's, and reads the committed files without running either audit again. Since it
-never reads the logs, it cannot tell the script's record from one that someone edited to hide a
-suspect call without breaking those checks. For example, someone could count the call as a web or
-local call. Anyone who re-runs the script on the kept logs can tell them apart, and a stamp shows any
-edit after it.
+as JSON, cannot look for one in a folder it may not search, or finds a link at either file or at
+`codex-sessions`. It counts the run's suspect calls along with the transcript's, and reads the
+committed files without running either audit again. Since it never reads the logs, it cannot tell
+the script's record from one that someone edited to hide a suspect call without breaking those
+checks. For example, someone could count the call as a web or local call. Anyone who re-runs the
+script on the kept logs can tell them apart, and a stamp shows any edit after it.
 
-`prereg` hashes each run's transcript, `audit.json` and `attempts.json`, so a file that changes after a
-stamp no longer matches the stamped list. It stops, by name, at anything but a regular file in place
-of a run's file, at any file it cannot read, and at a run's file it cannot look for, in a folder it
-may not search. `prereg`, `simulate`, `collect`, `check`, `i86 audit` and the script all stop, by
-name, at a `runs/` they cannot list, at a run folder they may not search, and at a link in place of
-`runs/` or of a run folder, since git keeps the link and not what it leads to. The script also stops,
-by name, at a collected run's `meta.json` that it cannot read as a JSON object.
+`prereg` hashes each run's transcript, `audit.json` and `attempts.json`, so a file that changes
+after a stamp no longer matches the stamped list. It stops, by name, at anything but a regular file
+in place of a run's file, a link included, at a link in place of `codex-sessions`, at any file it
+cannot read, and at a run's file it cannot look for, in a folder it may not search. `prereg`,
+`simulate`, `collect`, `check`, `i86 audit` and the script all stop, by name, at a `runs/` they
+cannot list, at a run folder they may not search, and at a link in place of `runs/` or of a run
+folder, since git keeps the link and not what it leads to. The script also stops, by name, at a
+collected run's `meta.json` that it cannot read as a JSON object, and at a label that does not name
+one folder in `runs/`.
 
 The four GPT-6.1 Sol runs left 24 threads: 18 sub-agents and six main threads, since sol-1 and sol-3
 each made a second attempt after the first stopped with "Selected model is at capacity". Together

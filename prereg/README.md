@@ -132,3 +132,15 @@ After `2026-11-04-served/`:
 - The summary's note on suspect calls now says the audit cannot clear them, and that `simulate` pools
   such a run only when `--accept-suspect` names it. No other line of `outputs/summary.md` changed.
 - Every other file in this manifest still matches.
+
+After `2026-11-05-wording/`:
+
+- `simulate` now excludes a run that gives as its job anything but a string, and a run with a link at
+  `codex-sessions/`, `audit.json` or `attempts.json`. `prereg` stops at a link in place of any run
+  file or of `codex-sessions/`. The audit stops at a link anywhere in `codex-sessions/`, before it
+  reads or removes anything there, and at a label that does not name one folder in `runs/`. It keeps
+  as written a command whose first word starts with `%`, since zsh reads a bare one as a job. A job
+  no command can name, or a reply from subfleet that does not decode as UTF-8, gives no attempts on
+  record. Re-auditing the four Sol runs leaves every `codex-sessions/audit.json` and `attempts.json`
+  byte for byte the same.
+- Every file in this manifest still matches.

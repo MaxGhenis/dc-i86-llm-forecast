@@ -86,6 +86,63 @@ def test_a_run_file_that_is_not_a_regular_file_stops_prereg(tmp_path, monkeypatc
     assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
 
 
+@pytest.mark.parametrize("name", ["meta.json", "response.md", "response.json", "audit.json", "transcript.jsonl",
+                                  "codex-sessions/audit.json", "codex-sessions/attempts.json"])
+def test_a_link_to_a_file_in_place_of_a_run_file_stops_prereg(tmp_path, monkeypatch, name):
+    """Review 11: prereg hashed what a link led to under the run file's name, though git would hold only
+    the link."""
+    prereg = area(tmp_path, monkeypatch)
+    run = tmp_path / "runs" / "sol-1"
+    (run / "codex-sessions").mkdir(parents=True)
+    (run / "meta.json").write_text("MOCK meta\n")
+    outside = tmp_path / "MOCK-outside"
+    outside.write_text("MOCK outside\n")
+    (run / name).unlink(missing_ok=True)
+    (run / name).symlink_to(outside)
+    with pytest.raises(SystemExit, match=f"runs/sol-1/{name} is not a regular file"):
+        cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
+
+
+@pytest.mark.parametrize("leads_to", ["a folder of records", "an empty folder", "nothing"])
+def test_a_link_in_place_of_the_kept_folder_stops_prereg(tmp_path, monkeypatch, leads_to):
+    """Each of these must stop it: a folder that held no record would otherwise read as a run with none."""
+    prereg = area(tmp_path, monkeypatch)
+    run = tmp_path / "runs" / "sol-1"
+    run.mkdir(parents=True)
+    (run / "meta.json").write_text("MOCK meta\n")
+    outside = tmp_path / "MOCK-outside"
+    if leads_to != "nothing":
+        outside.mkdir()
+    if leads_to == "a folder of records":
+        (outside / "audit.json").write_text("{}\n")
+        (outside / "attempts.json").write_text("{}\n")
+    (run / "codex-sessions").symlink_to(outside)
+    with pytest.raises(SystemExit, match="runs/sol-1/codex-sessions is a link, so prereg cannot hash what it leads to"):
+        cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
+
+
+def test_a_checkout_behind_a_link_still_hashes_its_run_files(tmp_path, monkeypatch):
+    real = tmp_path / "MOCK-real"
+    real.mkdir()
+    prereg = area(real, monkeypatch)
+    link = tmp_path / "MOCK-checkout"
+    link.symlink_to(real)
+    monkeypatch.setattr(cli, "ROOT", link)
+    monkeypatch.setattr(cli, "PROMPT_PATH", link / "prompts" / "forecaster.md")
+    monkeypatch.setattr(cli, "TEMPLATE_PATH", link / "schemas" / "template.json")
+    monkeypatch.setattr(cli, "OUTPUTS", link / "outputs")
+    monkeypatch.setattr(cli, "PREREG", link / "prereg")
+    monkeypatch.setattr(runners, "RUNS", link / "runs")
+    sessions = link / "runs" / "sol-1" / "codex-sessions"
+    sessions.mkdir(parents=True)
+    (sessions.parent / "meta.json").write_text("MOCK meta\n")
+    (sessions / "audit.json").write_text("{}\n")
+    assert cli.cmd_prereg(argparse.Namespace(no_stamp=True)) == 0
+    assert "  runs/sol-1/codex-sessions/audit.json\n" in (prereg / "SHA256SUMS").read_text()
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
 @pytest.mark.parametrize("name", ["codex-sessions/attempts.json", "codex-sessions/audit.json", "transcript.jsonl"])
 def test_a_run_file_prereg_cannot_read_stops_it(tmp_path, monkeypatch, name):

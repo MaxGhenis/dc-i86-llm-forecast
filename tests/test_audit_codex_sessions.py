@@ -1,6 +1,7 @@
 """scripts/audit_codex_sessions.py finds every Codex thread behind a run, ties each main thread to a
 subfleet attempt, keeps its log and audits it. MOCK session logs, transcripts and subfleet records in
-temporary directories; the tests never run subfleet or any other command. The pooling gate
+temporary directories. The tests never run the real subfleet; a few run git, the script itself, a MOCK
+`subfleet`, or zsh and bash, to see how each shell reads a command. The pooling gate
 (`cli._session_audit`) reads every audit a test writes and must reach the script's verdict."""
 
 import errno
@@ -31,6 +32,7 @@ spec.loader.exec_module(acs)
 PARENT, HELPER = "MOCK-parent-thread", "MOCK-helper-thread"
 EARLIER, EARLIER_HELPER = "MOCK-earlier-thread", "MOCK-earlier-helper-thread"
 JOB = "MOCK-job-sol-1"
+REAL_RUN = subprocess.run  # `make_area` blocks it; a test of what it refuses before it starts anything restores it
 CITE = "cite{}"  # the web tool's cite marker: "citeturn0view0" between private-use characters
 
 
@@ -320,7 +322,6 @@ def test_a_kept_log_is_final(area):
 
 @pytest.mark.parametrize("kind, why", [
     ("a folder", "is not a regular file"), ("a pipe", "is not a regular file"),
-    ("a link to nothing", "is not a regular file"),
     pytest.param("no permission to read it", "this script cannot read",
                  marks=pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file"))])
 def test_a_kept_copy_that_is_no_regular_file_this_script_can_read_stops_the_audit(area, kind, why):
@@ -331,10 +332,48 @@ def test_a_kept_copy_that_is_no_regular_file_this_script_can_read_stops_the_audi
     kept = run / "codex-sessions" / parent.name
     kept.parent.mkdir()
     {"a folder": kept.mkdir, "a pipe": lambda: os.mkfifo(kept),
-     "a link to nothing": lambda: kept.symlink_to(kept.with_name("MOCK-gone")),
      "no permission to read it": lambda: (shutil.copyfile(parent, kept), kept.chmod(0))}[kind]()
     with pytest.raises(SystemExit, match=f"{why}.*the kept copy is final"):
         acs.audit_run(run, lanes)
+
+
+@pytest.mark.parametrize("name", ["rollout-MOCK-parent.jsonl", "attempts.json", ".audit-MOCK-link.part", "MOCK-other"])
+@pytest.mark.parametrize("target", ["a part file beside it", "a file elsewhere", "nothing"])
+def test_a_link_among_the_kept_files_stops_the_audit_before_it_removes_anything(area, name, target):
+    """Review 11: a kept log could be a link to a file in the same folder that takes the name of a part
+    file. The next run removed that file as a part file and lost the only copy of the log once the lane
+    pruned its own. `git` holds no link here, and what one leads to lies outside the record, so a link
+    anywhere in `codex-sessions` stops the script, by name, before it removes or reads anything."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    folder = run / "codex-sessions"
+    folder.mkdir()
+    elsewhere = run.parent / "MOCK-elsewhere"
+    elsewhere.write_text("MOCK bytes\n")
+    part = folder / ".audit-aaaaaaaa.part"
+    part.write_text("MOCK bytes\n")
+    (folder / name).symlink_to({"a part file beside it": part.name, "a file elsewhere": elsewhere,
+                                "nothing": folder / "MOCK-gone"}[target])
+    before = sorted(os.listdir(folder))
+    with pytest.raises(SystemExit, match=rf"{re.escape(name)} is a link; the kept copies are final"):
+        acs.audit_run(run, lanes)
+    assert sorted(os.listdir(folder)) == before
+    assert part.read_text() == "MOCK bytes\n" and elsewhere.read_text() == "MOCK bytes\n"
+
+
+def test_a_kept_file_with_a_second_name_loses_only_the_part_files_name(area):
+    """A process that dies between its two steps (`_create`) leaves one file under two names, the part
+    file's and the kept copy's. The next run removes the part file's name and the bytes stay."""
+    lanes, run, workdir = area
+    parent = add_parent(lanes, workdir, spawned=())
+    assert acs.audit_run(run, lanes)["passed"]
+    folder = run / "codex-sessions"
+    kept = folder / parent.name
+    os.link(kept, folder / ".audit-MOCK1234.part")
+    data = kept.read_bytes()
+    parent.unlink()
+    assert acs.audit_run(run, lanes)["passed"]
+    assert kept.read_bytes() == data and not (folder / ".audit-MOCK1234.part").exists()
 
 
 @pytest.mark.parametrize("kind, why", [
@@ -708,6 +747,41 @@ def test_a_link_in_place_of_a_run_or_of_runs_stops_the_script_before_it_writes(a
     with pytest.raises(SystemExit, match=rf"{re.escape(str(place))} is a link"):
         acs.audit_run(run, lanes)
     assert sorted(str(p) for p in outside.rglob("*")) == before
+
+
+@pytest.mark.parametrize("label", ["sol-1/../sol-1", "../sol-1", "..", ".", "", "sol-1/MOCK", "./../sol-1", "/", "//",
+                                   "///", "/MOCK", "//MOCK", "sol-1/.."], ids=repr)
+def test_a_label_that_is_not_one_folder_name_stops_the_script_before_it_writes(area, label):
+    """Review 11: a label is the name of a folder in `runs/`. One spelled as a path led `audit_run` out of
+    `runs/` or past its look for a link, which reads only the last names on a path."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    with pytest.raises(SystemExit, match="names no run"):
+        acs.main([label, "--lanes", str(lanes)])
+    assert not (run / "codex-sessions").exists()
+
+
+@pytest.mark.parametrize("linked", ["the run", "runs"])
+def test_a_label_spelled_as_a_path_cannot_pass_a_link(area, linked):
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    place = run if linked == "the run" else run.parent
+    outside = place.with_name("MOCK-outside")
+    place.rename(outside)
+    place.symlink_to(outside)
+    before = sorted(str(p) for p in outside.rglob("*"))
+    with pytest.raises(SystemExit, match="names no run"):
+        acs.main(["sol-1/../sol-1", "--lanes", str(lanes)])
+    assert sorted(str(p) for p in outside.rglob("*")) == before
+
+
+@pytest.mark.parametrize("label", ["sol-1", "sol-1/", "./sol-1", "sol-1/.", "sol-1//"], ids=repr)
+def test_a_label_may_spell_a_run_folders_name_as_a_path_to_it_from_runs(area, label, capsys):
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    assert acs.main([label, "--lanes", str(lanes)]) == 0
+    assert capsys.readouterr().out.startswith("sol-1: ok;")
+    assert (run / "codex-sessions" / "audit.json").is_file()
 
 
 def test_a_link_among_the_runs_stops_the_script_with_no_labels(area):
@@ -1256,9 +1330,9 @@ def test_a_transcript_may_quote_a_command_any_way_a_shell_reads_the_same(area, p
 @pytest.mark.parametrize("program", ["echo MOCK", "cat MOCK.txt", "cat /etc/hosts", "echo $HOME", "cd /tmp; ls",
                                      "ls | wc -l", "echo 'MOCK a' > MOCK", 'printf "%s" "$(cat /etc/hosts)"',
                                      "`echo cat` /etc/hosts"])
-def test_two_quotings_that_count_as_one_command_read_the_same_to_the_audit(tmp_path, program):
-    """Differential: what the check takes as one command, `i86 audit` audits as one: same verdict on each
-    list of calls."""
+def test_a_program_in_single_or_double_quotes_reads_the_same_to_the_audit(tmp_path, program):
+    """Differential: a shell's `-lc` program reads as the same words in single quotes and in double quotes,
+    and `i86 audit`, which reads a transcript's own spelling, reaches the same verdict on each."""
     double = '/bin/zsh -lc "' + re.sub(r'(["\\$`])', r"\\\1", program) + '"'
     assert acs._words(shlex.join(["/bin/zsh", "-lc", program])) == acs._words(double) == ["/bin/zsh", "-lc", program]
     verdicts = []
@@ -1269,6 +1343,28 @@ def test_two_quotings_that_count_as_one_command_read_the_same_to_the_audit(tmp_p
         verdicts.append({key: [(call["tool"], call.get("reason")) for call in result[key]]
                          for key in ("violations", "suspect", "local_calls")})
     assert verdicts[0] == verdicts[1]
+
+
+def test_a_spelling_the_audit_cannot_read_stays_suspect_though_it_counts_as_one_command(area):
+    """Review 11: `/bin/zsh -lc echo\\ MOCK` gives a shell the words of the log's `/bin/zsh -lc 'echo MOCK'`,
+    so the check counts the two as one command. `i86 audit` reads the transcript's own spelling and has
+    no rule for that backslash, so it lists a suspect call, and `simulate` counts that call."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), items=[command("echo MOCK", workdir, "MOCK-1")])
+    write_transcript(run, PARENT, [shell_item("MOCK-1", "/bin/zsh -lc echo\\ MOCK")])
+    report = acs.audit_run(run, lanes)
+    assert report["transcript_check"]["different"] == [] and report["passed"]
+    assert [call["tool"] for call in audit.audit_transcript(run / "transcript.jsonl", workdir)["suspect"]] == ["shell"]
+
+
+@pytest.mark.parametrize("theirs", ["'%MOCK'", '"%MOCK"', "\\%MOCK", "''%MOCK"])
+def test_a_transcript_that_quotes_a_first_word_a_shell_reads_as_a_job_fails(area, theirs):
+    """Review 11: `shlex.join` leaves `%MOCK` bare, and zsh reads that as a job and `'%MOCK'` as a program."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=(), items=[{**command("MOCK", workdir, "MOCK-1"), "command": ["%MOCK"]}])
+    write_transcript(run, PARENT, [shell_item("MOCK-1", theirs)])
+    report = acs.audit_run(run, lanes)
+    assert report["transcript_check"]["different"] == ['"MOCK-1"'] and not report["passed"]
 
 
 @pytest.mark.parametrize("ours, theirs", [
@@ -2275,14 +2371,13 @@ def test_a_kept_attempts_file_that_is_not_a_record_stops_the_audit(area, text):
         acs.audit_run(run, lanes)
 
 
-@pytest.mark.parametrize("kind", ["a folder", "a pipe", "a link to nothing"])
+@pytest.mark.parametrize("kind", ["a folder", "a pipe"])
 def test_a_kept_attempts_file_that_is_not_a_regular_file_stops_the_audit(area, kind):
     lanes, run, workdir = area
     add_parent(lanes, workdir, spawned=())
     kept = run / "codex-sessions" / "attempts.json"
     kept.parent.mkdir()
-    {"a folder": kept.mkdir, "a pipe": lambda: os.mkfifo(kept),
-     "a link to nothing": lambda: kept.symlink_to(kept.with_name("MOCK-gone"))}[kind]()
+    {"a folder": kept.mkdir, "a pipe": lambda: os.mkfifo(kept)}[kind]()
     with pytest.raises(SystemExit, match="is not a record of attempts"):
         acs.audit_run(run, lanes)
 
@@ -2452,6 +2547,9 @@ def test_a_command_compares_the_same_however_it_is_quoted(argv):
     ("echo a,b:c@d+e%f-g.h/i_j]", ["echo", "a,b:c@d+e%f-g.h/i_j]"]),
     ("echo 0 a1 9", ["echo", "0", "a1", "9"]),
     ("echo \u00e9 \u00a0 \u2028", ["echo", "\u00e9", "\u00a0", "\u2028"]),
+    ("echo %MOCK %", ["echo", "%MOCK", "%"]),
+    ("a%b echo", ["a%b", "echo"]),
+    ("'' %MOCK", ["", "%MOCK"]),
 ], ids=repr)
 def test_a_command_of_words_alone_reads_as_its_words(command_text, words):
     assert acs._words(command_text) == words
@@ -2465,7 +2563,7 @@ def test_a_command_of_words_alone_reads_as_its_words(command_text, words):
     "M'O'=a echo", "echo a\x00b", "echo 'a\x00b'", "time echo", "'time' echo", "if MOCK", "]] MOCK",
     "echo ''=MOCK", 'echo ""=MOCK', "echo ''''=MOCK", "echo 'a\x01b'", 'echo "a\x7fb"', "echo \\\x01", 'echo "\\\x7f"',
     "echo 'a\rb'", 'echo "a\x1bb"', "echo 'a\x0bb'", "echo 'a\x0cb'", "echo a(b", "echo a)b", "\necho", "echo \nMOCK",
-    "echo \n",
+    "echo \n", "%MOCK", "%", "%%", "%+", "%-", "%1", "%MOCK echo", "'%MOCK'", '"%MOCK"', "\\%MOCK", "''%MOCK", "%'MOCK'",
 ], ids=repr)
 def test_a_command_that_holds_anything_but_words_stays_as_written(command_text):
     assert acs._words(command_text) == command_text
@@ -2502,6 +2600,52 @@ def test_the_shells_read_the_words_this_script_reads(shell, command_text):
         assert os.listdir(folder) == []
     assert proc.returncode == 0 and proc.stderr == b"", proc.stderr
     assert proc.stdout.decode().split("\0")[:-1] == words
+
+
+def _quoted(words: list[str]) -> str:
+    """A command that quotes every word, so a shell reads each as plain text, whatever it holds."""
+    return " ".join("'" + word.replace("'", "'\\''") + "'" for word in words)
+
+
+def _read_at_the_head(shell: str, command_text: str, folder: str) -> tuple:
+    """How a shell reads a command as the whole of its program, with nothing on its PATH but `folder`."""
+    proc = subprocess.run([*SHELLS[shell], "\n" + command_text], cwd=folder, capture_output=True,
+                          stdin=subprocess.DEVNULL, timeout=60, env={"PATH": folder, "LC_ALL": "en_US.UTF-8"})
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+@pytest.mark.parametrize("shell", sorted(SHELLS))
+@given(command_text=st.one_of(st.lists(st.sampled_from(WORD_PIECES), max_size=6),
+                              st.lists(st.sampled_from(["a", "b", " ", "%", "-", "=", ".", ":", "'", '"', "\\", "]"]),
+                                       max_size=6)).map("".join))
+@settings(max_examples=150, suppress_health_check=[HealthCheck.filter_too_much])
+@example(command_text="a 'b c'")
+@example(command_text="%a")  # zsh reads this as a job, and `'%a'` as a program of that name.
+@example(command_text="time a")
+@example(command_text="a=b a")
+@example(command_text="- a")
+def test_a_shell_reads_a_command_of_words_as_it_reads_each_word_quoted(shell, command_text):
+    """Differential: wherever this script reads a command as words, a shell reads the head of the command
+    as it reads the same words each in quotes: nothing there acts as syntax, a job or an assignment. A
+    program on the PATH takes the first word's name and prints what it gets."""
+    words = acs._words(command_text)
+    assume(isinstance(words, list))
+    with tempfile.TemporaryDirectory() as folder:
+        if words and words[0] and "/" not in words[0] and words[0] not in (".", ".."):
+            program = Path(folder) / words[0]
+            program.write_text('#!/bin/sh\nfor word; do printf "%s\\0" "$word"; done\n')
+            program.chmod(0o755)
+        assert _read_at_the_head(shell, command_text, folder) == _read_at_the_head(shell, _quoted(words), folder)
+
+
+def test_zsh_reads_a_bare_first_word_with_a_percent_sign_as_a_job(tmp_path):
+    """What the rule in `_words` rests on, and what the differential above can see."""
+    program = tmp_path / "%MOCK"
+    program.write_text('#!/bin/sh\nprintf MOCK\n')
+    program.chmod(0o755)
+    bare = _read_at_the_head("zsh", "%MOCK", str(tmp_path))
+    assert _read_at_the_head("zsh", "'%MOCK'", str(tmp_path)) == (0, b"MOCK", b"")
+    assert bare[0] != 0 and bare[1] == b""
 
 
 def test_every_word_the_shells_reserve_keeps_a_command_as_written():
@@ -2970,6 +3114,35 @@ def test_with_no_attempts_on_record_a_run_collected_its_own_jobs_first_attempt(a
     meta.update({key: value for key, value in (("job_id", job), ("attempt_id", attempt)) if value is not None})
     (run / "meta.json").write_text(json.dumps(meta))
     assert acs.audit_run(run, lanes)["passed"] is passes
+
+
+def test_a_job_no_command_can_name_has_no_record(tmp_path, monkeypatch):
+    """Review 11: a NUL in a `job_id` stops `subprocess.run` before it starts anything, and the script
+    stopped with a traceback. Only an empty PATH could be reached here."""
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert acs.subfleet_record("MOCK\0job") is None
+
+
+@pytest.mark.parametrize("output, record", [(b"\xff", None), (b"{MOCK", None), (b'{"MOCK": 1}', {"MOCK": 1})], ids=repr)
+def test_a_reply_from_subfleet_that_is_not_json_text_gives_no_record(tmp_path, monkeypatch, output, record):
+    """Bytes that are not UTF-8 stop `subprocess.run` as it decodes them. A MOCK `subfleet` on an otherwise
+    empty PATH prints them."""
+    (tmp_path / "MOCK-reply").write_bytes(output)
+    program = tmp_path / "subfleet"
+    program.write_text(f'#!/bin/sh\nwhile read -r line || [ -n "$line" ]; do printf "%s" "$line"; done < {tmp_path}/MOCK-reply\n')
+    program.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert acs.subfleet_record("MOCK-job") == record
+
+
+def test_a_run_whose_job_no_command_can_name_is_audited_with_no_attempts_on_record(area, monkeypatch):
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    meta = json.loads((run / "meta.json").read_text())
+    (run / "meta.json").write_text(json.dumps({**meta, "job_id": "MOCK\0job"}))
+    monkeypatch.setattr(acs.subprocess, "run", REAL_RUN)
+    report = acs.audit_run(run, lanes)
+    assert report["passed"] and not (run / "codex-sessions" / "attempts.json").exists()
 
 
 @pytest.mark.parametrize("job", [5, 0, ["MOCK"], [], {"MOCK": 1}, {}, True, False], ids=str)

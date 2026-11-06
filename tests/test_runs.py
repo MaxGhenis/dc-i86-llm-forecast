@@ -783,6 +783,70 @@ def test_a_record_that_names_a_job_with_no_attempts_on_record_is_excluded(area, 
             "script writes") in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("record", ["no attempts on record", "attempts on record"])
+@pytest.mark.parametrize("job", [5, 0, ["MOCK"], [], {"MOCK": 1}, {}, True, False], ids=str)
+def test_a_job_that_is_not_a_string_excludes_the_run(area, graph, capsys, job, record):
+    """Review 11: the script flags a `job_id` that is not a string, and the gate read the audit the script
+    wrote before such a value reached `meta.json`, so it pooled the run. A fresh audit would have failed."""
+    if record == "no attempts on record":
+        threads = [_thread("MOCK-main", None, spawns=1), _thread("MOCK-helper", "MOCK-main")]
+        _codex_run(graph, "sol-odd", _session(threads=threads), attempts=None, collected=None)
+        _codex_run(graph, "sol-ok", _session(threads=threads), attempts=None, collected=None)
+    else:
+        attempts = {"job_id": job, "accepted_attempt_id": f"{job}/a2",
+                    "attempts": [{"attempt_id": f"{job}/a1", "native_session_id": "MOCK-earlier", "started_at": "MOCK"},
+                                 {"attempt_id": f"{job}/a2", "native_session_id": "MOCK-main", "started_at": "MOCK"}]}
+        _codex_run(graph, "sol-odd", {**_session(), "job_id": job, "collected_attempt": f"{job}/a2"}, attempts=attempts,
+                   collected=f"{job}/a2")
+        _codex_run(graph, "sol-ok", _session())
+    meta = runners.read_meta(runners.RUNS / "sol-odd")
+    runners.write_meta(runners.RUNS / "sol-odd", {**meta, "job_id": job})
+    assert set(cli.accepted_runs(graph, "sha")) == {"sol-ok"}
+    assert (f"excluding sol-odd: the audit of its session logs says it passed, but the run gives {json.dumps(job)} as its "
+            "job, not a string") in capsys.readouterr().err
+
+
+def test_a_run_with_no_job_stays_in_the_pool(area, graph):
+    threads = [_thread("MOCK-main", None, spawns=1), _thread("MOCK-helper", "MOCK-main")]
+    _codex_run(graph, "sol-1", _session(threads=threads), attempts=None, collected=None)
+    meta = runners.read_meta(runners.RUNS / "sol-1")
+    meta.pop("job_id")
+    runners.write_meta(runners.RUNS / "sol-1", meta)
+    assert set(cli.accepted_runs(graph, "sha")) == {"sol-1"}
+
+
+@pytest.mark.parametrize("linked, why", [
+    ("codex-sessions", "no readable audit of its session logs"),
+    ("codex-sessions/audit.json", "no readable audit of its session logs"),
+    ("codex-sessions/attempts.json", "its attempts.json is not a file of JSON this check can read"),
+])
+@pytest.mark.parametrize("leads_to", ["the record", "nothing"])
+def test_a_session_record_behind_a_link_excludes_the_run(area, graph, capsys, linked, why, leads_to):
+    """Review 11: git would hold only the link, and the bytes the gate read would lie outside the record."""
+    _codex_run(graph, "sol-odd", _session())
+    _codex_run(graph, "sol-ok", _session())
+    place = runners.RUNS / "sol-odd" / linked
+    outside = area.root / "MOCK-outside"
+    place.rename(outside)
+    if leads_to == "nothing":
+        outside = area.root / "MOCK-gone"
+    place.symlink_to(outside)
+    assert set(cli.accepted_runs(graph, "sha")) == {"sol-ok"}
+    assert f"excluding sol-odd: " in (err := capsys.readouterr().err) and why in err
+
+
+def test_a_checkout_behind_a_link_keeps_its_records(area, graph, monkeypatch):
+    """Only a link at a record or at its folder stops the gate. Where the checkout itself sits is the
+    reader's business."""
+    _codex_run(graph, "sol-1", _session())
+    link = area.root / "MOCK-checkout"
+    (area.root / "MOCK-real").mkdir()
+    runners.RUNS.rename(area.root / "MOCK-real" / "runs")
+    link.symlink_to(area.root / "MOCK-real")
+    monkeypatch.setattr(runners, "RUNS", link / "runs")
+    assert set(cli.accepted_runs(graph, "sha")) == {"sol-1"}
+
+
 @pytest.mark.parametrize("levels, accepted", [(64, True), (65, False)])
 def test_a_transcript_names_its_thread_only_on_a_line_nested_at_most_64_levels(area, graph, capsys, levels, accepted):
     """As the script reads a transcript, a line nested more than 64 levels is no event, so a transcript

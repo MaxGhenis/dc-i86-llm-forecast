@@ -215,9 +215,12 @@ def _nests_deeper_than(value, levels: int) -> bool:
 
 
 def _json_file(path: Path):
-    """The JSON value a file holds; ABSENT if nothing is at `path`; UNREADABLE if this check cannot tell
-    what is there (in a folder it may not search), or what is there is not a regular file (a folder, or
-    a pipe that would block), cannot be read or decoded, does not parse, or nests more than DEPTH levels."""
+    """The JSON value a file holds; ABSENT if nothing is at `path`; UNREADABLE if a link sits at `path` or
+    at its folder (git keeps the link and not what it leads to), if this check cannot tell what is there
+    (in a folder it may not search), or if what is there is not a regular file (a folder, or a pipe that
+    would block), cannot be read or decoded, does not parse, or nests more than DEPTH levels."""
+    if os.path.islink(path) or os.path.islink(path.parent):
+        return UNREADABLE
     try:
         os.lstat(path)
     except (FileNotFoundError, NotADirectoryError):
@@ -340,8 +343,8 @@ def _thread_problem(t: dict) -> str | None:
 
 def _session_problem(run_dir: Path, rec: dict) -> str | None:
     """Why a session audit that says it passed does not hold up, or None. Rather than trust the verdict,
-    the gate checks that the record holds together: the run's own work directory, an absolute path; no
-    flags, missing threads or orphans; each thread with an id of its own, counts of zero or more, and it
+    the gate checks that the record holds together: the run's own work directory, an absolute path; a
+    job that is a string, or none; no flags, missing threads or orphans; each thread with an id of its own, counts of zero or more, and it
     passed its own audit, which reads one event or more and finds no violation; no item, script tool or
     function the script fails a run for; each parent among the threads, every thread descended from a
     main thread with no cycle, each thread's `spawn_agent` calls as many as the threads that name it as
@@ -367,6 +370,9 @@ def _session_problem(run_dir: Path, rec: dict) -> str | None:
     workdir = meta.get("workdir")
     if not (isinstance(workdir, str) and workdir.startswith("/") and rec.get("workdir") == workdir):
         return "it does not audit the run's work directory, an absolute path"
+    job = meta.get("job_id")
+    if job is not None and not isinstance(job, str):
+        return f"the run gives {json.dumps(job)[:200]} as its job, not a string"
     for key in ("flags", "missing", "orphans"):
         if rec.get(key) != []:
             return f"its {key!r} field is not an empty list"
@@ -436,7 +442,7 @@ def _session_problem(run_dir: Path, rec: dict) -> str | None:
     if record is ABSENT:
         if len(roots) != 1:
             return f"it has no attempts on record and {len(roots)} main threads"
-        if collected is not None and not runners.first_attempt(meta.get("job_id"), collected):
+        if collected is not None and not runners.first_attempt(job, collected):
             return f"it has no attempts on record, and the run collected {collected}, not its job's first attempt"
         attempt_of = {}
     else:
@@ -449,7 +455,6 @@ def _session_problem(run_dir: Path, rec: dict) -> str | None:
                    and (a.get("native_session_id") is None or isinstance(a["native_session_id"], str))
                    for a in listed):
             return "its attempts.json gives an attempt an id or a session that is not a string"
-        job = meta.get("job_id")
         if record.get("job_id") != job or sorted(a["attempt_id"] for a in listed) != sorted(
                 f"{job}/a{i}" for i in range(1, len(listed) + 1)):
             return f"its attempts.json does not list the attempts of job {job} from a1 up"
@@ -589,17 +594,20 @@ def _keeps(folder: Path, sums: Path, proof: Path) -> bool:
 
 def _files(paths) -> list[Path]:
     """The paths at which there is something for prereg to hash. Anything there but a regular file (a
-    folder, a pipe that would block, a link to nothing) stops prereg, and so does a path it cannot look
-    at (in a folder it may not search), which could hold a file it would otherwise leave out."""
+    folder, a pipe that would block, a link) stops prereg, and so does a link in place of its folder,
+    since git keeps the link and not what it leads to, and a path it cannot look at (in a folder it may
+    not search), which could hold a file it would otherwise leave out."""
     present = []
     for p in paths:
+        if os.path.islink(p.parent):
+            raise SystemExit(f"{p.parent.relative_to(ROOT)} is a link, so prereg cannot hash what it leads to")
         try:
             os.lstat(p)
         except (FileNotFoundError, NotADirectoryError):
             continue
         except OSError as error:
             raise SystemExit(f"prereg cannot read {p.relative_to(ROOT)} ({type(error).__name__})") from None
-        if not os.path.isfile(p):
+        if os.path.islink(p) or not os.path.isfile(p):
             raise SystemExit(f"{p.relative_to(ROOT)} is not a regular file, so prereg cannot hash it")
         present.append(p)
     return present
