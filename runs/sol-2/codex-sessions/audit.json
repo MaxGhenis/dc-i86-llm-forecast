@@ -1,0 +1,212 @@
+{
+ "run": "sol-2",
+ "workdir": "/Users/maxghenis/.cache/dc-i86-llm-forecast/sol-2",
+ "threads": [
+  {
+   "thread_id": "01a176df-fdd0-7152-9422-298d6136273d",
+   "spawned_by": null,
+   "agent_path": null,
+   "attempt": "20261025-223151-i86-sol-2/a1",
+   "collected": true,
+   "started": "2026-10-26T06:22:35.098Z",
+   "file": "codex-sessions/rollout-2026-10-25T23-22-35-01a176df-fdd0-7152-9422-298d6136273d.jsonl",
+   "sha256": "ba46b807ab8181a816d4a3ac1f6408dd6c0721efad81b31d1c084ef046873f6b",
+   "items": {
+    "UserMessage": 1,
+    "Reasoning": 30,
+    "AgentMessage": 5,
+    "SubAgentActivity": 9,
+    "Extension:web.search": 10
+   },
+   "script_tools": {
+    "web__run": 10
+   },
+   "functions": {
+    "spawn_agent": 3,
+    "wait": 6,
+    "send_message": 2,
+    "followup_task": 1
+   },
+   "served_pages": 171,
+   "audit": {
+    "events": 45,
+    "tool_calls": 10,
+    "web_calls": 10,
+    "urls": [
+     "https://ora-cfo.dc.gov/node/1824291",
+     "https://proanimaldc.org/",
+     "search: \"2022\" \"INITIATIVE MEASURE NO. 82\" \"YES\" \"132\" ...",
+     "search: \"Denver\" \"foie gras\" \"support\" \"2026\" \"85%\" CSU ...",
+     "search: \"Initiative 82\" \"131\" \"2022\" votes ...",
+     "search: \"Initiative 86\" poll DC 2026 -site:reddit.com -site:onpointpolitics.us ...",
+     "search: DC Initiative 86 October 2026 poll foie gras November 3 2026 ...",
+     "search: Pittsburgh foie gras ban ordinance sale effective 2026 2025 law ...",
+     "search: site:dcboe.org \"2022\" \"INITIATIVE MEASURE\" \"Yes\" \"No\" 82 certified ...",
+     "search: site:dcboe.org \"2026\" \"Voter Registration Statistics\" October ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   },
+   "script_suspect": []
+  },
+  {
+   "thread_id": "01a176e2-74fc-7a11-8e38-ca0baceb5b66",
+   "spawned_by": "01a176df-fdd0-7152-9422-298d6136273d",
+   "agent_path": "/root/legal",
+   "attempt": "20261025-223151-i86-sol-2/a1",
+   "collected": true,
+   "started": "2026-10-26T06:25:15.037Z",
+   "file": "codex-sessions/rollout-2026-10-25T23-25-15-01a176e2-74fc-7a11-8e38-ca0baceb5b66.jsonl",
+   "sha256": "548cfb9ed9eb36e1cf40807db6e227d6dc0e4dad9f68cec8f63b86de2fded9d3",
+   "items": {
+    "Extension:web.search": 9,
+    "Reasoning": 13,
+    "SubAgentActivity": 3,
+    "AgentMessage": 1
+   },
+   "script_tools": {
+    "web__run": 9
+   },
+   "functions": {
+    "send_message": 3,
+    "wait": 5
+   },
+   "served_pages": 121,
+   "audit": {
+    "events": 23,
+    "tool_calls": 9,
+    "web_calls": 9,
+    "urls": [
+     "https://agriculture.house.gov/UploadedFiles/FINAL_2026_Prop12_OnePager.pdf",
+     "https://dcboe.org/ballot-measures/current-measures",
+     "search: ",
+     "search: \"Initiative 86\" \"2026\" foie gras opposition lawsuit ...",
+     "search: 'conclude'",
+     "search: site.agriculture.house.gov \"2026\" \"April 30\" \"Farm\" ...",
+     "search: site.dcboe.org \"Initiative\" \"86\" \"General Counsel\" ...",
+     "search: site.dccouncil.gov Initiative 82 2025 rollback tipped minimum wage vote ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   },
+   "script_suspect": []
+  },
+  {
+   "thread_id": "01a176e2-b752-7142-853d-1535e8b4a539",
+   "spawned_by": "01a176df-fdd0-7152-9422-298d6136273d",
+   "agent_path": "/root/direct_outcomes",
+   "attempt": "20261025-223151-i86-sol-2/a1",
+   "collected": true,
+   "started": "2026-10-26T06:25:32.015Z",
+   "file": "codex-sessions/rollout-2026-10-25T23-25-32-01a176e2-b752-7142-853d-1535e8b4a539.jsonl",
+   "sha256": "e54bd94d96bbd40ca0e90041e91b8c2f4a9f4922dfdd9cdc490e2c4c131a8626",
+   "items": {
+    "Extension:web.search": 11,
+    "SubAgentActivity": 4,
+    "Reasoning": 10,
+    "AgentMessage": 1
+   },
+   "script_tools": {
+    "web__run": 11
+   },
+   "functions": {
+    "wait": 7,
+    "send_message": 4
+   },
+   "served_pages": 183,
+   "audit": {
+    "events": 22,
+    "tool_calls": 11,
+    "web_calls": 11,
+    "urls": [
+     "https://www.portland.gov/sites/default/files/council-documents/2026/2026-033-testimony.pdf",
+     "search: ",
+     "search: \"2026\" \"foie gras\" \"350,000 ducks\" ...",
+     "search: \"Pro-Animal DC\" \"48\" \"list\" ...",
+     "search: \"Washington DC\" \"foie gras\" menu -site:reddit.com -site:tripadvisor.com -site:yelp.com -site:allmenus.com ...",
+     "search: \"Washington DC\" \"liver mousse\" -site:yelp.com -site:tripadvisor.com -site:reddit.com -site:allmenus.com ...",
+     "search: \"liver\" \"pate\" \"menu\" \"DC\" \"site:lapiquettedc.com\" ...",
+     "search: Pro Animal DC foie gras restaurants 2026 Colorado State University study Washington DC restaurants count ...",
+     "search: US foie gras ducks 2026 350000 600000 annual force fed ...",
+     "search: site.guide.michelin.com 2026 California 90 Michelin starred restaurants ...",
+     "search: site.hudsonvalleyfoiegras.com ducks \"350,000\" ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   },
+   "script_suspect": []
+  },
+  {
+   "thread_id": "01a176e2-e46b-7783-8da0-25ec5af51ef5",
+   "spawned_by": "01a176df-fdd0-7152-9422-298d6136273d",
+   "agent_path": "/root/spillovers",
+   "attempt": "20261025-223151-i86-sol-2/a1",
+   "collected": true,
+   "started": "2026-10-26T06:25:43.615Z",
+   "file": "codex-sessions/rollout-2026-10-25T23-25-43-01a176e2-e46b-7783-8da0-25ec5af51ef5.jsonl",
+   "sha256": "ca9c47983e5672b9d902ea5efb2ade365574d50a3eecce157c78e6505c5d6db7",
+   "items": {
+    "Extension:web.search": 13,
+    "SubAgentActivity": 7,
+    "Reasoning": 16,
+    "AgentMessage": 1
+   },
+   "script_tools": {
+    "web__run": 13
+   },
+   "functions": {
+    "wait": 8,
+    "send_message": 7
+   },
+   "served_pages": 196,
+   "audit": {
+    "events": 30,
+    "tool_calls": 13,
+    "web_calls": 13,
+    "urls": [
+     "https://proanimal.org/wp-content/uploads/paf-2025-financial-transparency-briefing.pdf",
+     "search: \"Farm, Food, and National Security Act of 2026\" Senate October 2026 Prop 12 ...",
+     "search: \"Fur Products Prohibition Act of 2023\" status ...",
+     "search: New York City foie gras ban 2026 April Court Appeals stay enforce",
+     "search: Pro-Animal Future 2026 Denver 311 foie gras ballot 2028 strategy ...",
+     "search: site.proanimalfuture.org 2028 statewide strategy foie gras ...",
+     "search: site:awionline.org farmed animal state legislation 2026 confinement laws 15 states",
+     "search: site:brooklinema.gov \"foie gras\"",
+     "search: site:brooklinema.gov \"foie gras\" \"2025\" ...",
+     "search: site:congress.gov/bill/119th-congress/house-bill/7567 \"Latest Action\" ...",
+     "search: site:lims.dccouncil.gov \"Fur Products Prohibition\"",
+     "search: site:proanimal.org \"statewide\" ..."
+    ],
+    "violations": [],
+    "suspect": [],
+    "local_calls": [],
+    "passed": true
+   },
+   "script_suspect": []
+  }
+ ],
+ "missing": [],
+ "flags": [],
+ "orphans": [],
+ "job_id": "20261025-223151-i86-sol-2",
+ "collected_attempt": "20261025-223151-i86-sol-2/a1",
+ "main_thread": "01a176df-fdd0-7152-9422-298d6136273d",
+ "transcript_check": {
+  "items": 10,
+  "only_in_transcript": [],
+  "only_in_log": [],
+  "different": []
+ },
+ "web_calls": 43,
+ "served_pages": 671,
+ "commands": 0,
+ "violations": 0,
+ "suspect": 0,
+ "passed": true
+}

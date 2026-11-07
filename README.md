@@ -35,9 +35,8 @@ votes, dollars, jobs or birds. Yes/no questions take probabilities, and the ban'
 probability for each option. The Yes share takes a full cumulative distribution.
 
 **The cutoff contrast.** Comparing the 49.5% and 50.5% cells separates what passing changes from what
-a large margin reveals about voters. This follows the paired within-run design of
-[dc-mayor-llm-forecast](https://github.com/MaxGhenis/dc-mayor-llm-forecast), and the paired legal-state
-arms of Thesis's bill lane.
+a large margin reveals about voters. This paired within-run design follows the paired legal-state arms
+of Thesis's bill lane.
 
 Denver votes the same day, so DC's result cannot cause Denver's. The simulator interpolates Denver's
 question across 50% and holds it at 50% in both cutoff arms.
@@ -112,12 +111,17 @@ Then collect, check, audit and pool:
 .venv/bin/i86 recover LABEL  # take a finished agent's answer from its own transcript when subfleet reports the run lost
 .venv/bin/i86 check        # parse and validate every response
 .venv/bin/i86 audit        # check each transcript's tool calls
+.venv/bin/python scripts/audit_codex_sessions.py  # check each Codex run's sub-agents and earlier attempts
 .venv/bin/i86 simulate     # pool the accepted runs into outputs/ (see Independence for exclusions)
 .venv/bin/i86 prereg       # hash everything into prereg/SHA256SUMS and timestamp it
 ```
 
 `simulate` is deterministic given the committed responses and the seed, and each run's draws depend
-only on its own label. The `claude` backend runs Claude Code in bare mode, which skips hooks, memory and
+only on its own label. On arm64 (Apple silicon) with Python 3.13.9 and numpy 2.5.4,
+`.venv/bin/i86 simulate --accept-suspect sol-3` reproduces `outputs/` byte for byte. An x86_64 build
+(Python 3.13.13, the same numpy) moves three values in `summary.json` in their last digit.
+
+The `claude` backend runs Claude Code in bare mode, which skips hooks, memory and
 CLAUDE.md files but needs `ANTHROPIC_API_KEY`. A response that fails `check` is not repaired: dispatch
 a fresh run under a new label. Once any answer is in `runs/`, `dispatch` refuses a new run unless it is
 marked `--late`, and the report flags late runs.
@@ -238,10 +242,124 @@ every review's inputs.
 output, readonly writes and expansions against the shells on generated and measured programs.
 Within its assumptions, a call in the subset reads nothing outside the work directory but what the
 tools load to run (libraries, locale data, user names) and the ignore files rg and ugrep consult,
-which only choose among the files they search. A call outside it is suspect, and whether it read
-anything is for a reader to judge from the call and the model's reasons before the run is pooled.
-The audit catches accidental and casual reads. A forecaster set on hiding one could make the read
-look like a call the model misreads, and then only the reader of the suspect calls stands in the way.
+which only choose among the files they search. A call outside it is suspect, since the audit cannot
+say what it read. Whoever pools the runs judges that from the call and the model's reasons, and pools
+a run with suspect calls only by naming it in `--accept-suspect`. The audit catches accidental and
+casual reads. A forecaster set on hiding one could make the read look like a call the model misreads,
+and then only whoever pools the runs could catch it.
+
+A Codex run's transcript holds only the collected attempt's main thread. Under Codex CLI 0.159,
+`codex exec --json` leaves out the sub-agents a forecaster spawns, which make tool calls of their own.
+When an attempt fails, subfleet runs the brief again in the same work directory and keeps the
+transcript of the attempt it collects. The lanes' session logs record every thread, and
+`scripts/audit_codex_sessions.py` audits them. It finds every thread whose log records the run's work
+directory as the folder where it started, however the log's JSON spells the path. It compares paths as
+text, so it misses a thread whose log records another path to that folder, such as a symlink to it. It
+audits each thread's calls as `i86 audit` audits a transcript, and checks the collected main thread's
+calls against the transcript's, item by item and in order.
+
+The script fails a run when:
+
+- a main thread belongs to none of the job's attempts, or an attempt that started left no log. The
+  script counts an attempt as started when subfleet's record gives it a session, a start time, an
+  outcome class other than `unknown`, or the state `starting`, `running`, `finalizing` or `succeeded`;
+- subfleet has no attempts on record and the run collected anything but its own job's first attempt;
+- the run gives as its job anything but a string;
+- subfleet's record of the attempts names another job, skips an attempt, gives two attempts one
+  session, or gives an attempt a sub-agent's thread as its session;
+- a thread descends from no main thread;
+- the script cannot list a folder on the way to the lanes' logs, since a log in it could record one of
+  the run's threads;
+- the script cannot open a session log, or finds a log that names the work directory but whose first
+  line gives no absolute path for where its thread started (a path with a NUL, or a character UTF-8
+  cannot encode, counts as none);
+- a session started in a folder inside the work directory, or at another path that names it;
+- the transcript records any thread but the collected attempt's main thread, or records calls that
+  differ from that thread's or come in another order. The script reads calls and pairs ids as
+  `i86 audit` does, so a message's line can hold a call, and two ids that are numbers match only when
+  they are equal. Two commands count as one call when they match as written, or when a shell reads
+  nothing but words from each and the same words from both. A control character other than a tab or a
+  line feed, quoted or not, keeps a command as written. `i86 audit` reads the transcript's own spelling,
+  so one it cannot read stays a suspect call;
+- the transcript holds any line but the thread's one start, events of its turns that hold no call, and
+  items that each complete with the calls they started with;
+- a line of the transcript that starts or updates an item holds a call in its `message`, which
+  `i86 audit` counts there and then;
+- a thread's `spawn_agent` calls do not match the sub-agents it started;
+- a thread ran a command anywhere but the work directory itself (a folder inside it counts as
+  another), or in a folder the script cannot place: a relative path, a path with a `..` part, or a
+  file URL that names another host or holds a `?`, `#`, `%` or control character, since a folder's
+  name can hold any of these and a URL reader gives each another meaning or drops it;
+- a thread's log holds a line the script cannot read: one that does not parse, gives a key twice,
+  nests more than 64 levels or holds a field of a type its checks cannot read;
+- two logs of one thread differ; or
+- any thread makes a call that the audit counts as a violation.
+
+Every thread's suspect calls count toward the run's, including an earlier attempt's.
+
+On these lanes the model calls the web tool from JavaScript cells, and a log's items record only part
+of what a cell opens. So the script also reads each cell's code as a web call's input and audits every
+page the web tool says it served. It decodes the escapes in each string a cell writes out, writes each
+number, `true`, `false` and `null` as JavaScript writes it in a string, and joins what a `+` or a
+template puts together into one string, as JavaScript joins it, before it checks them. It flags a cell
+that calls any tool but the web tool and the shell, reaches `tools` other than by name, or names a
+global the cells' runtime lacks. It also flags `eval`, `Function`, `constructor` and other words that
+can build code or reach a prototype, whether a cell writes one out or spells it from strings. A cell
+opens a page by giving `ref_id` a web address or the id of a result the web tool returned. The script
+flags a cell that writes `ref_id` anywhere but as a key in an object literal, or gives that key any
+value but a web address or id in quotes. A cell that does not parse as JavaScript passes only when its
+log shows the runtime refused to compile it. The script reads cells without running them, so a cell
+that builds a name or an address as it runs, from a variable such as `undefined`, an array, a
+function's result, or an operator other than a `+` with a string on one side, could still hide a call.
+
+The script writes `runs/<label>/codex-sessions/audit.json`, with each log's SHA-256, and
+`attempts.json`, subfleet's record of the job's attempts. The logs themselves hold the lanes'
+account identifiers and local paths, and `.gitignore` keeps them out of this repository. The script
+keeps a copy of each log in the run's folder and never replaces one. It stops when a kept copy
+differs from the lane's, when anything but a regular file sits in a kept copy's place, or when it
+cannot read one. It also stops when a link or anything but a folder sits where it keeps the copies,
+when that folder holds a link, or when it cannot list, search or write in that folder. Where it
+writes `audit.json`, a link, anything but a regular file, or a file it cannot write stops it. It
+writes each file in full to a part file beside it before it gives the file its name. It links each
+copy and `attempts.json` into place only where nothing sits yet, and renames `audit.json` into
+place, so a hard link to the old file keeps the old bytes. A process that dies part way through a
+write leaves at most a part file, never part of a file under its name. The script's next audit of
+the run removes such a part file, and stops, by name, at one it cannot remove. The script does not
+guard against a power cut.
+
+`simulate` pools a Codex run only when this audit passed. It checks that verdict against the run's
+work directory and job, and against what the two files record: the threads, their parents, fields,
+counts and own audits, the check of the transcript, and the attempts. Each thread's counts of events
+and calls must match its items, and its web, suspect and local calls must add up to its calls. Its
+audit may list only searches and commands as suspect calls and only commands as local calls, no more
+of either than the thread made. Its web addresses must match its web calls, and it must name a kept
+log of its own, by file name and SHA-256. `simulate` excludes a run when it cannot read either file
+as JSON, cannot look for one in a folder it may not search, or finds a link at either file or at
+`codex-sessions`. It counts the run's suspect calls along with the transcript's, and reads the
+committed files without running either audit again. Since it never reads the logs, it cannot tell
+the script's record from one that someone edited to hide a suspect call without breaking those
+checks. For example, someone could count the call as a web or local call. Anyone who re-runs the
+script on the kept logs can tell them apart, and a stamp shows any edit after it.
+
+`prereg` hashes each run's transcript, `audit.json` and `attempts.json`, so a file that changes
+after a stamp no longer matches the stamped list. It stops, by name, at anything but a regular file
+in place of a run's file, a link included, at a link in place of `codex-sessions`, at any file it
+cannot read, and at a run's file it cannot look for, in a folder it may not search. `prereg`,
+`simulate`, `collect`, `check`, `i86 audit` and the script all stop, by name, at a `runs/` they
+cannot list, at a run folder they may not search, and at a link in place of `runs/` or of a run
+folder, since git keeps the link and not what it leads to. The script also stops, by name, at a
+collected run's `meta.json` that it cannot read as a JSON object, and at a label that does not name
+one folder in `runs/`.
+
+The four GPT-6.1 Sol runs left 24 threads: 18 sub-agents and six main threads, since sol-1 and sol-3
+each made a second attempt after the first stopped with "Selected model is at capacity". Together
+they made 251 web calls, 39 of them in the transcripts, and no shell commands. The audit accepts the
+address of every page the web tool served them and fails no call. It flags one call as suspect: a
+sub-agent in sol-3's first attempt asked the web tool to open
+`https://lim s.dccouncil.gov/Legislation/B25-0122`, with a space inside the Council's `lims` host
+name. The audit cannot tell where a host named `lim` leads; the web tool answered "Unable to resolve
+open call due to invalid ref_id argument" and served no page for it. A Claude Code session read that
+call and pooled sol-3 into the committed outputs with `simulate --accept-suspect sol-3`.
 
 ## Files
 
@@ -249,16 +367,18 @@ look like a call the model misreads, and then only the reader of the suspect cal
 - `context/`: the measure's text and the CFO's fiscal impact statement, given to every forecaster.
 - `prompts/forecaster.md`: the generated prompt; `schemas/template.json`: the response template.
 - `runs/<label>/`: each run's prompt (and the prompt as sent), metadata, verbatim answer, transcript,
-  parsed response and audit.
+  parsed response and audit; for a Codex run, `codex-sessions/` holds the audit of its session logs
+  and subfleet's record of its attempts.
+- `scripts/audit_codex_sessions.py`: the audit of Codex runs' session logs.
 - `outputs/`: pooled summaries (`summary.md`, `summary.json`, `nodes.csv`, `runs.csv`).
 - `src/i86/`: graph loading, response checks, samplers, simulator, pooling, report, runners and audit.
 - `tests/`: property-based tests of the samplers and simulator invariants; differential tests of the
   decisive-ballot formula against its closed form and of the weighted conditionals against plain
   filtering; audit cases, including every bypass found in review, the shell model against bash and zsh
   on generated programs, and the exact subset against bash, zsh, sh, dash and Claude Code's shell;
-  and the staging and pooling rules. `test_review_r3_*.py` to
-  `test_review_r6_*.py` are the independent reviews' probes, kept as regression tests. Test responses
-  are labelled MOCK.
+  the session-log audit on MOCK logs, and the strings and numbers it reads from cells against node's;
+  and the staging and pooling rules. `test_review_r3_*.py` to `test_review_r6_*.py` are the
+  independent reviews' probes, kept as regression tests. Test responses are labelled MOCK.
 
 ## What the numbers are
 

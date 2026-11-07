@@ -19,10 +19,10 @@
 | opus-7 | claude-opus-5-5 | 94% | 64.7% | 1 in 400,828 | 6% | 0% | 0 | none | late |
 | sol-1 | gpt-6.1-sol | 89% | 62.1% | 1 in 225,336 | 12% | 15% | 0 | none |  |
 | sol-2 | gpt-6.1-sol | 86% | 62.0% | 1 in 199,377 | 12% | 8% | 0 | none |  |
-| sol-3 | gpt-6.1-sol | 90% | 63.7% | 1 in 257,432 | 12% | 15% | 0 | none |  |
+| sol-3 | gpt-6.1-sol | 90% | 63.7% | 1 in 257,432 | 12% | 15% | 1 | none |  |
 | sol-4 | gpt-6.1-sol | 90% | 63.4% | 1 in 294,337 | 12% | 15% | 0 | none |  |
 
-'Same at every cell' and 'Same at 49.5% and 50.5%' are the shares of a run's question-and-state groups whose answers are identical across cells; high values can mean copied answers. 'Suspect calls' counts tool calls the audit flagged for reading without excluding the run. 'Prior context' is what the forecaster reported seeing, before research, beyond the brief. 'late' runs were dispatched after other answers were in the repository; 'recovered' runs were reported lost by their supervisor, and their answer is the final message in the run's own transcript.
+'Same at every cell' and 'Same at 49.5% and 50.5%' are the shares of a run's question-and-state groups whose answers are identical across cells; high values can mean copied answers. 'Suspect calls' counts tool calls the audit cannot clear, and `simulate` pools a run with any only when `--accept-suspect` names that run. For a run on a Codex lane, the count also takes in what only its session logs record: the calls of its sub-agents, its earlier attempts and its scripts, and the pages the web tool served (`codex-sessions/audit.json`). 'Prior context' is what the forecaster reported seeing, before research, beyond the brief. 'late' runs were dispatched after other answers were in the repository; 'recovered' runs were reported lost by their supervisor, and their answer is the final message in the run's own transcript.
 
 ## Vote
 

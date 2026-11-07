@@ -1,0 +1,315 @@
+"""`i86 prereg` hashes what a reader can check from this repository, and replaces the previous proof
+instead of leaving it beside a manifest it does not prove, once a dated folder keeps both. MOCK files
+in a temporary root."""
+
+import argparse
+import os
+import re
+
+import pytest
+
+from i86 import cli, runners
+
+
+def area(tmp_path, monkeypatch, dated=True):
+    """A MOCK repository root: map, prompt, template and brief, no runs or outputs, and a previous
+    manifest with its proof, which a dated folder keeps unless `dated` is false."""
+    for rel in ("graph/graph.yaml", "prompts/forecaster.md", "schemas/template.json", "context/brief.md"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(f"MOCK {rel}\n")
+    prereg = tmp_path / "prereg"
+    for folder in (prereg / "2026-01-01-MOCK", prereg) if dated else (prereg,):
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "SHA256SUMS").write_text("MOCK OLD MANIFEST\n")
+        (folder / "SHA256SUMS.ots").write_text("MOCK OLD PROOF\n")
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    monkeypatch.setattr(cli, "PROMPT_PATH", tmp_path / "prompts" / "forecaster.md")
+    monkeypatch.setattr(cli, "TEMPLATE_PATH", tmp_path / "schemas" / "template.json")
+    monkeypatch.setattr(cli, "OUTPUTS", tmp_path / "outputs")
+    monkeypatch.setattr(cli, "PREREG", prereg)
+    monkeypatch.setattr(runners, "RUNS", tmp_path / "runs")
+    return prereg
+
+
+def test_a_new_manifest_gets_a_new_proof(tmp_path, monkeypatch):
+    prereg = area(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, (prereg / "SHA256SUMS.ots").exists()))
+        (prereg / "SHA256SUMS.ots").write_text("MOCK NEW PROOF\n")
+        return argparse.Namespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli.cmd_prereg(argparse.Namespace(no_stamp=False)) == 0
+    [(cmd, old_proof_present)] = calls
+    assert cmd[-2:] == ["stamp", str(prereg / "SHA256SUMS")]
+    assert not old_proof_present
+    assert (prereg / "SHA256SUMS.ots").read_text() == "MOCK NEW PROOF\n"
+    assert "MOCK OLD MANIFEST" not in (prereg / "SHA256SUMS").read_text()
+
+
+def test_a_codex_runs_session_audit_and_attempts_are_hashed_and_its_logs_are_not(tmp_path, monkeypatch):
+    """The logs stay out of this public repository, so a manifest that listed them could not be
+    checked from it; the audit, which the manifest lists, records each log's SHA-256."""
+    prereg = area(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no stamp")))
+    sessions = tmp_path / "runs" / "sol-1" / "codex-sessions"
+    sessions.mkdir(parents=True)
+    (sessions.parent / "meta.json").write_text("MOCK meta\n")
+    for name in ("rollout-MOCK.jsonl", "audit.json", "attempts.json", "MOCK-notes.txt"):
+        (sessions / name).write_text(f"MOCK {name}\n")
+    (tmp_path / "runs" / "opus-1").mkdir()
+    (tmp_path / "runs" / "opus-1" / "meta.json").write_text("MOCK meta\n")
+    assert cli.cmd_prereg(argparse.Namespace(no_stamp=True)) == 0
+    manifest = (prereg / "SHA256SUMS").read_text()
+    for rel in ("runs/sol-1/meta.json", "runs/sol-1/codex-sessions/audit.json",
+                "runs/sol-1/codex-sessions/attempts.json", "runs/opus-1/meta.json"):
+        assert f"  {rel}\n" in manifest
+    assert "rollout-MOCK.jsonl" not in manifest and "MOCK-notes.txt" not in manifest
+    assert "opus-1/codex-sessions" not in manifest
+
+
+@pytest.mark.parametrize("name", ["codex-sessions/attempts.json", "codex-sessions/audit.json", "transcript.jsonl"])
+@pytest.mark.parametrize("kind", ["a folder", "a pipe", "a link to nothing"])
+def test_a_run_file_that_is_not_a_regular_file_stops_prereg(tmp_path, monkeypatch, name, kind):
+    """Review 6: prereg hashes each run's files; a folder, a link to nothing or a pipe (whose read
+    would wait for a writer forever) where one should be stops it, by name, before it writes a manifest."""
+    prereg = area(tmp_path, monkeypatch)
+    path = tmp_path / "runs" / "sol-1" / name
+    path.parent.mkdir(parents=True)
+    (tmp_path / "runs" / "sol-1" / "meta.json").write_text("MOCK meta\n")
+    {"a folder": path.mkdir, "a pipe": lambda: os.mkfifo(path),
+     "a link to nothing": lambda: path.symlink_to(path.with_name("MOCK-gone"))}[kind]()
+    with pytest.raises(SystemExit, match=f"runs/sol-1/{name} is not a regular file"):
+        cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
+
+
+@pytest.mark.parametrize("name", ["meta.json", "response.md", "response.json", "audit.json", "transcript.jsonl",
+                                  "codex-sessions/audit.json", "codex-sessions/attempts.json"])
+def test_a_link_to_a_file_in_place_of_a_run_file_stops_prereg(tmp_path, monkeypatch, name):
+    """Review 11: prereg hashed what a link led to under the run file's name, though git would hold only
+    the link."""
+    prereg = area(tmp_path, monkeypatch)
+    run = tmp_path / "runs" / "sol-1"
+    (run / "codex-sessions").mkdir(parents=True)
+    (run / "meta.json").write_text("MOCK meta\n")
+    outside = tmp_path / "MOCK-outside"
+    outside.write_text("MOCK outside\n")
+    (run / name).unlink(missing_ok=True)
+    (run / name).symlink_to(outside)
+    with pytest.raises(SystemExit, match=f"runs/sol-1/{name} is not a regular file"):
+        cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
+
+
+@pytest.mark.parametrize("leads_to", ["a folder of records", "an empty folder", "nothing"])
+def test_a_link_in_place_of_the_kept_folder_stops_prereg(tmp_path, monkeypatch, leads_to):
+    """Each of these must stop it: a folder that held no record would otherwise read as a run with none."""
+    prereg = area(tmp_path, monkeypatch)
+    run = tmp_path / "runs" / "sol-1"
+    run.mkdir(parents=True)
+    (run / "meta.json").write_text("MOCK meta\n")
+    outside = tmp_path / "MOCK-outside"
+    if leads_to != "nothing":
+        outside.mkdir()
+    if leads_to == "a folder of records":
+        (outside / "audit.json").write_text("{}\n")
+        (outside / "attempts.json").write_text("{}\n")
+    (run / "codex-sessions").symlink_to(outside)
+    with pytest.raises(SystemExit, match="runs/sol-1/codex-sessions is a link, so prereg cannot hash what it leads to"):
+        cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
+
+
+def test_a_checkout_behind_a_link_still_hashes_its_run_files(tmp_path, monkeypatch):
+    real = tmp_path / "MOCK-real"
+    real.mkdir()
+    prereg = area(real, monkeypatch)
+    link = tmp_path / "MOCK-checkout"
+    link.symlink_to(real)
+    monkeypatch.setattr(cli, "ROOT", link)
+    monkeypatch.setattr(cli, "PROMPT_PATH", link / "prompts" / "forecaster.md")
+    monkeypatch.setattr(cli, "TEMPLATE_PATH", link / "schemas" / "template.json")
+    monkeypatch.setattr(cli, "OUTPUTS", link / "outputs")
+    monkeypatch.setattr(cli, "PREREG", link / "prereg")
+    monkeypatch.setattr(runners, "RUNS", link / "runs")
+    sessions = link / "runs" / "sol-1" / "codex-sessions"
+    sessions.mkdir(parents=True)
+    (sessions.parent / "meta.json").write_text("MOCK meta\n")
+    (sessions / "audit.json").write_text("{}\n")
+    assert cli.cmd_prereg(argparse.Namespace(no_stamp=True)) == 0
+    assert "  runs/sol-1/codex-sessions/audit.json\n" in (prereg / "SHA256SUMS").read_text()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+@pytest.mark.parametrize("name", ["codex-sessions/attempts.json", "codex-sessions/audit.json", "transcript.jsonl"])
+def test_a_run_file_prereg_cannot_read_stops_it(tmp_path, monkeypatch, name):
+    """Review 7: a regular file the system will not let prereg read stops it, by name, before it writes
+    a manifest, instead of an error from reading it."""
+    prereg = area(tmp_path, monkeypatch)
+    path = tmp_path / "runs" / "sol-1" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "runs" / "sol-1" / "meta.json").write_text("MOCK meta\n")
+    path.write_text("MOCK\n")
+    path.chmod(0)
+    with pytest.raises(SystemExit, match=rf"prereg cannot read runs/sol-1/{re.escape(name)} \(PermissionError\)"):
+        cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
+
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches any folder")
+def test_a_sessions_folder_prereg_cannot_search_stops_it(tmp_path, monkeypatch):
+    """Review 8: prereg cannot tell what sits in a run's `codex-sessions` folder when it may not search
+    it, and the folder could hold the audit and the attempts it hashes, so it stops, by name, before it
+    writes a manifest that leaves them out."""
+    prereg = area(tmp_path, monkeypatch)
+    sessions = tmp_path / "runs" / "sol-1" / "codex-sessions"
+    sessions.mkdir(parents=True)
+    (sessions.parent / "meta.json").write_text("MOCK meta\n")
+    (sessions / "audit.json").write_text("MOCK\n")
+    sessions.chmod(0o600)
+    match = r"prereg cannot read runs/sol-1/codex-sessions/audit\.json \(PermissionError\)"
+    try:
+        with pytest.raises(SystemExit, match=match):
+            cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+    finally:
+        sessions.chmod(0o700)
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches any folder")
+@pytest.mark.parametrize("mode", [0o000, 0o600])
+def test_a_run_folder_prereg_cannot_search_stops_it(tmp_path, monkeypatch, mode):
+    """Review 9: prereg looks in each folder of `runs/` for a meta.json. In one it may not search,
+    `Path.exists` raised before Python 3.14, and from 3.14 on reads nothing there, so prereg would leave
+    the run out of its manifest without a word. It stops, by name, on every Python, before it writes a
+    manifest, and so does `simulate`."""
+    prereg = area(tmp_path, monkeypatch)
+    run = tmp_path / "runs" / "sol-1"
+    run.mkdir(parents=True)
+    (run / "meta.json").write_text("MOCK meta\n")
+    run.chmod(mode)
+    match = r"cannot look for .*runs/sol-1/meta\.json \(PermissionError\)"
+    try:
+        with pytest.raises(SystemExit, match=match):
+            cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+        with pytest.raises(SystemExit, match=match):
+            cli.accepted_runs(None, "sha")
+    finally:
+        run.chmod(0o700)
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists any folder")
+@pytest.mark.parametrize("mode", [0o000, 0o300])
+def test_a_runs_folder_prereg_cannot_list_stops_it(tmp_path, monkeypatch, mode):
+    """A `runs/` the tools cannot list could hold any run, so prereg and `simulate` stop, by name, before
+    prereg writes a manifest, where they raised before."""
+    prereg = area(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+    (runs / "sol-1").mkdir(parents=True)
+    (runs / "sol-1" / "meta.json").write_text("MOCK meta\n")
+    runs.chmod(mode)
+    match = r"cannot list .*/runs \(PermissionError\)"
+    try:
+        with pytest.raises(SystemExit, match=match):
+            cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+        with pytest.raises(SystemExit, match=match):
+            cli.accepted_runs(None, "sha")
+    finally:
+        runs.chmod(0o700)
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
+
+
+def test_the_run_folders_are_those_that_hold_a_meta_json(tmp_path, monkeypatch):
+    """`runners.run_dirs` reads what `Path.exists` read as nothing there before Python 3.14 as no run: a
+    file, a pipe or a link to nothing or in a loop in `runs/`, and a folder whose meta.json is a link to
+    nothing. A folder that holds a meta.json is a run, in order of its name."""
+    area(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+    for label in ("sol-2", "sol-1"):
+        (runs / label).mkdir(parents=True)
+        (runs / label / "meta.json").write_text("MOCK meta\n")
+    (runs / "MOCK-file").write_text("MOCK\n")
+    os.mkfifo(runs / "MOCK-pipe")
+    (runs / "MOCK-gone").symlink_to(runs / "MOCK-nothing")
+    (runs / "MOCK-loop").symlink_to(runs / "MOCK-loop")
+    (runs / "MOCK-no-meta").mkdir()
+    (runs / "MOCK-meta-gone").mkdir()
+    (runs / "MOCK-meta-gone" / "meta.json").symlink_to(runs / "MOCK-nothing")
+    assert runners.run_dirs() == [runs / "sol-1", runs / "sol-2"]
+    assert runners.run_dirs(tmp_path / "MOCK-no-runs") == []
+    (runs / "MOCK-to-no-meta").symlink_to(runs / "MOCK-no-meta")
+    assert runners.run_dirs() == [runs / "sol-1", runs / "sol-2"]
+    with pytest.raises(SystemExit, match=r"runs/MOCK-gone is a link"):
+        runners.run_dirs(runs / "MOCK-gone")
+    with pytest.raises(SystemExit, match=r"cannot list .*/runs/MOCK-file \(NotADirectoryError\)"):
+        runners.run_dirs(runs / "MOCK-file")
+
+
+def test_a_sessions_entry_that_is_a_file_holds_nothing_for_prereg_to_hash(tmp_path, monkeypatch):
+    """Nothing can sit below a file, so prereg finds no audit or attempts in a run whose `codex-sessions`
+    is a file, and hashes the run's other files."""
+    prereg = area(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no stamp")))
+    run = tmp_path / "runs" / "sol-1"
+    run.mkdir(parents=True)
+    (run / "meta.json").write_text("MOCK meta\n")
+    (run / "codex-sessions").write_text("MOCK not a folder\n")
+    assert cli.cmd_prereg(argparse.Namespace(no_stamp=True)) == 0
+    manifest = (prereg / "SHA256SUMS").read_text()
+    assert "  runs/sol-1/meta.json\n" in manifest and "codex-sessions" not in manifest
+
+def test_hashing_without_a_stamp_drops_the_old_proof(tmp_path, monkeypatch):
+    prereg = area(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no stamp")))
+    assert cli.cmd_prereg(argparse.Namespace(no_stamp=True)) == 0
+    assert not (prereg / "SHA256SUMS.ots").exists()
+    assert "graph/graph.yaml" in (prereg / "SHA256SUMS").read_text()
+    assert (prereg / "2026-01-01-MOCK" / "SHA256SUMS.ots").read_text() == "MOCK OLD PROOF\n"
+
+
+@pytest.mark.parametrize("folder", [None, "MOCK OTHER PROOF\n", "MOCK OLD PROOF\n"])
+def test_a_proof_no_dated_folder_keeps_stops_prereg(tmp_path, monkeypatch, folder):
+    """Review finding 11: without a dated copy of the proof and of the manifest it stamps, byte for
+    byte, `prereg` would leave the proof only in git's history. It stops before it writes anything."""
+    prereg = area(tmp_path, monkeypatch, dated=False)
+    if folder is not None:  # a dated folder with another proof, or with this proof and another manifest
+        (prereg / "2026-01-01-MOCK").mkdir()
+        (prereg / "2026-01-01-MOCK" / "SHA256SUMS.ots").write_text(folder)
+        (prereg / "2026-01-01-MOCK" / "SHA256SUMS").write_text("MOCK OTHER MANIFEST\n")
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no stamp")))
+    with pytest.raises(SystemExit, match="in no dated folder"):
+        cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+    assert (prereg / "SHA256SUMS").read_text() == "MOCK OLD MANIFEST\n"
+    assert (prereg / "SHA256SUMS.ots").read_text() == "MOCK OLD PROOF\n"
+
+
+def test_a_first_manifest_needs_no_dated_folder(tmp_path, monkeypatch):
+    prereg = area(tmp_path, monkeypatch, dated=False)
+    for name in ("SHA256SUMS", "SHA256SUMS.ots"):
+        (prereg / name).unlink()
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no stamp")))
+    assert cli.cmd_prereg(argparse.Namespace(no_stamp=True)) == 0
+    assert "graph/graph.yaml" in (prereg / "SHA256SUMS").read_text()
+
+
+@pytest.mark.parametrize("linked", ["the run", "runs"])
+def test_a_link_in_place_of_a_run_or_of_runs_stops_prereg(tmp_path, monkeypatch, linked):
+    """Review 10: prereg hashed what a link led to under `runs/` names, though git would hold only the link."""
+    area(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no stamp")))
+    run = tmp_path / "runs" / "sol-1"
+    run.mkdir(parents=True)
+    (run / "meta.json").write_text("MOCK meta\n")
+    place = run if linked == "the run" else run.parent
+    place.rename(place.with_name("MOCK-outside"))
+    place.symlink_to(place.with_name("MOCK-outside"))
+    sums = tmp_path / "prereg" / "SHA256SUMS"
+    before = sums.read_text()
+    with pytest.raises(SystemExit, match=rf"{re.escape(str(place))} is a link"):
+        cli.cmd_prereg(argparse.Namespace(no_stamp=True))
+    assert sums.read_text() == before

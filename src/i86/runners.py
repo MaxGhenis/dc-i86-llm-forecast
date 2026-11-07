@@ -42,6 +42,7 @@ Backends:
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -155,8 +156,63 @@ def bookkeeping_lock():
                     fcntl.flock(fd, fcntl.LOCK_UN)
 
 
-def run_dirs() -> list[Path]:
-    return sorted(p for p in RUNS.iterdir() if (p / "meta.json").exists()) if RUNS.exists() else []
+# What `Path.exists` reads as nothing at a path before Python 3.14: nothing there, a part of the path
+# that is no folder, or a link in a loop. From 3.14 on it reads every error so, a folder it may not
+# search among them.
+NOTHING_THERE = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
+
+
+def exists(path: Path) -> bool:
+    """Whether something is at `path`, a link followed, as `Path.exists` reads it before Python 3.14. A
+    path this cannot look at, in a folder it may not search, stops the command, by name, on every
+    Python: there `Path.exists` raises before 3.14 and from 3.14 on reads nothing there."""
+    try:
+        os.stat(path)
+    except OSError as error:
+        if error.errno in NOTHING_THERE:
+            return False
+        raise SystemExit(f"cannot look for {path} ({type(error).__name__})") from None
+    return True
+
+
+def not_a_link(path: Path) -> Path:
+    """`path`, unless a link sits there, which stops the command, by name. What a link leads to lies
+    outside `runs/`: a command would read a run git does not hold, and the audit script would write
+    there."""
+    if os.path.islink(path):
+        raise SystemExit(f"{path} is a link, not a folder of runs or a run's own folder")
+    return path
+
+
+def run_dirs(runs: Path | None = None) -> list[Path]:
+    """The folders in `runs` (by default `runs/`) that hold a meta.json, in order of their names. A `runs`
+    this cannot list, or a folder in it where this cannot look for a meta.json (`exists`), could hold a
+    run, so either stops the command, by name, as a link does in place of `runs` or of a run's folder
+    (`not_a_link`)."""
+    runs = not_a_link(RUNS if runs is None else runs)
+    if not exists(runs):
+        return []
+    try:
+        folders = sorted(runs.iterdir())
+    except OSError as error:
+        raise SystemExit(f"cannot list {runs} ({type(error).__name__})") from None
+    return [not_a_link(p) for p in folders if exists(p / "meta.json")]
+
+
+def attempt_started(attempt: dict) -> bool:
+    """Whether subfleet's record of an attempt says it started: it gives a session or a start time, a
+    state past its launch or an outcome from a provider. subfleet writes none of these for an attempt
+    it never launched: that one holds `reserved`, or ends `failed` or `interrupted` with the outcome
+    class `unknown`."""
+    return bool(attempt.get("native_session_id") or attempt.get("started_at")
+                or attempt.get("state") in ("starting", "running", "finalizing", "succeeded")
+                or attempt.get("outcome_class") not in (None, "unknown"))
+
+
+def first_attempt(job, attempt) -> bool:
+    """Whether `attempt`, the id of the attempt a run collected, is the first of `job`, the run's job:
+    subfleet's attempt ids run <job>/a1, <job>/a2 and on. With no job to match, the id alone says."""
+    return attempt == f"{job}/a1" if job is not None else str(attempt).endswith("/a1")
 
 
 def now() -> str:
@@ -166,6 +222,13 @@ def now() -> str:
 def read_meta(run_dir: Path) -> dict:
     path = run_dir / "meta.json"
     return json.loads(path.read_text()) if path.exists() else {}
+
+
+def served_by_codex(meta: dict) -> bool:
+    """Whether a Codex lane served the run. Its transcript records only the main thread of the attempt
+    subfleet collected; the lane's session logs, which `scripts/audit_codex_sessions.py` audits, record
+    its sub-agents and every earlier attempt too."""
+    return str(meta.get("lane_id", "")).startswith("codex") or str(meta.get("model_served", "")).startswith("gpt")
 
 
 def write_meta(run_dir: Path, meta: dict) -> None:

@@ -1,0 +1,17 @@
+{
+ "job_id": "20261025-223151-i86-sol-4",
+ "accepted_attempt_id": "20261025-223151-i86-sol-4/a1",
+ "attempts": [
+  {
+   "attempt_id": "20261025-223151-i86-sol-4/a1",
+   "lane_id": "codex-4",
+   "native_session_id": "01a176e6-c865-7e12-9f16-7e9cf17fe595",
+   "state": "succeeded",
+   "outcome_class": "ok",
+   "outcome_detail": "Codex completed with a deliverable",
+   "started_at": "2026-10-26T06:29:49.307Z",
+   "finished_at": "2026-10-26T06:50:43.214Z",
+   "model_served": "gpt-6.1-sol"
+  }
+ ]
+}

@@ -4,7 +4,7 @@ The forecasters run on machines that also hold earlier forecasts of these questi
 answers and the operator's notes. The prompt forbids reading local files; this audit reads each run's
 native transcript (Claude stream-json or Codex JSONL) and checks every tool call. It guards against
 accidental and casual reads; a forecaster set on hiding one could make it look like a call the model
-misreads, and then only the reader of the suspect calls stands in the way.
+misreads, and then only whoever pools the runs could catch it.
 
 A shell call counts as local, or web, only inside the subset whose reads `exact` knows from the
 command's text (`check_call`); within its assumptions such a call reads nothing outside the run's
