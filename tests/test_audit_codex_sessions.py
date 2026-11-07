@@ -811,6 +811,36 @@ def test_a_kept_folder_this_script_cannot_search_stops_the_audit(area):
     assert {name: (folder / name).read_bytes() for name in os.listdir(folder)} == before
 
 
+def a_folder_whose_path_takes(base: Path, length: int) -> Path:
+    """A new folder below `base` whose path takes `length` bytes, made of names of at most 200 bytes."""
+    q, r = divmod(length - len(os.fsencode(base)), 201)  # 201: a name and the separator before it
+    sizes = [200] * (q - 1) + [100, 100] if r == 1 else [200] * q + ([r - 1] if r else [])
+    path = base.joinpath(*("d" * size for size in sizes))
+    path.mkdir(parents=True)
+    assert len(os.fsencode(path)) == length
+    return path
+
+
+@pytest.mark.parametrize("name, room", [("attempts.json", 13), ("rollout-MOCK-parent.jsonl", 20)])
+def test_a_kept_file_this_script_cannot_look_up_stops_the_audit(area, tmp_path, name, room):
+    """A kept file this script cannot look up stops the audit, by name, and leaves the run as it was. A
+    link in `codex-sessions` and a folder this script cannot search stop the audit before it looks for a
+    kept file, so what remains is a lookup that fails another way: here, a path past the system's limit,
+    where the audit's own path fits and the kept file's does not. `Path.exists` raises on such a path
+    before Python 3.14, and from 3.14 on reads it as absent."""
+    lanes, run, workdir = area
+    add_parent(lanes, workdir, spawned=())
+    limit = os.pathconf(tmp_path, "PC_PATH_MAX")
+    deep = a_folder_whose_path_takes(tmp_path / "MOCK-deep", limit - room - len("/sol-1/codex-sessions")) / "sol-1"
+    run.rename(deep)
+    folder = deep / "codex-sessions"
+    assert len(os.fsencode(folder / "audit.json")) < limit <= len(os.fsencode(folder / name))
+    before = sorted(os.listdir(deep))
+    with pytest.raises(SystemExit, match=rf"this script cannot look for .*/{re.escape(name)} \(OSError\)"):
+        acs.audit_run(deep, lanes)
+    assert sorted(os.listdir(deep)) == before
+
+
 @pytest.mark.parametrize("line, flag", [
     ("{MOCK", "does not parse"),
     ("[1]", "is not a record"),
