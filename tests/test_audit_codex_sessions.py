@@ -841,6 +841,20 @@ def test_a_kept_file_this_script_cannot_look_up_stops_the_audit(area, tmp_path, 
     assert sorted(os.listdir(deep)) == before
 
 
+def test_a_link_counts_as_something_there_wherever_it_leads(tmp_path):
+    """`_present` reads a link as something there, whether it leads to a file, to nothing or round in a
+    loop, and reads a path with nothing at it, or below a file, as nothing there. The audit stops at a link
+    at or in `codex-sessions/` before it calls `_present` on that path, so no other test brings it a link."""
+    (tmp_path / "MOCK-file").write_text("MOCK\n")
+    links = {"MOCK-to-a-file": tmp_path / "MOCK-file", "MOCK-to-nothing": tmp_path / "MOCK-gone",
+             "MOCK-loop": tmp_path / "MOCK-loop"}
+    for name, target in links.items():
+        (tmp_path / name).symlink_to(target)
+    assert all(acs._present(tmp_path / name) for name in ("MOCK-file", *links))
+    assert not acs._present(tmp_path / "MOCK-gone")
+    assert not acs._present(tmp_path / "MOCK-file" / "MOCK-below")
+
+
 @pytest.mark.parametrize("line, flag", [
     ("{MOCK", "does not parse"),
     ("[1]", "is not a record"),
